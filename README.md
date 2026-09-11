@@ -1,7 +1,6 @@
-# FLOPNIX 0.8.0
+# FLOPNIX
 
-A small graphical operating system by **tar0byte**, built from scratch for
-classic x86 PCs. The kernel, desktop, shell, and 40 extensions fit on a
+An operating system built from scratch for x86 PCs. The kernel, desktop, shell, and 40 extensions fit on a
 1.44 MB floppy image.
 
 FLOPNIX has a windowed desktop, a Unix-style shell, floppy and USB file
