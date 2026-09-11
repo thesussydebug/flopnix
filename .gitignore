@@ -1,0 +1,13 @@
+/out/
+/built/
+/flopnix.img
+/flopnix.ku
+/usb.img
+/flopnix-extras/
+/.cleanup-archive-path
+/kexts/*.kx
+/kexts/apidoc_data.inc
+/src/appcatalog.inc
+*.kxo.tmp
+__pycache__/
+*.py[cod]
