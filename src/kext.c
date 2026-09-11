@@ -1,0 +1,1223 @@
+/* Loads, relocates, and tracks kernel extensions. */
+#include "os.h"
+#include "kextspace.inc"
+#include "gfxfault.inc"
+
+#define MAX_SECT 32
+
+typedef struct {
+    u8  ident[16];
+    u16 type, machine;
+    u32 version, entry, phoff, shoff, flags;
+    u16 ehsize, phentsize, phnum, shentsize, shnum, shstrndx;
+} Ehdr;
+typedef struct {
+    u32 name, type, flags, addr, offset, size, link, info, addralign, entsize;
+} Shdr;
+typedef struct {
+    u32 name, value, size;
+    u8  info, other;
+    u16 shndx;
+} Sym;
+typedef struct { u32 offset, info; } Rel;
+
+#define SHT_PROGBITS 1
+#define SHT_SYMTAB   2
+#define SHT_NOBITS   8
+#define SHT_REL      9
+#define SHF_ALLOC    2
+#define SHN_UNDEF    0
+#define SHN_ABS      0xFFF1
+#define R_386_32     1
+#define R_386_PC32   2
+
+static u32 arena;
+static u32 arena_rw;
+
+static KextInfo kexts[FS_NFILES];
+static int nkexts;
+
+u32 kext_pool_used;
+static u32 kext_priv_phys[FS_NFILES], kext_priv_len[FS_NFILES];
+
+static int kext_space[FS_NFILES];
+static int next_space;
+
+static int space_of(int k) { return k >= 0 ? kext_space[k] - 1 : -1; }
+static u8  kext_fixed_logged[FS_NFILES];
+static int cur_kext = -1;
+static int loading_kext = -1;
+
+int kext_loading(void) { return loading_kext; }
+
+int kext_owner_now(void) { return ks_owner(loading_kext, cur_kext); }
+
+void kext_enter(int k)
+{
+    if (k < 0 || k >= nkexts) return;
+    if (!kext_priv_len[k]) return;
+    preempt_disable();
+    if (k != cur_kext) {
+        cur_kext = k;
+        int sp = space_of(k);
+        if (sp >= 0) {
+
+            paging_space_switch(sp);
+        } else {
+
+            paging_space_switch(-1);
+            paging_map_kext(kext_priv_phys[k], kext_priv_len[k]);
+        }
+    }
+    preempt_enable();
+}
+
+int kext_current(void) { return cur_kext; }
+
+int kext_fix_window(u32 eip, u32 cr2)
+{
+    for (int k = 0; k < nkexts; k++) {
+        if (kexts[k].status || eip < kexts[k].base ||
+            eip >= kexts[k].base + kexts[k].size) continue;
+        if (k == cur_kext) return 0;
+        int sp = space_of(k);
+
+        if (sp >= 0) {
+            if (!ks_fixable_slot(sp, cr2, kext_priv_len[k])) return 0;
+        } else if (!ks_fixable(cr2, kext_priv_len[k])) return 0;
+        cur_kext = k;
+        if (sp >= 0) paging_space_switch(sp);
+        else { paging_space_switch(-1);
+               paging_map_kext(kext_priv_phys[k], kext_priv_len[k]); }
+
+        if (!kext_fixed_logged[k]) {
+            kext_fixed_logged[k] = 1;
+            char m[64];
+            kfmt(m, sizeof m, "window fixed for %s (missed enter)", kexts[k].name);
+            klog(m); klog("\n");
+            ktrace(m);
+        }
+        return 1;
+    }
+    return 0;
+}
+
+static int sym_find(const Ehdr *eh, const Shdr *sh, const u8 *img, u32 len,
+                    const char *want, const Sym **out_syms, u32 *out_n,
+                    const char **out_strs)
+{
+    int symi = -1;
+    for (int i = 0; i < eh->shnum; i++)
+        if (sh[i].type == SHT_SYMTAB) { symi = i; break; }
+    if (symi < 0 || sh[symi].entsize != sizeof(Sym) ||
+        sh[symi].offset + sh[symi].size > len)
+        return -1;
+    const Sym *syms = (const Sym *)(img + sh[symi].offset);
+    u32 nsyms = sh[symi].size / sizeof(Sym);
+    u32 stri = sh[symi].link;
+    if (stri >= eh->shnum || sh[stri].offset + sh[stri].size > len) return -1;
+    const char *strs = (const char *)(img + sh[stri].offset);
+    if (out_syms) { *out_syms = syms; *out_n = nsyms; *out_strs = strs; }
+    for (u32 i = 0; i < nsyms; i++)
+        if (syms[i].shndx != SHN_UNDEF && !strcmp(strs + syms[i].name, want))
+            return (int)i;
+    return -1;
+}
+
+static int elf_sanity(const u8 *img, u32 len, const Ehdr **out_eh,
+                      const Shdr **out_sh)
+{
+    const Ehdr *eh = (const Ehdr *)img;
+    if (len < sizeof(Ehdr) || img[0] != 0x7F || img[1] != 'E' ||
+        img[2] != 'L' || img[3] != 'F' || eh->ident[4] != 1 ||
+        eh->ident[5] != 1 || eh->type != 1   ||
+        eh->machine != 3  )
+        return 40;
+    if (eh->shnum == 0 || eh->shnum > MAX_SECT ||
+        eh->shentsize != sizeof(Shdr) ||
+        eh->shoff + (u32)eh->shnum * sizeof(Shdr) > len)
+        return 40;
+    *out_eh = eh;
+    *out_sh = (const Shdr *)(img + eh->shoff);
+    return 0;
+}
+
+static int peek_header(const u8 *img, u32 len, KextHeader *out)
+{
+    const Ehdr *eh; const Shdr *sh;
+    int r = elf_sanity(img, len, &eh, &sh);
+    if (r) return r;
+    const Sym *syms; u32 nsyms; const char *strs;
+    int i = sym_find(eh, sh, img, len, "kext_header", &syms, &nsyms, &strs);
+    if (i < 0) return 40;
+    const Sym *s = &syms[i];
+    if (s->shndx >= eh->shnum) return 40;
+    const Shdr *sec = &sh[s->shndx];
+    if (sec->type == SHT_NOBITS ||
+        sec->offset + s->value + sizeof(KextHeader) > len)
+        return 40;
+    memcpy(out, img + sec->offset + s->value, sizeof *out);
+    if (out->magic != KEXT_MAGIC) return 40;
+    if (out->api_version > KAPI_VERSION) return 43;
+    if (out->kind != KEXT_KIND_KERNEL && out->kind != KEXT_KIND_APP) return 40;
+    return 0;
+}
+
+static int elf_load(const u8 *img, u32 len, u32 *out_base, u32 *out_size,
+                    int (**out_entry)(const Kapi *),
+                    u32 *out_pphys, u32 *out_plen, int *out_space, int hdr_kind)
+{
+    const Ehdr *eh; const Shdr *sh;
+    int r = elf_sanity(img, len, &eh, &sh);
+    if (r) return r;
+
+    u32 shaddr[MAX_SECT];
+    for (int i = 0; i < eh->shnum; i++) shaddr[i] = 0;
+
+    u32 base = (arena + 15) & ~15u;
+    u32 p = base;
+    u32 rw = arena_rw;
+
+    int isolate = paging_active();
+    u32 priv_off = 0;
+    for (int i = 0; i < eh->shnum; i++)
+        if ((sh[i].flags & SHF_ALLOC) && sh[i].size && isolate && ks_is_private(sh[i].flags, hdr_kind))
+            ks_place(&priv_off, sh[i].size, sh[i].addralign);
+    u32 priv_phys = 0;
+    if (priv_off) {
+        if (!ks_pool_pages_fit(kext_pool_used, priv_off)) return 42;
+        priv_phys = KEXT_POOL_BASE + kext_pool_used;
+        kext_pool_used += (priv_off + 0xFFF) & ~0xFFFu;
+    }
+
+    int space = -1;
+    if (priv_off) {
+        if (next_space < KEXT_PD_MAX &&
+            paging_space_create(next_space, priv_phys, priv_off)) {
+            space = next_space++;
+            paging_space_switch(space);
+        } else {
+            paging_space_switch(-1);
+            paging_map_kext(priv_phys, priv_off);
+        }
+    }
+    *out_space = space;
+    *out_pphys = priv_phys;
+    *out_plen  = priv_off;
+
+    u32 pcur = 0;
+    for (int i = 0; i < eh->shnum; i++) {
+        if (!(sh[i].flags & SHF_ALLOC) || sh[i].size == 0) continue;
+        u32 dst;
+        if (isolate && ks_is_private(sh[i].flags, hdr_kind)) {
+            u32 off = ks_place(&pcur, sh[i].size, sh[i].addralign);
+            shaddr[i] = space >= 0 ? ks_priv_va_slot(space, off)
+                                   : ks_priv_va(off);
+
+            dst = shaddr[i];
+        } else if (sh[i].flags & SHF_WRITE_BIT) {
+
+            u32 a = sh[i].addralign ? sh[i].addralign : 1;
+            u32 q = (rw - sh[i].size) & ~(a - 1);
+            if (q < p || q > rw) return 42;
+            rw = q;
+            dst = q;
+            shaddr[i] = q;
+        } else {
+            u32 a = sh[i].addralign ? sh[i].addralign : 1;
+            p = (p + a - 1) & ~(a - 1);
+            if (p + sh[i].size > rw) return 42;
+            dst = p;
+            shaddr[i] = p;
+            p += sh[i].size;
+        }
+        if (sh[i].type == SHT_NOBITS)
+            memset((void *)dst, 0, sh[i].size);
+        else {
+            if (sh[i].offset + sh[i].size > len) return 40;
+            memcpy((void *)dst, img + sh[i].offset, sh[i].size);
+        }
+    }
+
+    const Sym *syms; u32 nsyms; const char *strs;
+    if (sym_find(eh, sh, img, len, "kext_entry", &syms, &nsyms, &strs) < 0)
+        return 41;
+    u32 symaddr[512];
+    if (nsyms > 512) return 40;
+    for (u32 i = 0; i < nsyms; i++) {
+        const Sym *s = &syms[i];
+        if (s->shndx == SHN_ABS) symaddr[i] = s->value;
+        else if (s->shndx == SHN_UNDEF) {
+            if (i && strs[s->name])
+                return 41;
+            symaddr[i] = 0;
+        } else if (s->shndx < eh->shnum) symaddr[i] = shaddr[s->shndx] + s->value;
+        else return 41;
+    }
+
+    for (int i = 0; i < eh->shnum; i++) {
+        if (sh[i].type != SHT_REL) continue;
+        u32 target = sh[i].info;
+        if (target >= eh->shnum || !shaddr[target]) continue;
+        if (sh[i].offset + sh[i].size > len || sh[i].entsize != sizeof(Rel))
+            return 40;
+        const Rel *r2 = (const Rel *)(img + sh[i].offset);
+        for (u32 n = sh[i].size / sizeof(Rel); n; n--, r2++) {
+            u32 sym = r2->info >> 8, type = r2->info & 0xFF;
+            if (sym >= nsyms) return 40;
+            u32 *where = (u32 *)(shaddr[target] + r2->offset);
+            if ((u32)where < shaddr[target] ||
+                (u32)where + 4 > shaddr[target] + sh[target].size)
+                return 40;
+            if (type == R_386_32)        *where += symaddr[sym];
+            else if (type == R_386_PC32) *where += symaddr[sym] - (u32)where;
+            else return 41;
+        }
+    }
+
+    for (u32 i = 0; i < nsyms; i++)
+        if (syms[i].shndx != SHN_UNDEF &&
+            !strcmp(strs + syms[i].name, "kext_entry")) {
+            *out_entry = (int (*)(const Kapi *))symaddr[i];
+            *out_base = base;
+            *out_size = p - base;
+            arena    = p;
+            arena_rw = rw;
+            return 0;
+        }
+    return 41;
+}
+
+extern void fault_show_banner(const char *msg);
+#include "lazy.inc"
+
+static int kext_load_locked(const char *name);
+static void drop_load_hooks(int owner);
+static Mutex load_mutex;
+extern u8 gui_up;
+
+int kext_load(const char *name)
+{
+
+    char path[FS_NAMELEN];
+    if (!name || strlen(name) >= sizeof path || loading_kext >= 0) return 40;
+    strlcpy(path, name, sizeof path);
+    mtx_lock(&load_mutex);
+    for (int i=0;i<nkexts;i++)
+        if (kexts[i].status==46 && !strcmp(kexts[i].name,path)) {
+            kexts[i].status=0; mtx_unlock(&load_mutex); return 0;
+        }
+    for (int i = 0; i < nkexts; i++)
+        if (!strcmp(kexts[i].name, path) && (!kexts[i].status || kexts[i].status == 44 || kexts[i].status == 45)) {
+            int r = kexts[i].status;
+            mtx_unlock(&load_mutex); return r;
+        }
+    int r = kext_load_locked(path);
+    mtx_unlock(&load_mutex);
+    return r;
+}
+
+static int kext_load_locked(const char *name)
+{
+    int slot = nkexts;
+    for (int i = 0; i < nkexts; i++)
+        if (kexts[i].status && !strcmp(kexts[i].name, name)) { slot = i; break; }
+    if (slot >= FS_NFILES) return 42;
+    int resident = cur_kext, pd_save = paging_space_current();
+
+    u8 *image = iobuf;
+    u32 cap = IOBUF_SZ;
+    if (gui_up) {
+        cap = 0;
+        for (int i = 0; i < FS_NFILES; i++) {
+            FsEnt *e = fs_slot(i);
+            if (e->used && !strcmp(e->name, name)) { cap = e->size; break; }
+        }
+        if (!cap || cap > IOBUF_SZ) return 40;
+        image = kmalloc(cap);
+        if (!image) return 42;
+    }
+    int n = fs_read(name, image, cap);
+    KextHeader hdr;
+    int r = n < (int)sizeof(Ehdr) ? 40 : peek_header(image, (u32)n, &hdr);
+    u32 base = 0, size = 0, pphys = 0, plen = 0;
+    int (*entry)(const Kapi *) = 0;
+    u32 arena_save = arena, rw_save = arena_rw, pool_save = kext_pool_used;
+    int ns_save = next_space;
+    int space = -1, li = lazy_file(name);
+    preempt_disable();
+    paging_arena_protect(ARENA_BASE, ARENA_END, 1);
+    if (!r) r = elf_load(image, (u32)n, &base, &size, &entry, &pphys, &plen, &space, hdr.kind);
+    if (image != iobuf) kfree(image);
+    if (r) {
+        arena = arena_save; arena_rw = rw_save; kext_pool_used = pool_save;
+        next_space = ns_save;
+    } else {
+        kext_priv_phys[slot] = pphys; kext_priv_len[slot] = plen;
+        kext_space[slot] = space + 1;
+    }
+    KextInfo *k = &kexts[slot];
+    if (slot == nkexts) nkexts++;
+    strlcpy(k->name, name, sizeof k->name);
+    strlcpy(k->hname, r ? "?" : hdr.name, sizeof k->hname);
+    k->kind = r ? 0 : hdr.kind; k->base = r ? 0 : base;
+    k->size = r ? 0 : size; k->status = r;
+    if (!r) {
+        cur_kext = slot; loading_kext = slot;
+        if (li >= 0 && lazy_types[li]) {
+            lazy_register_type = lazy_types[li] - 1; lazy_state[li] = 1;
+        }
+        volatile int rc = 1;
+        FAULT_GUARD(rc = entry(&kapi), klog("extension entry faulted\n"));
+        loading_kext = -1; lazy_register_type = -1;
+        r = rc ? 44 : 0; k->status = r;
+
+        if (r) drop_load_hooks(slot);
+        if (li >= 0) lazy_state[li] = r ? 0 : 2;
+    }
+    paging_space_switch(pd_save); cur_kext = resident;
+    paging_arena_protect(ARENA_BASE, arena & ~0xFFFu, 0);
+    preempt_enable();
+    return r;
+}
+
+static int ends_kx(const char *s)
+{
+    u32 l = strlen(s);
+    return l > 3 && s[l - 3] == '.' && s[l - 2] == 'k' && s[l - 1] == 'x';
+}
+
+static int file_kind(const char *name)
+{
+    int n = fs_read(name, iobuf, IOBUF_SZ);
+    if (n < (int)sizeof(Ehdr)) return -1;
+    KextHeader hdr;
+    if (peek_header(iobuf, (u32)n, &hdr) != 0) return -1;
+    return hdr.kind;
+}
+
+static void boot_pass(int kind, const char *kindname)
+{
+    for (int i = 0; i < FS_NFILES; i++) {
+        FsEnt *e = fs_slot(i);
+        if (!e->used || (e->attr & FS_ATTR_DIR) || !ends_kx(e->name)) continue;
+
+        if (!strncmp(e->name, "desktop/", 8)) continue;
+        if (lazy_file(e->name) >= 0) continue;
+        int k = file_kind(e->name);
+        if (k != kind && !(kind == KEXT_KIND_APP && k < 0)) continue;
+        boot_print("kext ");
+        boot_print(e->name);
+        boot_print(" (");
+        boot_print(k < 0 ? "?" : kindname);
+        boot_print(") ");
+        int r = kext_load(e->name);
+        if (r == 0) boot_print("ok\n");
+        else {
+            char c[8];
+            kfmt(c, sizeof c, "E%d", r);
+            boot_fail(c);
+        }
+    }
+}
+
+int boot_shift;
+
+void kext_boot(void)
+{
+    arena = ARENA_BASE; arena_rw = ARENA_END;
+    if (!fs_ensure()) { boot_print("extensions: no filesystem\n"); return; }
+
+    u8 sc; int skip = 0;
+    while (kbd_pop(&sc)) {
+        if ((sc & 0x7F) == 0x25) skip = 1;
+
+        if ((sc & 0x7F) == 0x2A || (sc & 0x7F) == 0x36) boot_shift = 1;
+    }
+    if (skip) { boot_print("extensions SKIPPED (K held)\n"); return; }
+
+    boot_pass(KEXT_KIND_KERNEL, "kernel");
+    lazy_catalog();
+    if (lazy_present("notes.lst")) { int nt = app_find("Notes"); if (nt >= 0) app_ensure_loaded(nt); }
+    boot_pass(KEXT_KIND_APP, "app");
+
+    if (!nkexts) boot_print("extensions: none on disk\n");
+
+    char m[80];
+    kfmt(m, sizeof m, "arena: code %xh..%xh read-only, data %xh..%xh rw",
+         ARENA_BASE, arena & ~0xFFFu, arena_rw, ARENA_END);
+    klog(m); klog("\n");
+    ktrace(m);
+
+    int shared = 0;
+    for (int i = 0; i < nkexts; i++)
+        if (!kexts[i].status && kext_priv_len[i] && space_of(i) < 0) shared++;
+    kfmt(m, sizeof m, "spaces: %d apps with a private page directory "
+         "(%xh+, 4MB each), %d on the shared window",
+         next_space, KEXT_PRIV_VA, shared);
+    klog(m); klog("\n");
+    ktrace(m);
+}
+
+int kext_count(void) { return nkexts; }
+const KextInfo *kext_get(int i) { return (i >= 0 && i < nkexts) ? &kexts[i] : 0; }
+
+const char *kext_at(u32 eip)
+{
+    for (int i = 0; i < nkexts; i++)
+        if ((!kexts[i].status || kexts[i].status == 45 || kexts[i].status == 46) && eip >= kexts[i].base &&
+            eip < kexts[i].base + kexts[i].size)
+            return kexts[i].name;
+    return 0;
+}
+
+#define MAX_CMDS 16
+static struct {
+    const char *name, *usage;
+    void (*fn)(const char *args);
+    int owner;
+} cmds[MAX_CMDS];
+static int ncmds;
+
+int register_cmd(const char *name, const char *usage, void (*fn)(const char *))
+{
+    if (ncmds >= MAX_CMDS || !name || !fn) return -1;
+    cmds[ncmds].name = name;
+    cmds[ncmds].usage = usage;
+    cmds[ncmds].fn = fn;
+    cmds[ncmds].owner = ks_owner(loading_kext, cur_kext);
+    ncmds++;
+    return 0;
+}
+
+const char *cmd_usage(const char *name)
+{
+    if (!lazy_hook(name, 0)) return 0;
+    for (int i = 0; i < ncmds; i++)
+        if ((cmds[i].owner<0 || !kexts[cmds[i].owner].status) && !strcmp(cmds[i].name, name)) return cmds[i].usage;
+    return 0;
+}
+
+int cmd_dispatch(const char *name, const char *args)
+{
+    if (!lazy_hook(name, 0)) return 1;
+    for (int i = 0; i < ncmds; i++) {
+        if (strcmp(cmds[i].name, name) || (cmds[i].owner>=0 && kexts[cmds[i].owner].status)) continue;
+        int resident = kext_current();
+        int cpu_prev = cpu_context(app_type_owned(cmds[i].owner));
+        kext_enter(cmds[i].owner);
+        FAULT_GUARD(cmds[i].fn(args), klog("command faulted\n"));
+        cpu_context(cpu_prev);
+        kext_enter(resident);
+        return 1;
+    }
+    return 0;
+}
+
+static void (*shell_fn)(const char *line);
+static int shell_owner=-1;
+void register_shell(void (*fn)(const char *line)) { shell_fn = fn; shell_owner=kext_owner_now(); }
+int shell_fallback(const char *line)
+{
+    if (!shell_fn) return 0;
+    shell_fn(line);
+    return 1;
+}
+
+#define MAX_OPENERS 8
+static struct {
+    const char *ext;
+    int (*fn)(const char *name, const char *fullpath, const u8 *data, int n);
+    int owner;
+} openers[MAX_OPENERS];
+static int nopeners;
+
+int register_opener(const char *ext,
+                    int (*fn)(const char *, const char *, const u8 *, int))
+{
+    if (nopeners >= MAX_OPENERS || !ext || !fn) return -1;
+    openers[nopeners].ext = ext;
+    openers[nopeners].fn = fn;
+    openers[nopeners].owner = ks_owner(loading_kext, cur_kext);
+    nopeners++;
+    return 0;
+}
+
+int opener_dispatch(const char *name, const char *fullpath,
+                    const u8 *data, int n)
+{
+    {
+        char tm[64];
+        kfmt(tm, sizeof tm, "file %s", fullpath ? fullpath : name);
+        ktrace(tm);
+    }
+    const char *dot = 0;
+    for (const char *p = name; *p; p++)
+        if (*p == '.') dot = p;
+
+    if (dot && !strcasecmp(dot,".kx")) {
+        char path[FS_NAMELEN];
+        const char *p=fullpath ? fullpath : name;
+        if (p[0] && p[1]==':') {
+            if (p[0]!='a' && p[0]!='A') return -1;
+            p+=2;
+        } else if (fullpath && p[0]=='/') return -1;
+        if (*p=='/') p++;
+        if (strlen(p)>=sizeof path) return -1;
+        strlcpy(path,p,sizeof path);
+        if (kext_load(path)) return -1;
+        for (int i=0;i<nkexts;i++) if (!strcmp(kexts[i].name,path)) {
+            int t=app_type_owned(i);
+            return t<0 ? 0 : (win_open(t)<0 ? -1 : 0);
+        }
+        return -1;
+    }
+    if (!lazy_hook(dot ? dot + 1 : "*", 1)) return -1;
+    int sel = -1;
+    if (dot)
+        for (int i = 0; i < nopeners && sel < 0; i++)
+            if ((openers[i].owner<0 || !kexts[openers[i].owner].status) && openers[i].ext[0] && !strcasecmp(dot + 1, openers[i].ext))
+                sel = i;
+    if (sel < 0 && !lazy_hook("*", 1)) return -1;
+    if (sel < 0)
+        for (int i = 0; i < nopeners && sel < 0; i++)
+            if ((openers[i].owner<0 || !kexts[openers[i].owner].status) && !openers[i].ext[0]) sel = i;
+    if (sel < 0) return -1;
+
+    static char cp_name[72], cp_full[128];
+    strlcpy(cp_name, name ? name : "", sizeof cp_name);
+    if (fullpath) strlcpy(cp_full, fullpath, sizeof cp_full);
+
+    int rc = -1;
+    int resident = kext_current();
+    kext_enter(openers[sel].owner);
+    FAULT_GUARD(rc = openers[sel].fn(cp_name, fullpath ? cp_full : 0, data, n),
+                { rc = -1; klog("opener faulted - file not opened\n"); });
+    kext_enter(resident);
+    return rc;
+}
+
+#define NTIMERS 16
+static struct {
+    u32 interval, next;
+    void (*fn)(void *);
+    void *ctx;
+    int owner;
+} timers[NTIMERS];
+
+int timer_add(u32 interval, void (*fn)(void *), void *ctx)
+{
+    if (!fn || !interval) return -1;
+    for (int i = 0; i < NTIMERS; i++)
+        if (!timers[i].fn) {
+            timers[i].interval = interval;
+            timers[i].next = ticks + interval;
+            timers[i].ctx = ctx;
+            timers[i].owner = ks_owner(loading_kext, cur_kext);
+            timers[i].fn = fn;
+            return i;
+        }
+    return -1;
+}
+
+void timer_del(int id)
+{
+    if (id < 0 || id >= NTIMERS) return;
+
+    if (timers[id].owner != ks_owner(loading_kext, cur_kext)) return;
+    timers[id].fn = 0;
+}
+
+static void drop_load_hooks(int owner)
+{
+    for (int i = ncmds - 1; i >= 0; i--)
+        if (cmds[i].owner == owner) { cmds[i] = cmds[--ncmds]; }
+    for (int i = nopeners - 1; i >= 0; i--)
+        if (openers[i].owner == owner) { openers[i] = openers[--nopeners]; }
+    for (int i = 0; i < NTIMERS; i++)
+        if (timers[i].owner == owner) timers[i].fn = 0;
+}
+
+extern void fault_show_banner(const char *msg);
+void timers_poll(void)
+{
+    if (!timer_alive) return;
+    int resident = kext_current();
+    for (int i = 0; i < NTIMERS; i++) {
+
+        void (*fn)(void *) = timers[i].fn;
+        if (!fn) continue;
+        if ((i32)(ticks - timers[i].next) < 0) continue;
+        timers[i].next = ticks + timers[i].interval;
+        int cpu_prev = cpu_context(app_type_owned(timers[i].owner));
+        kext_enter(timers[i].owner);
+        FAULT_GUARD(fn(timers[i].ctx), ({
+            char msg[72];
+            const char *who = kext_at(fault_eip);
+            kfmt(msg, sizeof msg, "%s timer crashed - stopped",
+                 who ? who : "an extension");
+            klog(msg);
+            if (!fault_fallback[thr_self]) fault_show_banner(msg);
+            timers[i].fn = 0;
+        }));
+        cpu_context(cpu_prev);
+    }
+    kext_enter(resident);
+}
+
+#define NKHOOKS 4
+static int (*khooks[NKHOOKS])(int k);
+static int  khook_owner[NKHOOKS];
+
+int register_key_hook(int (*fn)(int k))
+{
+    for (int i = 0; i < NKHOOKS; i++)
+        if (!khooks[i]) {
+            khooks[i] = fn;
+            khook_owner[i] = kext_owner_now();
+            return 0;
+        }
+    return -1;
+}
+
+void unregister_key_hook(int (*fn)(int k))
+{
+    for (int i = 0; i < NKHOOKS; i++)
+        if (khooks[i] == fn) khooks[i] = 0;
+}
+
+int key_hook_dispatch(int k)
+{
+    int resident = kext_current();
+    for (int i = 0; i < NKHOOKS; i++) {
+        if (!khooks[i]) continue;
+        int (*fn)(int) = khooks[i];
+        volatile int ate = 0;
+        kext_enter(khook_owner[i]);
+        FAULT_GUARD(ate = fn(k), {
+            khooks[i] = 0;
+            klog("key hook faulted - unregistered\n");
+        });
+        if (ate) { kext_enter(resident); return 1; }
+    }
+    kext_enter(resident);
+    return 0;
+}
+
+#define NSHUT 8
+static void (*shut_fns[NSHUT])(void);
+static int  shut_owner[NSHUT];
+
+void register_shutdown(void (*fn)(void))
+{
+    for (int i = 0; i < NSHUT; i++)
+        if (!shut_fns[i]) {
+            shut_fns[i] = fn;
+            shut_owner[i] = kext_owner_now();
+            return;
+        }
+}
+
+void shutdown_run(void)
+{
+    for (int i = 0; i < NSHUT; i++) {
+        if (!shut_fns[i]) continue;
+        void (*fn)(void) = shut_fns[i];
+        kext_enter(shut_owner[i]);
+
+        FAULT_GUARD(fn(), klog("shutdown hook faulted - skipped\n"));
+    }
+}
+
+#define NSERV 16
+static struct { char name[16]; const void *ops; int owner; } servs[NSERV];
+static unsigned gfx_disabled;
+
+static unsigned graphics_bit(const char *name)
+{
+    return !strcmp(name, "gdi") ? 1u : !strcmp(name, "g3d") ? 2u : 0u;
+}
+
+unsigned kext_graphics_fault(u32 vec, u32 eip, u32 addr)
+{
+    unsigned hit = 0;
+    for (int i = 0; i < NSERV; i++) {
+        if (!servs[i].ops || servs[i].owner < 0) continue;
+        const KextInfo *k = &kexts[servs[i].owner];
+        if ((eip >= k->base && eip - k->base < k->size) ||
+            (vec == 14 && addr >= k->base && addr - k->base < k->size))
+            hit |= graphics_bit(servs[i].name);
+    }
+    unsigned disable = gf_disable(vec, hit & 1, hit & 2, gfx_disabled);
+    gfx_disabled |= disable;
+    for (int i = 0; i < NSERV; i++)
+        if (servs[i].ops && (graphics_bit(servs[i].name) & disable) && servs[i].owner >= 0)
+            kexts[servs[i].owner].status = 45;
+    return disable;
+}
+
+int register_service(const char *name, const void *ops)
+{
+    if (!name || !name[0] || !ops) return -1;
+    if (graphics_bit(name) & gfx_disabled) return -1;
+    for (int i = 0; i < NSERV; i++)
+        if (servs[i].ops && !strcmp(servs[i].name, name)) {
+            servs[i].ops = ops;
+            servs[i].owner = kext_owner_now();
+            return 0;
+        }
+    for (int i = 0; i < NSERV; i++)
+        if (!servs[i].ops) {
+            strlcpy(servs[i].name, name, sizeof servs[i].name);
+            servs[i].ops = ops;
+            servs[i].owner = kext_owner_now();
+            return 0;
+        }
+    return -1;
+}
+
+const void *service_get(const char *name)
+{
+    if (!name || (graphics_bit(name) & gfx_disabled)) return 0;
+    for (int i = 0; i < NSERV; i++)
+        if (servs[i].ops && !strcmp(servs[i].name, name)) return servs[i].ops;
+    return 0;
+}
+
+#define NLISTEN 16
+static void (*listeners[NLISTEN])(const char *event, const char *data);
+static int lis_owner[NLISTEN];
+
+int on_event(void (*fn)(const char *, const char *))
+{
+    if (!fn) return -1;
+    for (int i = 0; i < NLISTEN; i++)
+        if (!listeners[i]) { listeners[i] = fn; lis_owner[i] = ks_owner(loading_kext, cur_kext); return 0; }
+    return -1;
+}
+void off_event(void (*fn)(const char *, const char *))
+{
+    for (int i = 0; i < NLISTEN; i++)
+        if (listeners[i] == fn) listeners[i] = 0;
+}
+void broadcast(const char *event, const char *data)
+{
+
+    static char ev[32], dt[64];
+    strlcpy(ev, event ? event : "", sizeof ev);
+    strlcpy(dt, data ? data : "", sizeof dt);
+    event = ev;
+    data = dt;
+
+    int resident = kext_current();
+
+    for (int i = 0; i < NLISTEN; i++)
+        if (listeners[i]) {
+            kext_enter(lis_owner[i]);
+
+            FAULT_GUARD(listeners[i](event, data ? data : ""), {
+                klog("event listener faulted - dropped\n");
+                listeners[i] = 0;
+            });
+        }
+    kext_enter(resident);
+}
+
+int kext_unload(int owner)
+{
+    int r=-1;
+    mtx_lock(&load_mutex); preempt_disable();
+    if (owner<0 || owner>=nkexts || kexts[owner].status) goto done;
+    r=-2;
+    if (kexts[owner].kind!=KEXT_KIND_APP || (shell_fn && shell_owner==owner) || services_kext_busy(owner) || irq_kext_busy(owner)) goto done;
+    for (int i=0;i<NTIMERS;i++) if (timers[i].fn && timers[i].owner==owner) goto done;
+    for (int i=0;i<NKHOOKS;i++) if (khooks[i] && khook_owner[i]==owner) goto done;
+    for (int i=0;i<NSHUT;i++) if (shut_fns[i] && shut_owner[i]==owner) goto done;
+    for (int i=0;i<NSERV;i++) if (servs[i].ops && servs[i].owner==owner) goto done;
+    for (int i=0;i<NLISTEN;i++) if (listeners[i] && lis_owner[i]==owner) goto done;
+    r=-3;
+    if (owner==kext_owner_now() || thread_kext_busy(owner)) goto done;
+    for (int i=0;i<MAXWIN;i++)
+        if (wins[i].used && app_type_owner(wins[i].type)==owner) goto done;
+    overlay_drop_owner(owner);
+    kexts[owner].status=46; r=0;
+ done:
+    preempt_enable(); mtx_unlock(&load_mutex); return r;
+}
+
+static FsEnt *kapi_fs_slot(int i)
+{
+    return fs_ensure() ? fs_slot(i) : 0;
+}
+static void kapi_outb(u16 p, u8 v)  { outb(p, v); }
+static u8   kapi_inb(u16 p)         { return inb(p); }
+static void kapi_outw(u16 p, u16 v) { outw(p, v); }
+static u16  kapi_inw(u16 p)         { return inw(p); }
+static void kapi_outl(u16 p, u32 v) { outl(p, v); }
+static u32  kapi_inl(u16 p)         { return inl(p); }
+
+static void kapi_dirty(void)        { gui_dirty = 1; }
+static u32  kapi_mem_kb(void)       { return BOOTINFO->mem_kb; }
+
+static u32 kapi_boot_info(int what)
+{
+    switch (what) {
+    case BI_SCREEN_W:   return BOOTINFO->w;
+    case BI_SCREEN_H:   return BOOTINFO->h;
+    case BI_PITCH:      return BOOTINFO->pitch;
+    case BI_BPP:        return BOOTINFO->bpp;
+    case BI_VBE_MODE:   return BOOTINFO->vbe;
+    case BI_LFB_ADDR:   return BOOTINFO->lfb;
+    case BI_MEM_KB:     return BOOTINFO->mem_kb;
+    case BI_BOOT_DIAG:  return BOOTINFO->diag;
+    case BI_BOOT_STAGE: return BOOTINFO->stage;
+    case BI_EBDA_SEG:    return bda_ebda_seg;
+    case BI_BASE_MEM_KB: return bda_base_mem_kb;
+    }
+    return 0;
+}
+
+static void kapi_insw(u16 p, void *buf, u32 n)
+{
+    __asm__ volatile("rep insw" : "+D"(buf), "+c"(n) : "d"(p) : "memory");
+}
+
+static void kapi_outsw(u16 p, const void *buf, u32 n)
+{
+    __asm__ volatile("rep outsw" : "+S"(buf), "+c"(n) : "d"(p));
+}
+
+static void kapi_sleep_ms(u32 ms)
+{
+    if (timer_alive) {
+        u32 t0 = ticks, span = (ms + 9) / 10;
+        while ((u32)(ticks - t0) < span) gui_pump();
+    } else
+        for (volatile u32 i = 0; i < ms * 20000; i++) ;
+}
+
+extern char __bss_end[], __bss_start[], __load_end[];
+
+static u32 mem_stat(int what)
+{
+    switch (what) {
+    case MI_TOTAL_KB:     return BOOTINFO->mem_kb;
+    case MI_KERNEL_BASE:  return 0x8000u;
+    case MI_KERNEL_END:   return (u32)__bss_end;
+    case MI_DMA_BASE:     return (u32)DMABUF;
+    case MI_DMA_END:      return MEM_DMA_BASE + 65536;
+    case MI_FB_BASE:      return (u32)BACKBUF;
+    case MI_FB_END:       return (u32)BACKBUF + (u32)SW * SH;
+    case MI_STACK_TOP:    return MEM_STACK_TOP;
+    case MI_KERNEL_BYTES: return (u32)__load_end - 0x8000u + (u32)__bss_end - (u32)__bss_start;
+    case MI_IO_BASE:      return MEM_IO_BASE;
+    case MI_IO_END:       return MEM_IO_END;
+    case MI_ARENA_BASE:   return ARENA_BASE;
+    case MI_ARENA_END:    return ARENA_END;
+    case MI_ARENA_RO:     return arena - ARENA_BASE;
+    case MI_ARENA_RW:     return ARENA_END - arena_rw;
+    case MI_POOL_BASE:    return KEXT_POOL_BASE;
+    case MI_POOL_END:     return KEXT_POOL_END;
+    case MI_POOL_USED:    return kext_pool_used;
+    case MI_HEAP_BASE:    return heap_base();
+    case MI_HEAP_END:     return heap_end();
+    case MI_HEAP_FREE:    return heap_avail();
+    case MI_HEAP_LARGEST: return heap_largest();
+    case MI_HEAP_BLOCKS:  return heap_blocks();
+    case MI_PAGING:       return (u32)paging_active();
+    case MI_PAGES:        return paging_pages_mapped();
+    }
+    return 0;
+}
+
+Kapi kapi = {
+    .version        = KAPI_VERSION,
+    .os_version     = OS_VER,
+
+    .fill_rect      = fill_rect,
+    .hline          = hline,
+    .vline          = vline,
+    .bevel          = bevel,
+    .panel          = panel,
+    .draw_char      = draw_char,
+    .draw_text      = draw_text,
+    .draw_text_clip = draw_text_clip,
+    .draw_text_clip2 = draw_text_clip2,
+    .draw_sbar      = draw_sbar,
+    .sbar_from_pos  = sbar_from_pos,
+    .focus_rect     = focus_rect,
+    .blit           = blit,
+    .palette_rgb    = palette_rgb,
+    .palette_nearest = palette_nearest,
+    .screen_w       = &SW,
+    .screen_h       = &SH,
+
+    .register_app   = register_app,
+    .app_find       = app_find,
+    .win_open       = win_open,
+    .win_fit_client = win_fit_client,
+    .win_is_focused = win_is_focused,
+    .mouse_x        = &mx,
+    .mouse_y        = &my,
+    .gui_blink      = &gui_blink,
+
+    .register_cmd   = register_cmd,
+    .shell_print    = shell_print,
+
+    .register_opener = register_opener,
+    .open_with      = opener_dispatch,
+
+    .fs_read        = fs_read,
+    .fs_write       = fs_write,
+    .fs_delete      = fs_delete,
+    .fs_exists      = fs_exists,
+    .fs_free_kb     = fs_free_kb,
+    .fs_slot        = kapi_fs_slot,
+    .ext_type       = ext_type,
+
+    .fat_mount      = fat_mount,
+    .fat_list       = fat_list,
+    .fat_read       = fat_read,
+    .fat_write      = fat_write,
+    .fat_delete     = fat_delete,
+    .fat_writable   = fat_writable,
+    .fat_label      = fat_label,
+    .fat_total_kb   = fat_total_kb,
+    .fat_free_kb    = fat_free_kb,
+
+    .net_up         = net_up,
+    .net_dhcp       = net_dhcp,
+    .net_ping       = net_ping,
+    .net_parse_ip   = net_parse_ip,
+    .net_get        = net_get,
+    .net_set        = net_set,
+    .net_mac        = net_mac_get,
+
+    .usb_present    = usb_present,
+    .usb_read       = usb_read,
+    .usb_write      = usb_write,
+    .usb_capacity_kb = usb_capacity_kb,
+    .usb_capacity_sectors = usb_capacity_sectors,
+    .usb_model      = usb_model,
+
+    .register_fat   = register_fat,
+    .register_net   = register_net,
+
+    .outb           = kapi_outb,
+    .inb            = kapi_inb,
+    .outw           = kapi_outw,
+    .inw            = kapi_inw,
+    .outl           = kapi_outl,
+    .inl            = kapi_inl,
+
+    .cfg            = CFG,
+    .config_save    = config_save,
+    .reboot         = reboot,
+
+    .ticks          = &ticks,
+    .timer_alive    = &timer_alive,
+    .rtc_read       = rtc_read,
+    .rtc_now_dos    = rtc_now_dos,
+    .dos_fmt        = dos_fmt,
+
+    .kfmt           = kfmt,
+    .strlen         = strlen,
+    .strcmp         = strcmp,
+    .strncmp        = strncmp,
+    .strcasecmp     = strcasecmp,
+    .strlcpy        = strlcpy,
+    .memcpy         = memcpy,
+    .memmove        = memmove,
+    .memset         = memset,
+    .human_size     = human_size,
+    .human_size_kb  = human_size_kb,
+
+    .iobuf          = (u8 *)MEM_IO_BASE,
+    .iobuf_size     = IOBUF_SZ,
+
+    .register_desktop = register_desktop,
+    .clip_set       = clip_set,
+    .clip_get       = clip_get,
+    .clip_type      = clip_type,
+    .menu_show      = menu_show,
+    .drag_start     = drag_start,
+    .drag_active    = drag_active,
+    .set_overlay    = set_overlay,
+    .gui_dirty      = kapi_dirty,
+    .cpu_brand      = cpu_brand,
+    .cpu_mhz        = cpu_mhz,
+    .mem_total_kb   = kapi_mem_kb,
+    .kext_count     = kext_count,
+    .kext_get       = kext_get,
+
+    .pixel          = pixel,
+    .getpixel       = getpixel,
+    .line           = line,
+    .rect           = rect,
+    .circle         = circle,
+    .fill_circle    = fill_circle,
+    .blit_key       = blit_key,
+    .read_rect      = read_rect,
+    .draw_text_scaled = draw_text_scaled,
+    .set_clip       = set_clip,
+    .clear_clip     = clear_clip,
+    .palette_set    = palette_set,
+    .font_glyph     = font_glyph,
+
+    .win_set_title  = win_set_title,
+    .win_close_self = win_close_self,
+    .win_focus      = win_focus,
+    .win_slot       = win_slot,
+    .win_max        = win_max,
+    .anim_claim     = anim_claim,
+    .mouse_buttons  = mouse_buttons,
+    .kbd_mods       = kbd_mods,
+
+    .kmalloc        = kmalloc,
+    .kfree          = kfree,
+    .heap_avail     = heap_avail,
+
+    .timer_add      = timer_add,
+    .timer_del      = timer_del,
+    .register_key_hook   = register_key_hook,
+    .unregister_key_hook = unregister_key_hook,
+    .register_shutdown   = register_shutdown,
+
+    .register_service = register_service,
+    .service_get    = service_get,
+
+    .boot_info      = kapi_boot_info,
+    .cpuid_raw      = cpuid_raw,
+    .tsc_read       = tsc_read,
+    .pci_cfg_read   = pci_cfg_read,
+    .pci_cfg_write  = pci_cfg_write,
+    .pci_find       = pci_find,
+    .irq_register   = irq_register,
+    .irq_unregister = irq_unregister,
+    .insw_rep       = kapi_insw,
+    .outsw_rep      = kapi_outsw,
+
+    .speaker_tone   = speaker_tone,
+    .speaker_off    = speaker_off,
+
+    .sleep_ms       = kapi_sleep_ms,
+    .rtc_write      = rtc_write,
+
+    .atoi           = k_atoi,
+    .strstr         = k_strstr,
+    .strchr         = k_strchr,
+    .toupper        = k_toupper,
+    .tolower        = k_tolower,
+    .ksort          = ksort,
+    .rand           = krand,
+    .rand_seed      = krand_seed,
+
+    .klog           = klog,
+    .klog_read      = klog_read,
+
+    .shell_exec     = shell_exec,
+
+    .kernel_update  = kernel_update,
+    .kernel_update_data = kernel_update_data,
+    .usb_gen        = usb_generation,
+
+    .msgbox         = msgbox,
+    .notify         = notify,
+    .file_picker    = file_picker,
+    .progress_open  = progress_open,
+    .progress_set   = progress_set,
+    .progress_close = progress_close,
+    .register_dialogs = register_dialogs,
+    .clip_set_text  = clip_set_text,
+    .clip_get_text  = clip_get_text,
+    .broadcast      = broadcast,
+    .on_event       = on_event,
+    .off_event      = off_event,
+    .bmp_load       = bmp_load,
+    .text_width     = text_width,
+    .font_height    = font_height,
+    .text_fit       = text_fit,
+    .cursor_hide    = cursor_hide,
+    .cursor_shape   = cursor_shape,
+    .mouse_warp     = mouse_warp,
+    .present        = present,
+    .dclick         = dclick,
+    .drag_rect_begin = drag_rect_begin,
+    .drag_rect_get  = drag_rect_get,
+    .uuid_gen       = uuid_gen,
+    .path_base      = path_base,
+    .path_ext       = path_ext,
+    .path_dir       = path_dir,
+    .path_join      = path_join,
+    .date_fmt       = date_fmt,
+    .b64_encode     = b64_encode,
+    .b64_decode     = b64_decode,
+    .crc32          = crc32,
+    .hash_fnv       = hash_fnv,
+    .ms_open        = ms_open,
+    .ms_alloc       = ms_alloc,
+    .ms_free        = ms_free,
+    .ms_write       = ms_write,
+    .ms_read        = ms_read,
+    .ms_seek        = ms_seek,
+    .shell_history_count = shell_history_count,
+    .shell_history  = shell_history,
+    .surface_lock   = surface_lock,
+    .surface_unlock = surface_unlock,
+    .clip_rect_get  = clip_rect_get,
+
+    .set_overlay_key = set_overlay_key,
+    .file_save      = file_save,
+
+    .net_dns        = net_dns,
+    .net_http_get   = net_http_get,
+    .gui_pump       = gui_pump,
+
+    .term_clear     = term_clear,
+    .term_fx        = term_fx,
+    .term_hist      = term_hist,
+    .win_close      = shell_win_close,
+    .disk_read      = fdc_read,
+    .fs_defrag      = fs_defrag,
+    .register_shell = register_shell,
+    .mem_used_kb    = used_kb,
+    .cmd_usage      = cmd_usage,
+    .dmesg          = dmesg_print,
+    .cpu_usage      = cpu_usage,
+    .app_count      = app_count,
+    .app_desc       = app_desc,
+    .kext_load      = kext_load,
+    .key_down       = key_is_down,
+    .fault_count    = fault_count,
+    .fault_get      = fault_get,
+    .fs_mkdir       = fs_mkdir,
+    .fs_is_dir      = fs_is_dir,
+    .fs_rename      = fs_rename,
+    .fs_rename_dir  = fs_rename_dir,
+    .fs_dir_count   = fs_dir_count,
+    .fat_mkdir      = fat_mkdir,
+    .fat_rename     = fat_rename,
+    .fat_can_mkdir  = fat_can_mkdir,
+    .fat_rmdir      = fat_rmdir,
+    .busy_set       = busy_set,
+    .busy_end       = busy_end,
+    .os_build_date  = OS_BUILD_DATE,
+    .mem_mapped     = paging_mapped,
+    .threads        = threads_print,
+    .ktrace         = ktrace,
+    .disk_stat      = fdc_stat,
+    .shell_cwd      = shell_cwd_get,
+    .shell_set_cwd  = shell_cwd_set,
+    .mem_info       = mem_stat,
+    .ring3_ready    = ring3_active,
+    .ring3_test     = ring3_selftest,
+    .fs_touch       = fs_touch,
+    .fat_exists     = fat_exists,
+    .esc_arm        = esc_arm,
+    .esc_pending    = esc_pending,
+    .mem_writable   = paging_writable,
+    .mem_poke       = mem_poke,
+    .win_is_hovered = win_is_hovered,
+    .net_sntp       = net_sntp,
+    .kext_unload    = kext_unload,
+};

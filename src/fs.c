@@ -1,0 +1,359 @@
+/* Stores FLOPFS files on the boot floppy. */
+#include "os.h"
+#include "fsplan.inc"
+#include "fsdefrag.inc"
+#include "fspath.inc"
+
+#define FS_SUPER 288
+#define FS_TABLE 289
+#define FS_TSECT 10
+#define FS_DATA  299
+#define FS_END   2880
+#define FS_MAGIC 0x53465046
+#define FS_VER   2
+
+static FsEnt table[FS_NFILES];
+static int mounted;
+
+static int flush_table(void)
+{
+    u8 sec[512];
+    memset(sec, 0, 512);
+    *(u32 *)sec = FS_MAGIC;
+    *(u32 *)(sec + 4) = FS_VER;
+    *(u32 *)(sec + 8) = sizeof(FsEnt);
+    if (fdc_write(FS_SUPER, sec) != 0) return 0;
+    for (int i = 0; i < FS_TSECT; i++)
+        if (fdc_write(FS_TABLE + i, (u8 *)table + i * 512) != 0) return 0;
+    return 1;
+}
+
+int fs_ensure(void)
+{
+    if (mounted) return mounted > 0;
+    u8 sec[512];
+    if (fdc_read(FS_SUPER, sec) != 0) { mounted = -1; return 0; }
+    int ok = *(u32 *)sec == FS_MAGIC &&
+             *(u32 *)(sec + 4) == FS_VER &&
+             *(u32 *)(sec + 8) == sizeof(FsEnt);
+    if (ok) {
+        for (int i = 0; i < FS_TSECT; i++)
+            if (fdc_read(FS_TABLE + i, (u8 *)table + i * 512) != 0) {
+                mounted = -1;
+                return 0;
+            }
+    } else {
+        memset(table, 0, sizeof table);
+        if (!flush_table()) { mounted = -1; return 0; }
+    }
+    mounted = 1;
+    return 1;
+}
+
+FsEnt *fs_slot(int i)
+{
+    return (i >= 0 && i < FS_NFILES) ? &table[i] : 0;
+}
+
+static FsEnt *find(const char *name)
+{
+    for (int i = 0; i < FS_NFILES; i++)
+        if (table[i].used && !strcmp(table[i].name, name))
+            return &table[i];
+    return 0;
+}
+
+int fs_exists(const char *name)
+{
+    return fs_ensure() && find(name) != 0;
+}
+
+static int alloc(int n)
+{
+    for (int start = FS_DATA; start + n <= FS_END; ) {
+        int clash = 0;
+        for (int i = 0; i < FS_NFILES; i++) {
+            FsEnt *e = &table[i];
+            if (!e->used) continue;
+            if (start < e->start + e->nsect && e->start < start + n) {
+                start = e->start + e->nsect;
+                clash = 1;
+                break;
+            }
+        }
+        if (!clash) return start;
+    }
+    return -1;
+}
+
+int fs_read(const char *name, u8 *buf, u32 max)
+{
+    if (!fs_ensure()) return -1;
+    FsEnt *e = find(name);
+    if (!e) return -1;
+    u32 size = e->size < max ? e->size : max;
+    u8 sec[512];
+    u32 got = 0;
+    for (u16 s = 0; got < size; s++) {
+        if (fdc_read(e->start + s, sec) != 0) return FS_EIO;
+        u32 n = size - got < 512 ? size - got : 512;
+        memcpy(buf + got, sec, n);
+        got += n;
+    }
+    return (int)size;
+}
+
+int fs_write(const char *name, const u8 *buf, u32 size)
+{
+
+    if (!fs_name_ok(name)) return -1;
+    if (!fs_ensure()) return -1;
+    if (size > (u32)(FS_END - FS_DATA) * 512) return -2;
+    int nsect = (size + 511) / 512;
+    if (nsect == 0) nsect = 1;
+
+    FsEnt *e = find(name);
+
+    if (e && (e->attr & FS_ATTR_DIR)) return -3;
+
+    FsEnt *grow = 0;
+    FsEnt saved = {0};
+    int existed = (e != 0);
+    if (existed) saved = *e;
+    if (e && nsect > e->nsect) { grow = e; e = 0; }
+    if (!e) {
+        int start = alloc(nsect);
+        if (start < 0) return -2;
+        if (grow) e = grow;
+        else {
+            int i;
+            for (i = 0; i < FS_NFILES && table[i].used; i++) ;
+            if (i == FS_NFILES) return -2;
+            e = &table[i];
+            memset(e, 0, sizeof *e);
+            strlcpy(e->name, name, FS_NAMELEN);
+            e->used = 1;
+        }
+        e->start = start;
+        e->nsect = nsect;
+    }
+    e->size = size;
+    e->mtime = rtc_now_dos();
+
+    u8 sec[512];
+    for (int s = 0; s < nsect; s++) {
+        u32 off = s * 512;
+        u32 n = size - off < 512 ? size - off : 512;
+        memset(sec, 0, 512);
+        memcpy(sec, buf + off, n);
+        if (fdc_write(e->start + s, sec) != 0) {
+
+            if (existed) *e = saved;
+            else e->used = 0;
+            flush_table();
+            return -1;
+        }
+    }
+    return flush_table() ? 0 : -1;
+}
+
+int fs_delete(const char *name)
+{
+    if (!fs_ensure()) return -1;
+    FsEnt *e = find(name);
+    if (!e) return -1;
+    e->used = 0;
+    return flush_table() ? 0 : -1;
+}
+
+int fs_mkdir(const char *name)
+{
+    if (!fs_dirname_ok(name)) return -1;
+    if (!fs_ensure()) return -1;
+    if (find(name)) return -1;
+    int i;
+    for (i = 0; i < FS_NFILES && table[i].used; i++) ;
+    if (i == FS_NFILES) return -2;
+    FsEnt *e = &table[i];
+    memset(e, 0, sizeof *e);
+    strlcpy(e->name, name, FS_NAMELEN);
+    e->used  = 1;
+    e->attr  = FS_ATTR_DIR;
+    e->size  = 0;
+    e->nsect = 0;
+    e->start = 0;
+    e->mtime = rtc_now_dos();
+    return flush_table() ? 0 : -1;
+}
+
+int fs_is_dir(const char *name)
+{
+    if (!fs_ensure()) return 0;
+    FsEnt *e = find(name);
+    return e && (e->attr & FS_ATTR_DIR);
+}
+
+int fs_touch(const char *name)
+{
+    if (!fs_ensure()) return FS_EIO;
+    FsEnt *e = find(name);
+    if (!e) return -1;
+    e->mtime = rtc_now_dos();
+    return flush_table() ? 0 : FS_EIO;
+}
+
+int fs_rename(const char *oldname, const char *newname)
+{
+    if (!newname || !newname[0]) return -1;
+    if (!fs_ensure()) return -1;
+    if (!strcmp(oldname, newname)) return 0;
+    FsEnt *e = find(oldname);
+    if (!e) return -1;
+    if (find(newname)) return -1;
+    int l = 0;
+    while (newname[l]) l++;
+    if (l >= FS_NAMELEN) return -1;
+    strlcpy(e->name, newname, FS_NAMELEN);
+    return flush_table() ? 0 : -1;
+}
+
+int fs_rename_dir(const char *olddir, const char *newdir)
+{
+    if (!fs_dirname_ok(newdir)) return -1;
+    if (fs_under(newdir,olddir)) return -1;
+    if (!fs_ensure()) return -1;
+    if (!strcmp(olddir, newdir)) return 0;
+    if (find(newdir)) return -1;
+    for(int i=0;i<FS_NFILES;i++)
+        if(table[i].used&&fs_under(table[i].name,newdir))return -1;
+
+    char nn[FS_NAMELEN];
+    int hits = 0;
+    for (int i = 0; i < FS_NFILES; i++) {
+        if (!table[i].used) continue;
+        if (!strcmp(table[i].name, olddir)) { hits++; continue; }
+        if (!fs_under(table[i].name, olddir)) continue;
+        if (!fs_rejoin(table[i].name, olddir, newdir, nn, FS_NAMELEN)) return -2;
+        if (find(nn)) return -1;
+        hits++;
+    }
+    if (!hits) return -1;
+
+    for (int i = 0; i < FS_NFILES; i++) {
+        if (!table[i].used) continue;
+        if (!strcmp(table[i].name, olddir)) {
+            strlcpy(table[i].name, newdir, FS_NAMELEN);
+            continue;
+        }
+        if (!fs_under(table[i].name, olddir)) continue;
+        if (fs_rejoin(table[i].name, olddir, newdir, nn, FS_NAMELEN))
+            strlcpy(table[i].name, nn, FS_NAMELEN);
+    }
+    return flush_table() ? 0 : -1;
+}
+
+int fs_dir_count(const char *dir)
+{
+    if (!fs_ensure()) return 0;
+    int n = 0;
+    for (int i = 0; i < FS_NFILES; i++)
+        if (table[i].used && fs_under(table[i].name, dir)) n++;
+    return n;
+}
+
+static int dfg_rd(u32 lba, u8 *sec)
+{
+    for (int t = 0; t < 3; t++) {
+        if (fdc_read(lba, sec) == 0) return 0;
+        gui_pump();
+    }
+    return -1;
+}
+static int dfg_wr(u32 lba, const u8 *sec)
+{
+    for (int t = 0; t < 3; t++) {
+        if (fdc_write(lba, sec) == 0) return 0;
+        gui_pump();
+    }
+    return -1;
+}
+
+int fs_defrag(void (*prog)(int done, int total))
+{
+    if (!fs_ensure()) return -1;
+    static FpEnt e[FS_NFILES];
+    for (int i = 0; i < FS_NFILES; i++) {
+        e[i].used = table[i].used;
+        e[i].start = table[i].start;
+        e[i].sects = table[i].nsect;
+        e[i].idx = (u8)i;
+    }
+    int moves = fs_plan(e, FS_NFILES, FS_DATA);
+    if (!moves) return 0;
+
+    int done = 0;
+    u8 sec[512];
+    for (int i = 0; i < FS_NFILES && e[i].used; i++) {
+        if (e[i].nstart == e[i].start) continue;
+
+        if (e[i].nstart < FS_DATA || e[i].start < FS_DATA) {
+            klog("defrag: refused a plan below the data area\n");
+            return -1;
+        }
+        int r = fsd_move(dfg_rd, dfg_wr,
+                         e[i].start, e[i].nstart, e[i].sects, sec);
+        if (r != FSD_MOVED) {
+            klog("defrag stopped at ");
+            klog(table[e[i].idx].name);
+            klog(r == FSD_TORN ? " - file DAMAGED\n"
+               : r == FSD_RESTORED ? " - file copied back, intact\n"
+               : " - file untouched, intact\n");
+            return r;
+        }
+        table[e[i].idx].start = e[i].nstart;
+
+        int fl = 0;
+        for (int t = 0; t < 3 && !(fl = flush_table()); t++) gui_pump();
+        if (!fl) {
+
+            klog("defrag: table flush failed after moving ");
+            klog(table[e[i].idx].name);
+            klog(" - do not reboot before it succeeds\n");
+            return FSD_TORN;
+        }
+        if (prog) prog(++done, moves);
+    }
+    return moves;
+}
+
+u32 fs_free_kb(void)
+{
+    if (!fs_ensure()) return 0;
+    u32 used = 0;
+    for (int i = 0; i < FS_NFILES; i++)
+        if (table[i].used) used += table[i].nsect;
+    return (FS_END - FS_DATA - used) / 2;
+}
+
+const char *ext_type(const char *name)
+{
+    const char *dot = 0;
+    for (const char *p = name; *p; p++)
+        if (*p == '.') dot = p;
+    if (!dot || !dot[1]) return "File";
+    const char *e = dot + 1;
+    if (!strcasecmp(e,"fpa") || !strcasecmp(e,"pz")) return "Archive";
+    if (!strcasecmp(e, "txt") || !strcasecmp(e, "md") ||
+        !strcasecmp(e, "log") || !strcasecmp(e, "cfg") ||
+        !strcasecmp(e, "ini")) return "Text";
+    if (!strcasecmp(e, "c") || !strcasecmp(e, "h")) return "C source";
+    if (!strcasecmp(e, "asm") || !strcasecmp(e, "s")) return "Assembly";
+    if (!strcasecmp(e, "sh") || !strcasecmp(e, "bat") ||
+        !strcasecmp(e, "cmd")) return "Script";
+    if (!strcasecmp(e, "bin") || !strcasecmp(e, "img") ||
+        !strcasecmp(e, "dat")) return "Binary";
+    if (!strcasecmp(e, "bmp") || !strcasecmp(e, "raw")) return "Image";
+    if (!strcasecmp(e, "mid") || !strcasecmp(e, "midi")) return "Music";
+    if (!strcasecmp(e, "kx")) return "KExt";
+    return "File";
+}
