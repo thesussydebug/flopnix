@@ -824,6 +824,12 @@ int fat_rename(const char *path, const char *newname)
 {
     if (!fat_writable()) return -1;
     if (!newname || !newname[0]) return -1;
+    int namelen = strlen(newname);
+    if (newname[0] == ' ' || newname[0] == '.' ||
+        newname[namelen-1] == ' ' || newname[namelen-1] == '.') return -1;
+    for (const char *p=newname; *p; p++)
+        if ((u8)*p < 32 || *p=='/' || *p=='\\' || *p==':' || *p=='*' ||
+            *p=='?' || *p=='"' || *p=='<' || *p=='>' || *p=='|') return -1;
     char dir[96]; const char *fname;
     split_path(path, dir, sizeof dir, &fname);
     if (!fname[0]) return -1;
@@ -832,6 +838,7 @@ int fat_rename(const char *path, const char *newname)
     if (!resolve_dir(dir, &dclus, &r16)) return -1;
     u8 oldraw[11], newraw[11];
     if (dir_scan(dclus, r16, 1, fname, 0, 0, 0, 0, 0, oldraw) <= 0) return -1;
+    if (!strcasecmp(fname,newname)) return 0;
     int taken = dir_scan(dclus, r16, 1, newname, 0, 0, 0, 0, 0, newraw);
     if (taken < 0) return -1;
     if (taken && strcasecmp(fname,newname)) return -1;

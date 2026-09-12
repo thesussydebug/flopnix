@@ -82,7 +82,7 @@ static int tw_resolve(const char *base,const char *ref,char *out)
         int cut=auth;
         if(ref[0]!='/'){
             cut=auth;for(int i=auth;i<b&&base[i]!='?'&&base[i]!='#';i++)if(base[i]=='/')cut=i+1;
-            if(ref[0]=='?'||ref[0]=='#'){cut=auth;while(base[cut]&&base[cut]!='?'&&base[cut]!='#')cut++;}
+            if(ref[0]=='?'||ref[0]=='#'){cut=auth;while(base[cut]&&base[cut]!='#'&&(ref[0]=='#'||base[cut]!='?'))cut++;}
         }
         if(cut+r+2>=TW_URL)return 0;
         tw_copy(tmp,TW_URL,base,cut);

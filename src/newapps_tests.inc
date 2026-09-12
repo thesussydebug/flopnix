@@ -133,6 +133,9 @@ static void t_newapps(void)
     CHECK(tw_resolve("http://host/a/b", "../c", dest));
     CHECK(tw_eq(dest, "http://host/c"));
     CHECK(tw_resolve("http://host/a/b", "/test", dest) && tw_eq(dest, "http://host/test"));
+    CHECK(tw_resolve("http://host/search?q=floppy#old", "#next", dest) && tw_eq(dest, "http://host/search?q=floppy#next"));
+    CHECK(tw_resolve("http://host?q=floppy", "#next", dest) && tw_eq(dest, "http://host/?q=floppy#next"));
+    CHECK(tw_resolve("http://host/search?q=old#old", "?q=new", dest) && tw_eq(dest, "http://host/search?q=new"));
     APP_TEST_PHASE("rendering");
     static TwPage page;
     tw_render(&page, "<p>Hello &amp; world</p><script>bad()</script><a href='next'>Next</a>", 1, "http://host/a");

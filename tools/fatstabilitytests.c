@@ -110,5 +110,13 @@ int main(int argc,char **argv){
     reset();memmove(disk+64*512,disk,8192*512);memset(disk,0,64*512);volume_sectors=8256;
     disk[510]=0x55;disk[511]=0xaa;u8 *part=disk+0x1be + 16;part[4]=6;put32(part+8,64);put32(part+12,8192);
     CHECK(fat_mount()&&fat_lba==65);CHECK(fat_write("/file.txt",payload,512)==0);CHECK(fat_read("/file.txt",result,512)==512&&!memcmp(payload,result,512));
+    reset();CHECK(fat_write("/long~1.txt",payload,512)==0);long_name("Long File.txt");
+    int saved_writes=writes;CHECK(fat_rename("/Long File.txt","Long File.txt")==0&&writes==saved_writes);
+    const char *bad_names[]={".","..","../gone.txt","dir/file.txt","bad\\name","bad:name","bad*name","bad?name","bad name ","name."};
+    for(unsigned i=0;i<sizeof bad_names/sizeof *bad_names;i++){
+        reset();CHECK(fat_write("/keep.txt",payload,512)==0);saved_writes=writes;
+        CHECK(fat_rename("/keep.txt",bad_names[i])<0&&writes==saved_writes);
+        CHECK(fat_read("/keep.txt",result,512)==512&&!memcmp(payload,result,512));
+    }
     printf("FAT stability: %d checks, %d failures\n",checks,failures);return failures?1:0;
 }
