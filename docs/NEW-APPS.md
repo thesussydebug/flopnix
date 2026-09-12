@@ -49,7 +49,12 @@ decimal places. Negative numbers and fractions are not accepted.
 
 ## Archive Manager (`archive.kx`)
 
-Choose Add for each file, enter the output name in Save as, then Save. The
+Drag one or more files from the desktop or Files into Archive Manager, or
+choose Add. Files can come from any browsable folder on A: or USB. Their
+contents are copied into the archive; the originals stay in place. Folder
+drops are refused; open the folder and select its files instead. Duplicate
+names and unreadable or oversized files are skipped with a status message.
+Enter the output name in Save as, then Save. The
 default is `desktop/files.fpa`. The list shows original and packed byte sizes;
 Remove changes the archive, not the source file. Open reads `.fpa` archives or
 the shell's existing `.pz` single-file format. Double-clicking either type in
@@ -159,3 +164,9 @@ allocation failures, and oversized-file protection. Run
 archive save/reopen/extract on disposable QEMU images; both scenarios also
 edit and save a full 128 KiB file. Build `kexts/newappstest.c` first with
 `tools/mkkext.sh`.
+
+`tools/archivedroptests.c` checks dropped paths, multiple selections, skipped
+files, allocation failures, and callback reentry. After building, run
+`python tools/archivedropgui.py --memory 8` for mouse-driven desktop, nested
+folder, multiple-selection, and USB drops, followed by archive saving and
+byte-for-byte checks. Its floppy and USB images are disposable.
