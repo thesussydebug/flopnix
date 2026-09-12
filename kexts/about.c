@@ -27,14 +27,13 @@ static void about_draw(Win *w, int cx, int cy, int cw, int ch)
     api->draw_text(cx + 14, cy + 74, "a Unix-like OS written in C", C_BLACK);
     api->draw_text(cx + 14, cy + 90, "for floppy disk nerds like", C_BLACK);
     api->draw_text(cx + 14, cy + 106, "yourself.", C_BLACK);
-    api->draw_text(cx + 14, cy + 122, "now with kernel extensions", C_G0 + 4);
 }
 
 static void about_csize(int inst, int *w, int *h)
 {
     (void)inst;
     *w = 336;
-    *h = 152;
+    *h = 128;
 }
 
 const KextHeader kext_header = {
