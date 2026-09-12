@@ -9,10 +9,26 @@ static u8 *data;
 static ArEntry entries[AR_FILES];
 static u32 length=8;
 static u32 capacity=AR_CAP;
+static u32 allocated;
 static int count,selected,scroll,dirty,type=-1,alive,extract_all,focus;
 static char filename[28],message[100];static TextField field;
 static void say(const char *s){api->strlcpy(message,s,sizeof message);api->gui_dirty();}
-static int reserve(void){if(!data){capacity=api->heap_avail()>AR_CAP+AR_FILE+4096?AR_CAP:65536;data=api->kmalloc(capacity+1);if(data)ar_empty(data);}if(!data){say("Not enough memory. Close another app and try again.");return 0;}return 1;}
+static int reserve(void)
+{
+    if(!data){capacity=ar_buffer_limit(api->mem_total_kb());allocated=64;data=api->kmalloc(allocated+1);if(data)ar_empty(data);}
+    if(!data){say("Not enough memory. Close another app and try again.");return 0;}return 1;
+}
+static int grow(u32 wanted)
+{
+    if(wanted>capacity)wanted=capacity;
+    if(wanted<=allocated)return 1;
+    u32 room=api->mem_info(MI_HEAP_LARGEST);
+    if(room<=4097)return 0;
+    if(wanted>room-4097)wanted=room-4097;
+    if(wanted<=allocated)return 0;
+    u8 *next=api->kmalloc(wanted+1);if(!next)return 0;
+    api->memcpy(next,data,length);api->kfree(data);data=next;allocated=wanted;return 1;
+}
 static void clear(void)
 {
     if(data)ar_empty(data);length=8;count=selected=scroll=dirty=0;
@@ -22,23 +38,45 @@ static void clear(void)
 static int validate(void)
 {
     count=ar_index(data,length,entries);if(count<0)return 0;
-    u8 *raw=api->kmalloc(AR_FILE);if(!raw){say("Not enough memory to check this archive.");return -1;}
-    int ok=1;for(int i=0;i<count;i++)if(lz_unpack(data+entries[i].offset,entries[i].packed,raw,AR_FILE)!=(int)entries[i].raw){ok=0;break;}
+    u32 needed=1;for(int i=0;i<count;i++)if(entries[i].raw>needed)needed=entries[i].raw;
+    u8 *raw=api->kmalloc(needed);if(!raw){say("Not enough memory to check this archive.");return -1;}
+    int ok=1;for(int i=0;i<count;i++)if(lz_unpack(data+entries[i].offset,entries[i].packed,raw,needed)!=(int)entries[i].raw){ok=0;break;}
     api->kfree(raw);return ok;
 }
 static void opened(int i){(void)i;alive=1;if(!data)clear();else say(dirty?"Your unsaved archive is still here. Save it to keep it.":"Select a file to extract, or add more files.");}
-static void closed(int i){(void)i;alive=0;if(!dirty&&data){api->kfree(data);data=0;}}
+static void closed(int i){(void)i;alive=0;if(!dirty&&data){api->kfree(data);data=0;allocated=0;}}
 static const char *leaf(const char *s){const char *b=s;for(;*s;s++)if(*s=='/'||*s==':')b=s+1;return b;}
 static int read_path(const char *p,u8 *b,u32 cap){if((p[0]=='u'||p[0]=='U')&&p[1]==':')return api->fat_read(p+2,b,cap);if((p[0]=='a'||p[0]=='A')&&p[1]==':')p+=2;return api->fs_read(p,b,cap);}
+static int path_size(const char *p,u32 *size)
+{
+    if((p[0]=='u'||p[0]=='U')&&p[1]==':'){
+        p+=2;const char *b=leaf(p);int n=(int)(b-p);char dir[96];
+        if(n>=(int)sizeof dir)return 0;
+        if(n>1)n--;if(!n){dir[0]='/';n=1;}else api->memcpy(dir,p,n);dir[n]=0;
+        FatEnt *items=api->kmalloc(128*sizeof *items);if(!items)return 0;
+        int count=api->fat_list(dir,items,128),found=0;
+        for(int i=0;i<count;i++)if(!items[i].is_dir&&!api->strcasecmp(items[i].name,b)){*size=items[i].size;found=1;break;}
+        api->kfree(items);return found;
+    }
+    if((p[0]=='a'||p[0]=='A')&&p[1]==':')p+=2;
+    for(int i=0;i<FS_NFILES;i++){FsEnt *e=api->fs_slot(i);if(e&&e->used&&!(e->attr&FS_ATTR_DIR)&&!api->strcmp(e->name,p)){*size=e->size;return 1;}}
+    return 0;
+}
 static void load_path(const char *p)
 {
     if(!alive||!p||!reserve())return;
+    u32 expected;
+    if(!path_size(p,&expected)||expected>capacity){say("Archive is unreadable or exceeds this computer's archive limit.");return;}
+    u32 needed=expected<=capacity-36?expected+36:expected;
+    grow(needed);
+    if(allocated<expected){say("Not enough memory to open this archive. Close another app.");return;}
     api->busy_set("Archive Manager","Reading and checking archive...",-1);
-    int n=read_path(p,data,capacity+1),ok=0;
+    int n=read_path(p,data,expected+1),ok=0;
+    if(n!=(int)expected)n=-1;
     if(n>=LZ_HDR&&data[0]=='P'&&data[1]=='Z'&&data[2]=='1'&&!data[3]){
 
         const char *b=leaf(p);int len=(int)api->strlen(b);
-        if(len>3&&len-3<24&&n+36<=(int)capacity){
+        if(len>3&&len-3<24&&n+36<=(int)allocated){
             api->memmove(data+36,data,(u32)n);ar_empty(data);api->memset(data+8,0,28);
             api->memcpy(data+8,b,(u32)len-3);data[4]=1;lz_put32(data+32,(u32)n);n+=36;
         }else n=-1;
@@ -59,13 +97,18 @@ static void add_path(const char *p,void *ctx)
     const char *b=leaf(p);if(!ar_name(b)){say("Use a file name of 1-23 simple characters.");return;}
     if(count>=AR_FILES){say("This archive already has 32 files.");return;}
     for(int i=0;i<count;i++)if(ar_same(entries[i].name,b)){say("That file name is already in the archive.");return;}
-    u8 *raw=api->kmalloc(AR_FILE+1);if(!raw){say("Not enough memory to add a file.");return;}
+    u32 expected;
+    if(!path_size(p,&expected)){say("Could not find or read that file.");return;}
+    if(expected>AR_FILE){say("Files can be at most 128 KiB each.");return;}
+    char name[24];api->strlcpy(name,b,sizeof name);
+    u8 *raw=api->kmalloc(expected+1);if(!raw){say("Not enough memory to add a file. Close another app.");return;}
     api->busy_set("Archive Manager","Reading and compressing file...",-1);
-    int n=read_path(p,raw,AR_FILE+1);u32 packed=0;
-    if(n>=0&&n<=(int)AR_FILE&&length+28<capacity)packed=lz_pack(raw,(u32)n,data+length+28,capacity-length-28);
+    int n=read_path(p,raw,expected+1);u32 packed=0;
+    if(n!=(int)expected)n=-1;
+    if(n>=0){grow(length+28+LZ_HDR+(u32)n);if(length+28<allocated)packed=lz_pack(raw,(u32)n,data+length+28,allocated-length-28);}
     api->kfree(raw);api->busy_end();
-    if(!packed){say(n<0?"Could not read that file.":n>(int)AR_FILE?"Files can be at most 64 KiB each.":"Archive buffer is full. Save this archive and start another.");return;}
-    api->memset(data+length,0,24);api->strlcpy((char *)data+length,b,24);lz_put32(data+length+24,packed);
+    if(!packed){say(n<0?"Could not read the complete file.":allocated<capacity?"Not enough memory to add this file. Close another app.":"Archive buffer is full. Save this archive and start another.");return;}
+    api->memset(data+length,0,24);api->strlcpy((char *)data+length,name,24);lz_put32(data+length+24,packed);
     length+=28+packed;data[4]=(u8)++count;ar_index(data,length,entries);selected=count-1;dirty=1;
     say("File added. Save the archive when you are ready.");
 }
@@ -113,14 +156,15 @@ static void extract_to(const char *p,void *ctx)
     }
     for(int i=0;i<FS_NFILES;i++){FsEnt *e=api->fs_slot(i);if(e&&!e->used)slots++;}
     if(slots<last-first||sectors>api->fs_free_kb()*2){say("There is not enough free space for these files.");return;}
-    u8 *raw=api->kmalloc(AR_FILE);if(!raw){say("Not enough memory to extract files.");return;}
+    u32 needed=1;for(int i=first;i<last;i++)if(entries[i].raw>needed)needed=entries[i].raw;
+    u8 *raw=api->kmalloc(needed);if(!raw){say("Not enough memory to extract files.");return;}
     api->esc_arm();int done=0,error=0;
 
-    for(int i=first;i<last;i++)if(lz_unpack(data+entries[i].offset,entries[i].packed,raw,AR_FILE)!=(int)entries[i].raw){error=1;break;}
+    for(int i=first;i<last;i++)if(lz_unpack(data+entries[i].offset,entries[i].packed,raw,needed)!=(int)entries[i].raw){error=1;break;}
     if(!error)for(int i=first;i<last;i++){
         if(api->esc_pending()){error=2;break;}
         api->busy_set("Extracting files",entries[i].name,(i-first)*256/(last-first));
-        int n=lz_unpack(data+entries[i].offset,entries[i].packed,raw,AR_FILE);
+        int n=lz_unpack(data+entries[i].offset,entries[i].packed,raw,needed);
         if(n<0||api->fs_exists(names[i])||api->fs_write(names[i],raw,(u32)n)!=0){error=1;break;}
         done++;api->broadcast("file.saved",names[i]);
     }
@@ -142,7 +186,7 @@ static void confirmed(int result,void *ctx)
 static void action(int n)
 {
     if(n<2){if(dirty)api->msgbox("Discard changes?","This archive has unsaved changes. Discard them?",MB_YESNO,confirmed,(void *)(u32)n);else confirmed(MBR_YES,(void *)(u32)n);}
-    else if(n==2)api->file_picker("Add a file (up to 64 KiB)",0,0,add_path,0);
+    else if(n==2)api->file_picker("Add a file (up to 128 KiB)",0,0,add_path,0);
     else if(n==3)remove_selected();else if(n==4)save();
     else if(count){extract_all=n==6;api->file_picker("Extract to a folder on A:",0,1,extract_to,0);}
 }
@@ -167,7 +211,7 @@ static void draw(Win *w,int x,int y,int cw,int ch)
     api->draw_text(x+12,y+ch-82,"Save as",C_GRAY);af_draw(&field,x+78,y+ch-88,cw-90,focus);
     ui_button(x,y,ui_r(12,ch-56,144,24),"Extract selected",0,count>0);
     ui_button(x,y,ui_r(162,ch-56,112,24),"Extract all",0,count>0);
-    char t[44];api->kfmt(t,sizeof t,"%d files, %u KiB",count,(length+1023)/1024);api->draw_text_clip(x+286,y+ch-51,t,C_GRAY,cw-298);
+    char t[44];api->kfmt(t,sizeof t,"%u/%u KiB",(length+1023)/1024,(data?capacity:ar_buffer_limit(api->mem_total_kb()))/1024);api->draw_text_clip(x+286,y+ch-51,t,C_GRAY,cw-298);
     ui_status(x,y,cw,ch,message);
 }
 static void key(int i,int k)

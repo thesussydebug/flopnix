@@ -61,9 +61,15 @@ Existing destinations are refused. On cancellation or a disk error, the status
 reports how many files completed; those files remain available. There is no
 claim of atomic extraction or recovery from a physical write failure.
 
-Limits: 32 files, at most 64 KiB per source file, and a 128 KiB archive buffer.
-When available heap is small, the buffer is 64 KiB instead, allowing use on
-4 MB machines. Sources and archives may be read from A: or USB; saving and
+Limits: 32 files and at most 128 KiB per source file. The archive buffer limit
+is 128 KiB below 8 MB RAM, 256 KiB at 8 MB, 512 KiB at 16 MB, and 1 MiB at
+32 MB or above. Tier selection rounds the BIOS-reported size up to the next
+whole MiB so reserved firmware memory does not put an 8 MB machine in the
+4 MB tier. Space is allocated as needed; file data and archive metadata
+must fit together in the buffer. Temporary file buffers also need free RAM,
+so an operation can report insufficient memory before reaching the limit.
+The size indicator shows used space and the current computer's archive limit.
+Sources and archives may be read from A: or USB; saving and
 extraction currently target A:. Files are stored by basename, without folders
 or original timestamps. The complete destination path must fit FLOPFS's
 23-character limit. Duplicate names, traversal paths and invalid headers are
@@ -145,3 +151,11 @@ Every completed build stages the image, kernel update and all production kexts
 in `built/`, as required by AGENTS.md. Run `python tools/checkbuild.py` to compare
 the complete staged set with the outputs and the bytes installed in the image,
 check the kernel boot checksum, and reject missing or extra extensions.
+
+The focused host suites `tools/archivelimittests.c` and
+`tools/editlimits_tests.c` cover the 128 KiB file boundary, memory tiers,
+allocation failures, and oversized-file protection. Run
+`python tools/archivelimitgui.py --memory 4` and `--memory 8` to exercise
+archive save/reopen/extract on disposable QEMU images; both scenarios also
+edit and save a full 128 KiB file. Build `kexts/newappstest.c` first with
+`tools/mkkext.sh`.

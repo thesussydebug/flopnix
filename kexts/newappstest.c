@@ -13,6 +13,8 @@ static void command(const char *s)
     if(!api->strcmp(s,"imports")){check(api->kext_load("desktop/import.kx")==41,"unresolved import rejected before entry");}
     else if(!api->strncmp(s,"open ",5)){int t=api->app_find(s+5);check(t>=0&&api->win_open(t)>=0,"app opened");}
     else if(!api->strncmp(s,"focus ",6)){int t=api->app_find(s+6);if(t>=0)api->win_focus(t,0);}
+    else if(!api->strncmp(s,"close ",6)){int t=api->app_find(s+6);if(t>=0)api->win_close_self(t,0);}
+    else if(!api->strncmp(s,"read ",5)){int n=api->fs_read(s+5,api->iobuf,api->iobuf_size);check(n>=0&&api->open_with(s+5,0,api->iobuf,n)>=0,"loaded file opener");}
     else if(!api->strncmp(s,"folder ",7)){check(!api->kext_load("sys/files.kx"),"Files loaded");api->broadcast("folder.open",s+7);}
     else if(!api->strcmp(s,"folders")){
         const u8 bytes[]={1,2,3,255};u8 read[4];

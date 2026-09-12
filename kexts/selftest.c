@@ -1094,7 +1094,13 @@ static void t_memory_layout(void)
     CHECK(m.heap_end - m.heap >= 128u * 1024u);
     m = memory_layout(3968); CHECK(m.heap_end - m.heap >= 176u * 1024u);
     m = memory_layout(8192); CHECK(m.pool_end <= 8192u * 1024u);
+    CHECK(m.heap == MEM_IO_END && m.heap_end == 8192u * 1024u);
+    m = memory_layout(4096); CHECK(m.heap == MEM_IO_END && m.heap_end == 0x400000u);
+    m = memory_layout(6144); CHECK(m.heap_end == 6144u * 1024u);
+    m = memory_layout(9215); CHECK(m.heap == MEM_IO_END && m.heap_end == 9215u * 1024u);
+    m = memory_layout(0); CHECK(m.heap_end == 0x400000u);
     m = memory_layout(9216); CHECK(m.pool == 0x800000u && m.pool_end == 0x900000u);
+    CHECK(m.heap == 0x700000u && m.heap_end == 0x800000u);
     m = memory_layout(2048); CHECK(m.heap_end == m.heap);
     CHECK(ks_pool_pages_fit(KEXT_POOL_END - KEXT_POOL_BASE - 4096, 4096));
     CHECK(!ks_pool_pages_fit(KEXT_POOL_END - KEXT_POOL_BASE - 4096, 4097));

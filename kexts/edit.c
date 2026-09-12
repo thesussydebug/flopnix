@@ -80,7 +80,7 @@ enum { EM_NONE, EM_OPEN, EM_FIND, EM_GUARD };
 enum { PA_NONE, PA_NEW, PA_OPEN };
 
 typedef struct {
-    char buf[FS_MAXFILE];
+    char *buf;
     int  len, cur, scroll;
     int  xscroll;
     int  cols, rows;
@@ -137,6 +137,19 @@ static void ed_reset(void)
     E->mod = E->ro = 0;
     E->mode = EM_NONE;
     E->msg[0] = 0;
+    if (E->buf) E->buf[0] = 0;
+}
+
+static int edit_buffer(void)
+{
+    if (!E->buf) {
+        E->buf = api->kmalloc(FS_MAXFILE + 1);
+        if (E->buf) E->buf[0] = 0;
+    }
+    if (E->buf) return 1;
+    E->ro = 1;
+    strlcpy(E->msg, "Not enough memory to open this file", sizeof E->msg);
+    return 0;
 }
 
 static void edit_new(int inst)
@@ -146,6 +159,15 @@ static void edit_new(int inst)
     E->wrap = 0;
     E->cols = edcols;
     E->rows = edrows;
+    edit_buffer();
+}
+
+static void edit_close(int inst)
+{
+    E = &eds[inst];
+    if (E->buf) api->kfree(E->buf);
+    E->buf = 0;
+    ed_reset();
 }
 
 static void strip_cr(void)
@@ -154,38 +176,37 @@ static void strip_cr(void)
     for (int i = 0; i < E->len; i++)
         if (E->buf[i] != '\r') E->buf[o++] = E->buf[i];
     E->len = o;
+    E->buf[o] = 0;
 }
 
 static void mark_truncated(void)
 {
     E->ro = 1;
-    strlcpy(E->msg, "big file: first 64 KB, read-only", sizeof E->msg);
+    strlcpy(E->msg, "First 128 KiB only; read-only", sizeof E->msg);
 }
 
 static void edit_load(int inst, const char *name)
 {
     E = &eds[inst];
     ed_reset();
-    int n = fs_read(name, (u8 *)E->buf, sizeof E->buf);
+    if (!edit_buffer()) return;
+    Ed *keep = E;
+    int n = fs_read(name, (u8 *)keep->buf, FS_MAXFILE + 1);
+    E = keep;
     if (n < 0) { strlcpy(E->msg, "read error", sizeof E->msg); return; }
-    E->len = n;
+    E->len = n > FS_MAXFILE ? FS_MAXFILE : n;
     strip_cr();
     strlcpy(E->name, name, FS_NAMELEN);
-    for (int i = 0; i < FS_NFILES; i++) {
-        FsEnt *e = fs_slot(i);
-        if (e && e->used && !strcmp(e->name, name)) {
-            if (e->size > sizeof E->buf) mark_truncated();
-            break;
-        }
-    }
+    if (n > FS_MAXFILE) mark_truncated();
 }
 
 static int edit_seed(int inst, const char *name, const u8 *d, int n)
 {
     E = &eds[inst];
     ed_reset();
+    if (!edit_buffer()) return -1;
     int trunc = 0;
-    if (n > (int)sizeof E->buf) { n = sizeof E->buf; trunc = 1; }
+    if (n > FS_MAXFILE) { n = FS_MAXFILE; trunc = 1; }
     if (n < 0) n = 0;
     memcpy(E->buf, d, n);
     E->len = n;
@@ -196,13 +217,14 @@ static int edit_seed(int inst, const char *name, const u8 *d, int n)
 
 static void edit_open_a(int inst, const char *name, const u8 *d, int n)
 {
-    if (edit_seed(inst, name, d, n)) mark_truncated();
+    if (edit_seed(inst, name, d, n) > 0) mark_truncated();
 }
 
 static void edit_open_usb(int inst, const char *name, const char *fullpath,
                    const u8 *d, int n)
 {
     int trunc = edit_seed(inst, name, d, n);
+    if (trunc < 0) return;
     strlcpy(E->fullpath, fullpath, sizeof E->fullpath);
     E->src = 1;
     E->ro = fat_writable() ? 0 : 1;
@@ -211,14 +233,16 @@ static void edit_open_usb(int inst, const char *name, const char *fullpath,
 
 static void ed_load_usb(const char *fullpath)
 {
-    int n = fat_read(fullpath, iobuf, FS_MAXFILE + 512);
+    ed_reset();
+    if (!edit_buffer()) return;
+    Ed *keep = E;
+    int n = fat_read(fullpath, (u8 *)keep->buf, FS_MAXFILE + 1);
+    E = keep;
     const char *nm = fullpath;
     for (const char *p = fullpath; *p; p++) if (*p == '/') nm = p + 1;
-    if (n < 0) { ed_reset(); strlcpy(E->msg, "usb read error", sizeof E->msg); return; }
-    ed_reset();
+    if (n < 0) { strlcpy(E->msg, "usb read error", sizeof E->msg); return; }
     int trunc = 0;
     if (n > FS_MAXFILE) { n = FS_MAXFILE; trunc = 1; }
-    memcpy(E->buf, iobuf, n);
     E->len = n;
     strip_cr();
     strlcpy(E->name, nm, FS_NAMELEN);
@@ -329,10 +353,12 @@ static void ed_layout(int cw, int ch, int *textW, int *textH, int *hbar)
 static void ins(char ch)
 {
     if (E->ro) { strlcpy(E->msg, "read-only (Save copies)", sizeof E->msg); return; }
-    if (E->len >= (int)sizeof E->buf - 1) { strlcpy(E->msg, "buffer full", sizeof E->msg); return; }
+    if (!edit_buffer()) return;
+    if (E->len >= FS_MAXFILE) { strlcpy(E->msg, "128 KiB buffer full", sizeof E->msg); return; }
     memmove(E->buf + E->cur + 1, E->buf + E->cur, E->len - E->cur);
     E->buf[E->cur++] = ch;
     E->len++;
+    E->buf[E->len] = 0;
     E->mod = 1;
     E->msg[0] = 0;
 }
@@ -341,6 +367,7 @@ static void del_at(int i)
     if (E->ro || i < 0 || i >= E->len) return;
     memmove(E->buf + i, E->buf + i + 1, E->len - i - 1);
     E->len--;
+    E->buf[E->len] = 0;
     E->mod = 1;
     E->msg[0] = 0;
 }
@@ -358,9 +385,12 @@ static void move_vert(int delta)
 
 static void save_write(void)
 {
+    if (!E->buf) { strlcpy(E->msg, "Not enough memory to save", sizeof E->msg); return; }
+    Ed *keep = E;
     int r;
     if (E->src == 1) r = fat_write(E->fullpath, (u8 *)E->buf, E->len);
     else             r = fs_write(E->name, (u8 *)E->buf, E->len);
+    E = keep;
     if (r == 0)       { E->mod = 0; strlcpy(E->msg, E->src ? "saved to USB" : "saved", sizeof E->msg); }
     else if (r == -2) strlcpy(E->msg, "disk full", sizeof E->msg);
     else if (r == -3) strlcpy(E->msg, "that name is a folder", sizeof E->msg);
@@ -374,6 +404,11 @@ static void save_picked(const char *path, void *ctx)
     int drive;
     char bare[sizeof E->fullpath];
     sh_spec_split(path, &drive, bare, sizeof bare);
+    if (E->ro && drive == E->src &&
+        (drive ? !strcasecmp(bare, E->fullpath) : !strcmp(bare, E->name))) {
+        strlcpy(E->msg, "Choose a different file name", sizeof E->msg);
+        return;
+    }
     if (drive == 0) {
         strlcpy(E->name, bare, FS_NAMELEN);
         E->src = 0; E->fullpath[0] = 0;
@@ -388,6 +423,7 @@ static void save_picked(const char *path, void *ctx)
 
 static void do_save(void)
 {
+    if (!E->buf) { strlcpy(E->msg, "Not enough memory to save", sizeof E->msg); return; }
     if (E->name[0] && !E->ro) { save_write(); return; }
     api->file_save("Save As", "", E->name[0] ? E->name : "untitled.txt",
                    save_picked, E);
@@ -801,7 +837,7 @@ int kext_entry(const Kapi *k)
     static const AppDesc d = {
         .title = "Editor", .max_inst = MAXINST, .resizable = 1, .in_menu = 1,
         .open = edit_new, .draw = edit_draw, .key = edit_key,
-        .mouse = edit_mouse, .client_size = edit_csize,
+        .mouse = edit_mouse, .client_size = edit_csize, .close = edit_close,
         .min_client = edit_min_client,
     };
     edit_type = api->register_app(&d);

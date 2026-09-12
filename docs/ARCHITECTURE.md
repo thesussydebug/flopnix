@@ -86,7 +86,7 @@ memory:  0x8000..load_end     kernel image (under 0x30000)
 | Framebuffer capacity | `0x190000..0x1E0000` | `0x400000..0x500000` |
 | Shared app code/service data | `0x1E0000..0x270000` | `0x600000..0x700000` |
 | Private app pages | `0x30000..0x80000` | `0x800000..0x900000` |
-| Heap | `0x3B4000..min(RAM,0x400000)` | `0x700000..0x800000` |
+| Heap | `0x3B4000..RAM` (4 MB fallback if RAM size is unknown) | `0x700000..0x800000` |
 
 `memory_layout()` selects these reservations before paging starts. Compact
 mode limits the requested video mode to 640x480 so the backbuffer fits. Its

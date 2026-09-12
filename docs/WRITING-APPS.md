@@ -168,6 +168,12 @@ has what you use.
 
 ## 5. Files
 
+The file dialogs return paths and do not cap the selected file's size.
+`FS_MAXFILE` is 128 KiB; Editor accepts that many bytes and keeps larger-file
+previews read-only. Its buffers are allocated per open window and released
+when that window closes. Other apps must still enforce their own actual
+buffer bounds and handle allocation failures.
+
 ```c
 int n = api->fs_read("notes.txt", buf, sizeof buf);      /* A: floppy */
 api->fs_write("notes.txt", buf, n);

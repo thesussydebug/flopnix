@@ -81,7 +81,7 @@ enum {
 };
 
 #define FS_NAMELEN 24
-#define FS_MAXFILE 65536
+#define FS_MAXFILE 131072
 
 #define FS_NFILES 128
 typedef struct {

@@ -2,8 +2,17 @@
 #pragma once
 #include "lz.inc"
 #define AR_FILES 32
-#define AR_CAP 131072u
-#define AR_FILE 65536u
+#define AR_CAP 1048576u
+#define AR_FILE 131072u
+
+static inline u32 ar_buffer_limit(u32 memory_kb)
+{
+    u32 memory_mb=memory_kb/1024+(memory_kb%1024!=0);
+    if (memory_mb >= 32) return AR_CAP;
+    if (memory_mb >= 16) return 524288u;
+    if (memory_mb >= 8) return 262144u;
+    return 131072u;
+}
 typedef struct { char name[24]; u32 offset, packed, raw; } ArEntry;
 static int ar_name(const char *s)
 {
