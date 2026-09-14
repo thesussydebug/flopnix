@@ -102,6 +102,11 @@ static void tetris_open(int inst)
     reset();
     if (timer_id < 0) timer_id = api->timer_add(2, tick, 0);
 }
+static void tetris_close(int inst)
+{
+    (void)inst;
+    if (timer_id >= 0) { api->timer_del(timer_id); timer_id = -1; }
+}
 
 static void tetris_key(int inst, int k)
 {
@@ -250,7 +255,7 @@ int kext_entry(const Kapi *k)
     gfx = gdi_bind(k, 11);
     static const AppDesc d = {
         .title = "Tetris", .max_inst = 1, .in_menu = 1,
-        .open = tetris_open, .draw = tetris_draw,
+        .open = tetris_open, .close = tetris_close, .draw = tetris_draw,
         .key = tetris_key, .client_size = tetris_csize,
         .category = APP_CAT_GAMES,
     };

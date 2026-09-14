@@ -78,6 +78,7 @@ static void pong_close(int inst)
     (void)inst;
     beep_left = 0;
     api->speaker_off();
+    if (timer_id >= 0) { api->timer_del(timer_id); timer_id = -1; }
 }
 
 static void pong_open(int inst)

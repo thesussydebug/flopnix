@@ -90,8 +90,8 @@ static int ft_size(const Kapi *k,int drive,const char *path,u32 *size)
         }}return FT_MISSING;
     }
     static FatEnt entries[128];char dir[64];const char *base=ft_leaf(path);
-    int len=(int)(base-path);if(len>=64)return FT_PATH;
-    if(len>1)len--;k->memcpy(dir,path,len);dir[len]=0;if(!len)k->strlcpy(dir,"/",sizeof dir);
+    int len=(int)(base-path);if(len>1)len--;if(len>=64)return FT_PATH;
+    k->memcpy(dir,path,len);dir[len]=0;if(!len)k->strlcpy(dir,"/",sizeof dir);
     int count=k->fat_list(dir,entries,128);if(count<0)return FT_READ;
     for(int i=0;i<count;i++)if(!k->strcasecmp(entries[i].name,base)){
         if(entries[i].is_dir)return FT_FOLDER;*size=entries[i].size;return 0;

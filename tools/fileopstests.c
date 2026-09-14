@@ -90,6 +90,9 @@ int main(void)
     CHECK(ft_transfer(&k,"u:/two/",0,"",FT_COPY,dst,&moved)==0&&equal(0,"two/b.fpa",bytes,4));
     CHECK(ft_transfer(&k,"u:/two/",1,"/TWO/child",FT_COPY,dst,&moved)==FT_PATH);
     CHECK(ft_transfer(&k,"a:missing/",1,"/",FT_COPY,dst,&moved)==FT_MISSING);
+    char deep[96],spec[98];memset(deep,'d',63);deep[0]='/';strcpy(deep+63,"/deep.fpa");uw(deep,bytes,4);
+    snprintf(spec,sizeof spec,"u:%s",deep);
+    CHECK(ft_transfer(&k,spec,0,"desktop",FT_COPY,dst,&moved)==0&&equal(0,"desktop/deep.fpa",bytes,4));
     printf("FILE OPS: %d checks, %d failures\n",checks,fails);free(large);
     for(int i=0;i<128;i++)free(disk[i].bytes);return fails!=0;
 }

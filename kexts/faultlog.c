@@ -152,6 +152,11 @@ static void fl_open(int inst)
     sel_valid = 0;
     if (timer_id < 0) timer_id = api->timer_add(50, tick, 0);
 }
+static void fl_close(int inst)
+{
+    (void)inst;
+    if (timer_id >= 0) { api->timer_del(timer_id); timer_id = -1; }
+}
 
 static void fl_csize(int inst, int *w, int *h) { (void)inst; *w = WINW; *h = WINH; }
 
@@ -166,7 +171,7 @@ int kext_entry(const Kapi *k)
     gfx = gdi_bind(k, 11);
     static const AppDesc d = {
         .title = "Fault Log", .max_inst = 1, .in_menu = 1, .resizable = 1,
-        .open = fl_open, .draw = fl_draw, .mouse = fl_mouse,
+        .open = fl_open, .close = fl_close, .draw = fl_draw, .mouse = fl_mouse,
         .client_size = fl_csize, .category = APP_CAT_DEV,
     };
     my_type = k->register_app(&d);

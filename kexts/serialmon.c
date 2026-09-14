@@ -195,6 +195,11 @@ static void sm_csize(int inst, int *w, int *h)
     *w = COLS * 8 + 16;
     *h = ROWS * 12 + HDR + 8;
 }
+static void sm_close(int inst)
+{
+    (void)inst;
+    if (timer_id >= 0) { api->timer_del(timer_id); timer_id = -1; }
+}
 
 const KextHeader kext_header = {
     KEXT_MAGIC, KAPI_VERSION, KEXT_KIND_APP, 0, "Serial Monitor"
@@ -207,7 +212,7 @@ int kext_entry(const Kapi *k)
     gfx = gdi_bind(k, 11);
     static const AppDesc d = {
         .title = "Serial Monitor", .max_inst = 1, .in_menu = 1,
-        .open = sm_open, .draw = sm_draw, .key = sm_key, .mouse = sm_mouse,
+        .open = sm_open, .close = sm_close, .draw = sm_draw, .key = sm_key, .mouse = sm_mouse,
         .client_size = sm_csize, .category = APP_CAT_DEV,
     };
     my_type = k->register_app(&d);

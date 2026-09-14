@@ -75,10 +75,12 @@ static void zbuf_ensure(G3D *c)
     if (c->zbuf && c->zbw == c->vw && c->zbh == c->vh) return;
     if (c->zbuf) { api->kfree(c->zbuf); c->zbuf = 0; }
     if (c->vw <= 0 || c->vh <= 0) return;
-    c->zbuf = (u16 *)api->kmalloc((u32)c->vw * c->vh * 2);
+    if ((u32)c->vw > 0x7FFFFFFFu / 2 / (u32)c->vh) return;
+    u32 pixels = (u32)c->vw * (u32)c->vh;
+    c->zbuf = (u16 *)api->kmalloc(pixels * 2);
     if (c->zbuf) {
         c->zbw = c->vw; c->zbh = c->vh;
-        for (int i = 0; i < c->vw * c->vh; i++) c->zbuf[i] = 0xFFFF;
+        for (u32 i = 0; i < pixels; i++) c->zbuf[i] = 0xFFFF;
     }
 }
 

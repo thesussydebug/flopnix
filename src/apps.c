@@ -678,7 +678,7 @@ int app_alloc(int t)
                 });
                 kext_enter(resident);
                 cpu_context(cpu_prev);
-                if (failed) { reg_used[t][i] = 0; return -1; }
+                if (failed) { app_free(t, i); return -1; }
             }
             return i;
         }

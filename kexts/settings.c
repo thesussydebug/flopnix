@@ -76,6 +76,8 @@ static const u8 sst_vals[4] = { 15, 30, 60, 120 };
 
 static void settings_client_size(int *w, int *h);
 static int settings_type=-1;
+static int settings_open;
+static u32 preview_generation;
 
 static void ip_to_str(u32 ip, char *out)
 {
@@ -219,12 +221,15 @@ static void wp_fill_rgb(int x, int y, int w, int h, const u8 *c)
 
 static void pv_load(void)
 {
+    if (!settings_open) return;
+    u32 generation = preview_generation;
     if (pv && !strcmp(dpath, pv_of)) return;
     if (pv) { api->kfree(pv); pv = 0; }
     pv_of[0] = 0;
     if (!dpath[0]) return;
 
     int n = api->fs_read(dpath, api->iobuf, api->iobuf_size);
+    if (!settings_open || generation != preview_generation) return;
     if (n <= 0) { strlcpy(wmsg, "cannot read that file", sizeof wmsg); return; }
 
     BmpHead h;
@@ -262,10 +267,15 @@ static void pv_load(void)
 static void wp_picked(const char *path, void *ctx)
 {
     (void)ctx;
-    if (!path || !path[0]) return;
+    if (!settings_open || !path || !path[0]) return;
     int drive;
     char p[96];
     sh_spec_split(path, &drive, p, sizeof p);
+    if (drive) {
+        strlcpy(wmsg, "Copy the wallpaper to A: first.", sizeof wmsg);
+        api->gui_dirty();
+        return;
+    }
     strlcpy(dpath, p, sizeof dpath);
     dm = WP_BITMAP;
     wmsg[0] = 0;
@@ -580,6 +590,21 @@ static void settings_draw(Win *w, int cx, int cy, int cw)
 }
 
 static void set_csize(int inst, int *w, int *h) { (void)inst; settings_client_size(w, h); }
+static void set_open(int inst)
+{
+    (void)inst;
+    settings_open = 1;
+    preview_generation++;
+}
+static void set_close(int inst)
+{
+    (void)inst;
+    settings_open = 0;
+    preview_generation++;
+    if (pv) { api->kfree(pv); pv = 0; }
+    pv_of[0] = 0;
+    page = view_scroll = 0;
+}
 static void set_draw(Win *w, int cx, int cy, int cw, int ch)
 {
     gfx = gdi_bind(api, 11);
@@ -603,7 +628,7 @@ int kext_entry(const Kapi *k)
     static const AppDesc d = {
         .title = "Settings", .max_inst = 1, .in_menu = 1,
         .draw = set_draw, .key = set_key, .mouse = set_mouse, .wheel = set_wheel,
-        .client_size = set_csize,
+        .client_size = set_csize, .open = set_open, .close = set_close,
     };
     settings_type=api->register_app(&d);return settings_type<0;
 }

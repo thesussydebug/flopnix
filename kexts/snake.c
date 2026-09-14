@@ -326,6 +326,12 @@ static void snake_open(int inst)
     reset(inst);
     if (timer_id < 0) timer_id = api->timer_add(2, tick, 0);
 }
+static void snake_close(int inst)
+{
+    (void)inst;
+    if (beep_off_at) { api->speaker_off(); beep_off_at = 0; }
+    if (timer_id >= 0) { api->timer_del(timer_id); timer_id = -1; }
+}
 
 const KextHeader kext_header = {
     KEXT_MAGIC, KAPI_VERSION, KEXT_KIND_APP, 0, "Snake"
@@ -338,7 +344,7 @@ int kext_entry(const Kapi *k)
     gfx = gdi_bind(k, 11);
     static const AppDesc d = {
         .title = "Snake", .max_inst = 1, .in_menu = 1,
-        .open = snake_open, .draw = snake_draw,
+        .open = snake_open, .close = snake_close, .draw = snake_draw,
         .key = snake_key, .mouse = snake_mouse, .client_size = snake_csize,
     };
     snake_type = k->register_app(&d);

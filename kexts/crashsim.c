@@ -46,11 +46,16 @@ static void c_slowpump(void)
 #define EAT_MAX 512
 static void *eaten[EAT_MAX];
 static int  neaten;
+static void cs_close(int inst)
+{
+    (void)inst;
+    while (neaten) api->kfree(eaten[--neaten]);
+}
 
 static void c_eatheap(void)
 {
     if (neaten) {
-        while (neaten) api->kfree(eaten[--neaten]);
+        cs_close(0);
         api->notify("heap released");
         return;
     }
@@ -123,7 +128,7 @@ int kext_entry(const Kapi *k)
     api = k;
     static const AppDesc d = {
         .title = "Crash Test", .max_inst = 1, .in_menu = 1,
-        .draw = cs_draw, .mouse = cs_mouse, .client_size = cs_csize,
+        .draw = cs_draw, .mouse = cs_mouse, .client_size = cs_csize, .close = cs_close,
         .category = APP_CAT_DEV,
     };
     my_type = k->register_app(&d);
