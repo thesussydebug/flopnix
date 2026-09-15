@@ -201,9 +201,11 @@ static int load_midi(const char *spec)
         drive = 0;
         api->strlcpy(file, spec, sizeof file);
     }
+    api->buffer_lock();
     int n = drive == 1 ? api->fat_read(file, api->iobuf, api->iobuf_size)
                        : api->fs_read(file, api->iobuf, api->iobuf_size);
-    if (!parse_midi(api->iobuf, n)) return 0;
+    int parsed=parse_midi(api->iobuf,n);api->buffer_unlock();
+    if(!parsed)return 0;
     mn_display(spec, -1, path, sizeof path);
     return 1;
 }
@@ -372,7 +374,7 @@ int kext_entry(const Kapi *k)
 
     fm = fm_bind(k, FM_ABI);
     voices_reset();
-    static const AppDesc d = {
+    static const AppDesc d = {.live_draw=APP_INDEPENDENT,
         .title = "MIDI Player", .max_inst = 1, .in_menu = 1, .resizable = 1,
         .open = m_open, .draw = m_draw, .mouse = m_mouse,
         .client_size = m_csize, .category = APP_CAT_PROGRAMS,

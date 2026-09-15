@@ -39,6 +39,7 @@ static int nkexts;
 
 u32 kext_pool_used;
 static u32 kext_priv_phys[FS_NFILES], kext_priv_len[FS_NFILES];
+static void *kext_priv_alloc[FS_NFILES];
 
 static int kext_space[FS_NFILES];
 static int next_space;
@@ -47,6 +48,26 @@ static int space_of(int k) { return k >= 0 ? kext_space[k] - 1 : -1; }
 static u8  kext_fixed_logged[FS_NFILES];
 static int cur_kext = -1;
 static int loading_kext = -1;
+static u8 kext_flags[FS_NFILES];
+static u32 kext_touched[FS_NFILES];
+static int reclaim_one(u32 age);
+
+static u32 range_find(u32 lo,u32 hi,u32 size,u32 align,int priv)
+{
+    if(!size)return lo;
+    for(int pass=0;pass<=FS_NFILES;pass++){
+        lo=(lo+align-1)&~(align-1);
+        if(lo>hi||size>hi-lo)return 0;
+        int clash=0;
+        for(int i=0;i<nkexts;i++){
+            u32 base=priv?kext_priv_phys[i]:kexts[i].base;
+            u32 len=priv?(kext_priv_len[i]+4095)&~4095u:kexts[i].size;
+            if(len&&lo<base+len&&base<lo+size){lo=base+len;clash=1;break;}
+        }
+        if(!clash)return lo;
+    }
+    return 0;
+}
 
 int kext_loading(void) { return loading_kext; }
 
@@ -54,7 +75,9 @@ int kext_owner_now(void) { return ks_owner(loading_kext, cur_kext); }
 
 void kext_enter(int k)
 {
+    if(k<0){preempt_disable();paging_space_switch(-1);cur_kext=-1;preempt_enable();return;}
     if (k < 0 || k >= nkexts) return;
+    kext_touched[k]=ticks;
     if (!kext_priv_len[k]) return;
     preempt_disable();
     if (k != cur_kext) {
@@ -165,7 +188,7 @@ static int peek_header(const u8 *img, u32 len, KextHeader *out)
 
 static int elf_load(const u8 *img, u32 len, u32 *out_base, u32 *out_size,
                     int (**out_entry)(const Kapi *),
-                    u32 *out_pphys, u32 *out_plen, int *out_space, int hdr_kind)
+                    u32 *out_pphys, u32 *out_plen, void **out_alloc, int *out_space, int hdr_kind)
 {
     const Ehdr *eh; const Shdr *sh;
     int r = elf_sanity(img, len, &eh, &sh);
@@ -174,7 +197,14 @@ static int elf_load(const u8 *img, u32 len, u32 *out_base, u32 *out_size,
     u32 shaddr[MAX_SECT];
     for (int i = 0; i < eh->shnum; i++) shaddr[i] = 0;
 
-    u32 base = (arena + 15) & ~15u;
+    u32 code_need=0,code_align=16;
+    for(int i=0;i<eh->shnum;i++)if((sh[i].flags&SHF_ALLOC)&&sh[i].size){
+        u32 a=sh[i].addralign?sh[i].addralign:1;
+        if((a&(a-1))||a>ARENA_END-ARENA_BASE||sh[i].size>ARENA_END-ARENA_BASE+KEXT_PRIV_SIZE)return 40;
+        if(!(sh[i].flags&SHF_WRITE_BIT)){if(a>code_align)code_align=a;ks_place(&code_need,sh[i].size,a);}
+    }
+    u32 base = range_find(ARENA_BASE,arena_rw,code_need,code_align,0);
+    if(!base)return 42;
     u32 p = base;
     u32 rw = arena_rw;
 
@@ -185,16 +215,25 @@ static int elf_load(const u8 *img, u32 len, u32 *out_base, u32 *out_size,
             ks_place(&priv_off, sh[i].size, sh[i].addralign);
     u32 priv_phys = 0;
     if (priv_off) {
-        if (!ks_pool_pages_fit(kext_pool_used, priv_off)) return 42;
-        priv_phys = KEXT_POOL_BASE + kext_pool_used;
-        kext_pool_used += (priv_off + 0xFFF) & ~0xFFFu;
+        if(priv_off>KEXT_PRIV_SIZE)return 42;
+        u32 pages=(priv_off+4095)&~4095u;
+        if(ks_pool_pages_fit(kext_pool_used,priv_off))priv_phys=range_find(KEXT_POOL_BASE,KEXT_POOL_END,pages,4096,1);
+        if(priv_phys)kext_pool_used+=pages;
+        else{
+            *out_alloc=kmalloc(pages+4095);if(!*out_alloc)return 42;
+            priv_phys=((u32)*out_alloc+4095)&~4095u;
+        }
     }
 
     int space = -1;
     if (priv_off) {
-        if (next_space < KEXT_PD_MAX &&
-            paging_space_create(next_space, priv_phys, priv_off)) {
-            space = next_space++;
+        int candidate;
+        for(candidate=0;candidate<KEXT_PD_MAX;candidate++){
+            int used=0;for(int i=0;i<nkexts;i++)if(kext_priv_len[i]&&space_of(i)==candidate){used=1;break;}
+            if(!used)break;
+        }
+        if (candidate < KEXT_PD_MAX && paging_space_create(candidate, priv_phys, priv_off)) {
+            space = candidate; if(next_space<=space)next_space=space+1;
             paging_space_switch(space);
         } else {
             paging_space_switch(-1);
@@ -219,7 +258,7 @@ static int elf_load(const u8 *img, u32 len, u32 *out_base, u32 *out_size,
 
             u32 a = sh[i].addralign ? sh[i].addralign : 1;
             u32 q = (rw - sh[i].size) & ~(a - 1);
-            if (q < p || q > rw) return 42;
+            if (q < p || q < arena || q > rw) return 42;
             rw = q;
             dst = q;
             shaddr[i] = q;
@@ -281,7 +320,7 @@ static int elf_load(const u8 *img, u32 len, u32 *out_base, u32 *out_size,
             *out_entry = (int (*)(const Kapi *))symaddr[i];
             *out_base = base;
             *out_size = p - base;
-            arena    = p;
+            if(p>arena)arena=p;
             arena_rw = rw;
             return 0;
         }
@@ -335,19 +374,31 @@ static int kext_load_locked(const char *name)
         }
         if (!cap || cap > IOBUF_SZ) return 40;
         image = kmalloc(cap);
+        if(!image){preempt_disable();while(!image&&reclaim_one(0))image=kmalloc(cap);preempt_enable();}
         if (!image) return 42;
     }
     int n = fs_read(name, image, cap);
     KextHeader hdr;
     int r = n < (int)sizeof(Ehdr) ? 40 : peek_header(image, (u32)n, &hdr);
     u32 base = 0, size = 0, pphys = 0, plen = 0;
+    void *priv_alloc=0;
     int (*entry)(const Kapi *) = 0;
     u32 arena_save = arena, rw_save = arena_rw, pool_save = kext_pool_used;
     int ns_save = next_space;
     int space = -1, li = lazy_file(name);
     preempt_disable();
     paging_arena_protect(ARENA_BASE, ARENA_END, 1);
-    if (!r) r = elf_load(image, (u32)n, &base, &size, &entry, &pphys, &plen, &space, hdr.kind);
+    if (!r) for(;;){
+        arena_save=arena;rw_save=arena_rw;pool_save=kext_pool_used;ns_save=next_space;
+        r=elf_load(image,(u32)n,&base,&size,&entry,&pphys,&plen,&priv_alloc,&space,hdr.kind);
+        if(!r)break;
+        arena=arena_save;arena_rw=rw_save;kext_pool_used=pool_save;next_space=ns_save;
+        if(space>=0)paging_space_drop(space);
+        if(priv_alloc){kfree(priv_alloc);priv_alloc=0;}
+        paging_space_switch(pd_save);cur_kext=resident;
+        if(r!=42||!reclaim_one(0))break;
+        space=-1;
+    }
     if (image != iobuf) kfree(image);
     if (r) {
         arena = arena_save; arena_rw = rw_save; kext_pool_used = pool_save;
@@ -355,6 +406,9 @@ static int kext_load_locked(const char *name)
     } else {
         kext_priv_phys[slot] = pphys; kext_priv_len[slot] = plen;
         kext_space[slot] = space + 1;
+        kext_priv_alloc[slot]=priv_alloc;
+        if(priv_alloc)mem_track(hdr.name,priv_alloc,((plen+4095)&~4095u)+4095);
+        kext_flags[slot]=hdr.api_version>=33?(hdr.pad&KEXT_RECLAIMABLE):0;kext_touched[slot]=ticks;
     }
     KextInfo *k = &kexts[slot];
     if (slot == nkexts) nkexts++;
@@ -438,7 +492,7 @@ void kext_boot(void)
 
     boot_pass(KEXT_KIND_KERNEL, "kernel");
     lazy_catalog();
-    if (lazy_present("notes.lst")) { int nt = app_find("Notes"); if (nt >= 0) app_ensure_loaded(nt); }
+    if (lazy_present("sys/tmp/notes.lst") || lazy_present("notes.lst")) { int nt = app_find("Notes"); if (nt >= 0) app_ensure_loaded(nt); }
     boot_pass(KEXT_KIND_APP, "app");
 
     if (!nkexts) boot_print("extensions: none on disk\n");
@@ -584,7 +638,8 @@ int opener_dispatch(const char *name, const char *fullpath,
             if ((openers[i].owner<0 || !kexts[openers[i].owner].status) && !openers[i].ext[0]) sel = i;
     if (sel < 0) return -1;
 
-    static char cp_name[72], cp_full[128];
+    if(app_owner_busy(openers[sel].owner))return -1;
+    char cp_name[72], cp_full[128];
     strlcpy(cp_name, name ? name : "", sizeof cp_name);
     if (fullpath) strlcpy(cp_full, fullpath, sizeof cp_full);
 
@@ -823,25 +878,64 @@ void broadcast(const char *event, const char *data)
     kext_enter(resident);
 }
 
+static int can_unload(int owner)
+{
+    if (owner<0 || owner>=nkexts || (kexts[owner].status && kexts[owner].status!=46)) return -1;
+    if (kexts[owner].kind!=KEXT_KIND_APP || (shell_fn && shell_owner==owner) || services_kext_busy(owner) || irq_kext_busy(owner)) return -2;
+    for (int i=0;i<NTIMERS;i++) if (timers[i].fn && timers[i].owner==owner) return -2;
+    for (int i=0;i<NKHOOKS;i++) if (khooks[i] && khook_owner[i]==owner) return -2;
+    for (int i=0;i<NSHUT;i++) if (shut_fns[i] && shut_owner[i]==owner) return -2;
+    for (int i=0;i<NSERV;i++) if (servs[i].ops && servs[i].owner==owner) return -2;
+    for (int i=0;i<NLISTEN;i++) if (listeners[i] && lis_owner[i]==owner) return -2;
+    if (owner==kext_owner_now() || thread_kext_busy(owner)) return -3;
+    for (int i=0;i<MAXWIN;i++)
+        if (wins[i].used && app_type_owner(wins[i].type)==owner) return -3;
+    return 0;
+}
+static int evictable(int owner)
+{
+    int li=lazy_file(kexts[owner].name);
+    if(li<0||!lazy_types[li]||!(kext_flags[owner]&KEXT_RECLAIMABLE)||!paging_active())return 0;
+    int type=lazy_types[li]-1;
+    for(int i=0;i<app_count();i++)if(app_type_owner(i)==owner&&i!=type)return 0;
+    return 1;
+}
+static int evict(int owner)
+{
+    if(!evictable(owner))return 0;
+    int li=lazy_file(kexts[owner].name),type=lazy_types[li]-1;
+    overlay_drop_owner(owner);
+    services_drop_owner(owner);drop_load_hooks(owner);
+    AppDesc d={0};d.title=lazy_specs[li].title;d.max_inst=1;d.in_menu=1;
+    d.draw=lazy_draw;d.client_size=lazy_size;d.category=lazy_specs[li].category;
+    app_placeholder(type,&d);lazy_state[li]=0;
+    if(kext_priv_alloc[owner]){kfree(kext_priv_alloc[owner]);kext_priv_alloc[owner]=0;}
+    else kext_pool_used-=(kext_priv_len[owner]+4095)&~4095u;
+    paging_space_drop(space_of(owner));kext_space[owner]=0;
+    kext_priv_len[owner]=kext_priv_phys[owner]=0;kext_fixed_logged[owner]=0;
+    kexts[owner].size=kexts[owner].base=0;kexts[owner].status=47;
+    gui_dirty=1;return 1;
+}
+static int reclaim_one(u32 age)
+{
+    int oldest=-1;
+    for(int i=0;i<nkexts;i++)if((kext_flags[i]&KEXT_RECLAIMABLE)&&
+        (u32)(ticks-kext_touched[i])>=age&&!can_unload(i)&&evictable(i)){
+        if(oldest<0||(u32)(ticks-kext_touched[i])>(u32)(ticks-kext_touched[oldest]))oldest=i;
+    }
+    return oldest>=0&&evict(oldest);
+}
+void kext_trim_idle(void)
+{
+    if(loading_kext>=0||!gui_up)return;
+    mtx_lock(&load_mutex);preempt_disable();
+    reclaim_one(heap_avail()<65536||KEXT_POOL_END-KEXT_POOL_BASE-kext_pool_used<65536?500:6000);
+    preempt_enable();mtx_unlock(&load_mutex);
+}
 int kext_unload(int owner)
 {
-    int r=-1;
-    mtx_lock(&load_mutex); preempt_disable();
-    if (owner<0 || owner>=nkexts || kexts[owner].status) goto done;
-    r=-2;
-    if (kexts[owner].kind!=KEXT_KIND_APP || (shell_fn && shell_owner==owner) || services_kext_busy(owner) || irq_kext_busy(owner)) goto done;
-    for (int i=0;i<NTIMERS;i++) if (timers[i].fn && timers[i].owner==owner) goto done;
-    for (int i=0;i<NKHOOKS;i++) if (khooks[i] && khook_owner[i]==owner) goto done;
-    for (int i=0;i<NSHUT;i++) if (shut_fns[i] && shut_owner[i]==owner) goto done;
-    for (int i=0;i<NSERV;i++) if (servs[i].ops && servs[i].owner==owner) goto done;
-    for (int i=0;i<NLISTEN;i++) if (listeners[i] && lis_owner[i]==owner) goto done;
-    r=-3;
-    if (owner==kext_owner_now() || thread_kext_busy(owner)) goto done;
-    for (int i=0;i<MAXWIN;i++)
-        if (wins[i].used && app_type_owner(wins[i].type)==owner) goto done;
-    overlay_drop_owner(owner);
-    kexts[owner].status=46; r=0;
- done:
+    mtx_lock(&load_mutex);preempt_disable();int r=can_unload(owner);
+    if(!r&&!evict(owner)){overlay_drop_owner(owner);kexts[owner].status=46;}
     preempt_enable(); mtx_unlock(&load_mutex); return r;
 }
 
@@ -914,7 +1008,7 @@ static u32 mem_stat(int what)
     case MI_IO_END:       return MEM_IO_END;
     case MI_ARENA_BASE:   return ARENA_BASE;
     case MI_ARENA_END:    return ARENA_END;
-    case MI_ARENA_RO:     return arena - ARENA_BASE;
+    case MI_ARENA_RO: {u32 n=0;for(int i=0;i<nkexts;i++)n+=kexts[i].size;return n;}
     case MI_ARENA_RW:     return ARENA_END - arena_rw;
     case MI_POOL_BASE:    return KEXT_POOL_BASE;
     case MI_POOL_END:     return KEXT_POOL_END;
@@ -1220,4 +1314,10 @@ Kapi kapi = {
     .win_is_hovered = win_is_hovered,
     .net_sntp       = net_sntp,
     .kext_unload    = kext_unload,
+    .config_get = config_get, .config_set = config_set, .config_read = config_read,
+    .clip_history = clip_history, .clip_restore = clip_restore, .clip_sequence = clip_sequence,
+    .mem_track = mem_track, .mem_buffer = mem_buffer,
+    .control_state = control_state, .win_redraw = win_redraw,
+    .buffer_lock = app_buffer_lock, .buffer_unlock = app_buffer_unlock,
+    .network_lock = app_network_lock, .network_unlock = app_network_unlock,
 };

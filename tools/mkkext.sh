@@ -14,10 +14,12 @@ IMG="$2"
 
 NAME="$(basename "$SRC" .c)"
 OUT="$(dirname "$SRC")/$NAME.kx"
+OPT=-O2
+if [ "$NAME" = selftest_small ]; then OPT=-Os; fi
 
 clang --target=i386-unknown-none-elf -ffreestanding -fno-builtin \
  -fno-stack-protector -fno-pic -fno-asynchronous-unwind-tables \
- -mno-sse -mno-mmx -O2 -Wall -Wextra -I"$ROOT/src" \
+ -mno-sse -mno-mmx "$OPT" -Wall -Wextra -I"$ROOT/src" \
  -c "$SRC" -o "$NAME.kxo.tmp"
 
 undef=$(llvm-objdump -t "$NAME.kxo.tmp" | awk '/\*UND\*/{print $NF}')

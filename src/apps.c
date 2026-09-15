@@ -9,6 +9,7 @@
 #include "shcwd.inc"
 #include "tabcomp.inc"
 #include "shcmd.inc"
+#include "shspec.inc"
 
 extern char __bss_start[], __bss_end[], __load_end[];
 
@@ -30,6 +31,8 @@ typedef struct {
     u8   rainbow, fx;
 
     char line[192];
+    char pending[192];
+    u8 running;
     int  len;
     int  inpx;
     char hist[THIST][192];
@@ -43,7 +46,8 @@ typedef struct {
 } Term;
 
 static Term terms[MAXINST];
-static Term *T;
+static Term *term_context[THR_MAX],*term_last;
+#define T term_context[thr_self]
 static int tdcols, tdrows;
 
 static char *line_at(Term *t, int i) { return t->sb[(t->head + i) % SBMAX]; }
@@ -95,6 +99,8 @@ static void tprompt(void)
     T->len = 0;
     T->line[0] = 0;
     T->inpx = T->cx;
+    T->running=0;
+    if(T->pending[0]){strlcpy(T->line,T->pending,sizeof T->line);T->len=strlen(T->line);T->pending[0]=0;tdraw_input();}
 }
 
 const char *shell_cwd_get(void) { return T ? T->cwd : ""; }
@@ -143,7 +149,7 @@ u32 used_kb(void)
             kapi.mem_info(MI_POOL_USED) + heap_end() - heap_base() - heap_avail()) / 1024 + 120;
 }
 
-void shell_print(const char *s) { tprint(s); }
+void shell_print(const char *s) { if(!T)T=term_last;if(T)tprint(s); }
 
 void term_clear(void)
 {
@@ -339,7 +345,7 @@ int apps_animating(void)
 
 static void term_reset(int inst)
 {
-    T = &terms[inst];
+    T = &terms[inst];term_last=T;
     memset(T, 0, sizeof *T);
     T->nlines = 1;
     T->cols = tdcols;
@@ -363,6 +369,17 @@ static void term_scroll(Term *t, int lines)
 }
 
 void term_wheel(int inst, int dz) { term_scroll(&terms[inst], dz * 3); }
+static void term_drop(int inst,int x,int y,const char *type,const char *data)
+{
+    (void)x;(void)y;
+    if(!type||!data||(strcmp(type,"file")&&strcmp(type,"file.cut")))return;
+    win_focus(WT_TERM,inst);
+    preempt_disable();
+    Term *t=&terms[inst],*saved=T;
+    if(t->running)sp_insert(t->pending,strlen(t->pending),sizeof t->pending,data);
+    else{T=t;t->len=sp_insert(t->line,t->len,sizeof t->line,data);t->tab_on=0;tdraw_input();T=saved;}
+    preempt_enable();
+}
 
 static void tab_replace(int wordstart, const char *s)
 {
@@ -402,7 +419,7 @@ static void term_tab(void)
 
 static void term_key(int inst, int k)
 {
-    T = &terms[inst];
+    T = &terms[inst];term_last=T;
     if (T->fx) { T->fx = 0; tprompt(); return; }
     if (k == K_UP)   { hist_recall(-1); return; }
     if (k == K_DOWN) { hist_recall(1); return; }
@@ -416,7 +433,9 @@ static void term_key(int inst, int k)
         tputc('\n');
         T->line[T->len] = 0;
         hist_push(T->line);
-        sh_dispatch(T->line);
+        char command[sizeof T->line];strlcpy(command,T->line,sizeof command);T->running=1;
+        sh_dispatch(command);
+        T->running=0;
         if (!T->fx) tprompt();
         return;
     }
@@ -425,14 +444,10 @@ static void term_key(int inst, int k)
         return;
     }
     if (ch == 0x16) {
-        char clip[128];
+        char clip[192];
         if (clip_get_text(clip, sizeof clip) > 0) {
-            int room = T->cols - 1 - T->cx;
-            int cap = T->len + (room > 0 ? room : 0) + 1;
-            if (cap > (int)sizeof T->line) cap = sizeof T->line;
-            int before = T->len;
-            T->len = cl_paste(T->line, T->len, cap, clip);
-            for (int i = before; i < T->len; i++) tputc(T->line[i]);
+            T->len = cl_paste(T->line, T->len, sizeof T->line, clip);
+            tdraw_input();
         }
         return;
     }
@@ -582,7 +597,8 @@ int shell_exec(const char *line)
     for (int i = 0; i < MAXINST; i++)
         if (reg_used[WT_TERM][i]) inst = i;
     if (inst < 0) return -1;
-    T = &terms[inst];
+    T = &terms[inst];term_last=T;
+    if(T->running)return -1;
     char buf[192];
     strlcpy(buf, line, sizeof buf);
     in_shell_exec = 1;
@@ -648,6 +664,11 @@ int app_type_owned(int owner) {
     return -1;
 }
 int app_count(void) { return nregs; }
+void app_placeholder(int type,const AppDesc *desc)
+{
+    if(type<0||type>=nregs)return;
+    regs[type]=*desc;reg_owner[type]=-1;memset(reg_used[type],0,MAXINST);
+}
 const AppDesc *app_desc(int t) { return (t >= 0 && t < nregs) ? &regs[t] : 0; }
 
 int app_find(const char *title)
@@ -718,7 +739,7 @@ void app_min_client(int t, int *w, int *h)
 }
 
 int app_resizable(int t) { return t >= 0 && t < nregs && regs[t].resizable; }
-int app_live_draw(int t) { return t >= 0 && t < nregs && regs[t].live_draw; }
+int app_live_draw(int t) { return t >= 0 && t < nregs && (regs[t].live_draw & APP_LIVE_DRAW); }
 
 extern void fault_show_banner(const char *msg);
 static volatile u8 hang_ended;
@@ -752,81 +773,130 @@ void app_draw(Win *w, int cx, int cy, int cw, int ch)
     cpu_context(cpu_prev);
 }
 
-enum { AE_KEY, AE_MOUSE, AE_WHEEL };
+enum { AE_KEY, AE_MOUSE, AE_WHEEL, AE_CALLBACK, AE_DROP };
+typedef struct {void *fn,*ctx;int value,is_path,present;char path[128];} AppCallback;
+typedef struct {char type[16],data[4096];int x,y;} AppDrop;
 typedef struct { u8 kind, win; int a, b, c, d, e; } AppEv;
 
-static AppEv aq[AQ_SIZE];
-static volatile u32 aq_head, aq_tail;
+static AppEv aq[AQ_SIZE*2];
+static int aq_n;
 static u32 aq_dropped;
+static struct { int active,win,type,owner,legacy,kill,cancel; u32 since,prog,io; } jobs[THR_MAX];
+static Mutex buffer_mutex=MUTEX_INIT;
+static Mutex network_mutex=MUTEX_INIT;
+void app_network_lock(void){mtx_lock(&network_mutex);}
+void app_network_unlock(void){mtx_unlock(&network_mutex);}
+static int watched_thr=-1;
+static volatile int run_win=-1;
+volatile u32 app_io_tick;
 
-static BusyCore bc = { -1, 0, 0 };
-
+void app_buffer_lock(void){mtx_lock(&buffer_mutex);}
+void app_buffer_unlock(void){mtx_unlock(&buffer_mutex);}
+int app_current_window(void){return jobs[thr_self].active?jobs[thr_self].win:-1;}
+int app_cancel_pending(void){return jobs[thr_self].active&&jobs[thr_self].cancel;}
+void app_cancel_window(int win)
+{
+    for(int t=0;t<THR_MAX;t++)if(jobs[t].active&&jobs[t].win==win)jobs[t].cancel=1;
+}
+int app_job_info(int win,u32 *elapsed,u32 *prog,u32 *io)
+{
+    for(int t=0;t<THR_MAX;t++)if(jobs[t].active&&jobs[t].win==win){*elapsed=ticks-jobs[t].since;*prog=jobs[t].prog;*io=jobs[t].io;return 1;}
+    *elapsed=*prog=*io=0;return 0;
+}
+int app_handler_running(int win)
+{
+    for(int t=0;t<THR_MAX;t++)if(jobs[t].active&&jobs[t].win==win)return 1;
+    return 0;
+}
 int app_busy(int win)
 {
-    return bc_show(&bc, win, ticks);
+    for(int t=0;t<THR_MAX;t++)if(jobs[t].active&&jobs[t].win==win&&ticks-jobs[t].since>=BC_SHOW)return 1;
+    return 0;
 }
-
-static volatile int run_win = -1;
-static volatile u32 run_t0;
-static int worker_thr = -1;
-static volatile int kill_win = -1;
-
-static volatile u32 run_prog;
-
-void app_note_pump(void)
-{
-    if (run_win >= 0 && thr_self == worker_thr) run_prog++;
-}
-u32 app_progress(void) { return run_prog; }
-
-volatile u32 app_io_tick;
+void app_note_pump(void){if(jobs[thr_self].active)jobs[thr_self].prog++;}
+u32 app_progress(void){return watched_thr<0?0:jobs[watched_thr].prog;}
 void app_note_io(void)
 {
-    if(run_win>=0 && thr_self==worker_thr){app_io_tick=ticks;run_prog++;}
+    if(jobs[thr_self].active){jobs[thr_self].io=ticks;jobs[thr_self].prog++;}
 }
-
-int app_handler_running(int win) { return run_win == win; }
-
 int app_stuck(u32 *elapsed)
 {
-    int w = run_win;
-    if (w >= 0 && elapsed) *elapsed = ticks - run_t0;
-    return w;
+    int best=-1;u32 age=0;
+    for(int t=0;t<THR_MAX;t++)if(jobs[t].active&& (best<0||ticks-jobs[t].since>age)){best=t;age=ticks-jobs[t].since;}
+    watched_thr=best;run_win=best<0?-1:jobs[best].win;app_io_tick=best<0?0:jobs[best].io;
+    if(elapsed)*elapsed=age;return run_win;
 }
-
-void app_kill_request(int win) { kill_win = win; }
-
+void app_kill_request(int win)
+{
+    for(int t=0;t<THR_MAX;t++)if(jobs[t].active&&jobs[t].win==win){jobs[t].cancel=1;jobs[t].kill=1;}
+}
 void app_kill_poll(void)
 {
-    if (kupd_critical) return;
-    if (kill_win < 0 || thr_self != worker_thr) return;
-    if (run_win != kill_win) { kill_win = -1; return; }
-    if (!fault_armed[thr_self]) return;
-    int w = kill_win;
-    kill_win = -1;
-    hang_ended = 1;
-    Win *win = &wins[w];
-    fault_record_hang(win->tbuf_on ? win->tbuf : win->title);
-    fault_armed[thr_self] = 0;
-    busy_end();
-    fj_long(&fault_ctx[thr_self], 1);
+    int t=thr_self;
+    if(kupd_critical||!jobs[t].active||!jobs[t].kill||!fault_armed[t])return;
+    if(mtx_held_count()>(jobs[t].legacy?1:0))return;
+    jobs[t].kill=0;hang_ended=1;Win *w=&wins[jobs[t].win];
+    fault_record_hang(w->tbuf_on?w->tbuf:w->title);fault_armed[t]=0;
+    in_irq=0;fj_long(&fault_ctx[t],1);
 }
-u32  app_q_dropped(void) { return aq_dropped; }
-int  app_q_depth(void)   { return aq_count(aq_head, aq_tail); }
-
-static void aq_post(u8 kind, int win, int a, int b, int c, int d, int e)
+u32 app_q_dropped(void){return aq_dropped;}
+int app_q_depth(void){return aq_n;}
+void app_forget_window(int win)
 {
-    u32 f = irq_save();
-    if (aq_full(aq_head, aq_tail)) {
-        aq_dropped++;
-        irq_restore(f);
-        return;
-    }
-    AppEv *q = &aq[aq_slot(aq_tail)];
-    q->kind = kind; q->win = (u8)win;
-    q->a = a; q->b = b; q->c = c; q->d = d; q->e = e;
-    aq_tail++;
+    u32 f=irq_save();
+    for(int i=0;i<aq_n;)if(aq[i].win==win){if(aq[i].kind==AE_CALLBACK||aq[i].kind==AE_DROP)kfree((void *)aq[i].a);memmove(aq+i,aq+i+1,(--aq_n-i)*sizeof *aq);}else i++;
     irq_restore(f);
+}
+static int aq_post(u8 kind,int win,int a,int b,int c,int d,int e)
+{
+    if(win<0||win>=MAXWIN)return 0;
+    u32 f=irq_save();
+    int queued=0;
+    for(int i=0;i<aq_n;i++)if(aq[i].win==win)queued++;
+    if(kind==AE_MOUSE&&c==EV_DRAG&&aq_n&&aq[aq_n-1].win==win&&aq[aq_n-1].kind==AE_MOUSE&&aq[aq_n-1].c==EV_DRAG){
+        AppEv *q=&aq[aq_n-1];q->a=a;q->b=b;q->d=d;q->e=e;irq_restore(f);return 1;
+    }
+    if(aq_n>=AQ_SIZE*2||(queued>=AQ_SIZE+16&&!(kind==AE_MOUSE&&c==EV_RELEASE))){
+        if(kind==AE_MOUSE&&c==EV_RELEASE){
+            for(int i=aq_n-1;i>=0;i--)if(aq[i].win==win&&aq[i].kind==AE_MOUSE&&aq[i].c==EV_DRAG){aq[i].a=a;aq[i].b=b;aq[i].c=c;aq[i].d=d;aq[i].e=e;irq_restore(f);return 1;}
+        }
+        aq_dropped++;irq_restore(f);return 0;
+    }
+    AppEv *q=&aq[aq_n++];q->kind=kind;q->win=win;q->a=a;q->b=b;q->c=c;q->d=d;q->e=e;
+    irq_restore(f);return 1;
+}
+static int aq_take(AppEv *ev)
+{
+    u32 f=irq_save();
+    for(int i=0;i<aq_n;i++){
+        Win *w=&wins[aq[i].win];if(!w->used)continue;
+        int owner=reg_owner[w->type],legacy=!(regs[w->type].live_draw&APP_INDEPENDENT),blocked=0;
+        for(int t=0;t<THR_MAX;t++)if(jobs[t].active&&
+            (jobs[t].type==w->type||(owner>=0&&jobs[t].owner==owner)||(legacy&&jobs[t].legacy)))blocked=1;
+        if(blocked||(legacy&&buffer_mutex.held))continue;
+        *ev=aq[i];memmove(aq+i,aq+i+1,(--aq_n-i)*sizeof *aq);
+        int t=thr_self;jobs[t].active=1;jobs[t].win=ev->win;jobs[t].type=w->type;jobs[t].owner=owner;
+        jobs[t].legacy=legacy;jobs[t].since=ticks;jobs[t].prog=0;jobs[t].io=0;jobs[t].kill=jobs[t].cancel=0;
+        if(legacy)app_buffer_lock();irq_restore(f);return 1;
+    }
+    irq_restore(f);return 0;
+}
+
+int app_owner_busy(int owner)
+{
+    if(owner<0)return 0;
+    for(int t=0;t<THR_MAX;t++)if(t!=thr_self&&jobs[t].active&&jobs[t].owner==owner)return 1;
+    return 0;
+}
+int app_callback(int owner,int win,void *fn,void *ctx,int value,const char *path,int is_path)
+{
+    if(!fn||owner<0||win<0)return 0;
+    if(win>=MAXWIN||!wins[win].used||reg_owner[wins[win].type]!=owner)return 1;
+    AppCallback *p=kmalloc(sizeof *p);
+    if(!p){fault_show_banner("E42 - Operation could not be queued.");return 1;}
+    p->fn=fn;p->ctx=ctx;p->value=value;p->is_path=is_path;p->present=path!=0;strlcpy(p->path,path?path:"",sizeof p->path);
+    if(!aq_post(AE_CALLBACK,win,(int)p,0,0,0,0)){kfree(p);fault_show_banner("E42 - Input queue is full.");}
+    return 1;
 }
 
 #define HANDLER_GUARD(body, w) do {                                   \
@@ -861,26 +931,33 @@ static void app_wheel_now(Win *w, int dz)
     cpu_context(cpu_prev);
 }
 
+static void app_job_now(Win *w,AppEv *ev)
+{
+    int prev=cpu_context(w->type);kext_enter(reg_owner[w->type]);
+    if(ev->kind==AE_CALLBACK){
+        AppCallback *p=(AppCallback *)ev->a;
+        HANDLER_GUARD({if(p->is_path)((void (*)(const char *,void *))p->fn)(p->present?p->path:0,p->ctx);else ((void (*)(int,void *))p->fn)(p->value,p->ctx);},w);
+    }else{
+        AppDrop *p=(AppDrop *)ev->a;
+        if(regs[w->type].drop)HANDLER_GUARD(regs[w->type].drop(w->inst,p->x,p->y,p->type,p->data),w);
+    }
+    kfree((void *)ev->a);cpu_context(prev);
+}
 void app_worker(void)
 {
-    worker_thr = thr_self;
-    for (;;) {
-        if (aq_empty(aq_head, aq_tail)) { win_close_flush(); thr_yield(); continue; }
-        AppEv ev = aq[aq_slot(aq_head)];
-        Win *w = &wins[ev.win];
-
-        if (ev.win < MAXWIN && w->used) {
-            bc_start(&bc, ev.win, ticks);
-            run_win = ev.win; run_t0 = ticks;
-            if (ev.kind == AE_KEY) app_key_now(w, ev.a);
-            else if (ev.kind == AE_WHEEL) app_wheel_now(w, ev.a);
-            else                   app_mouse_now(w, ev.a, ev.b, ev.c, ev.d, ev.e);
-            run_win = -1;
-            bc_end(&bc, ticks);
-            win_close_flush();
-        }
-        aq_head++;
-        gui_dirty = 1;
+    for(;;){
+        AppEv ev;
+        if(!aq_take(&ev)){thr_yield();continue;}
+        Win *w=&wins[ev.win];
+        if(ev.kind==AE_KEY)app_key_now(w,ev.a);
+        else if(ev.kind==AE_WHEEL)app_wheel_now(w,ev.a);
+        else if(ev.kind==AE_MOUSE)app_mouse_now(w,ev.a,ev.b,ev.c,ev.d,ev.e);
+        else app_job_now(w,&ev);
+        kext_enter(-1);
+        app_local_progress(0,0,-1);
+        if(jobs[thr_self].legacy)app_buffer_unlock();
+        jobs[thr_self].active=0;
+        win_close_flush();gui_dirty=1;
     }
 }
 
@@ -899,13 +976,13 @@ void app_wheel(Win *w, int dz)
     aq_post(AE_WHEEL, (int)(w - wins), dz, 0, 0, 0, 0);
 }
 
-void app_drop(Win *w, int lx, int ly, const char *type, const char *data)
+void app_drop(Win *w,int lx,int ly,const char *type,const char *data)
 {
-    if (w->type < nregs && regs[w->type].drop) {
-        kext_enter(reg_owner[w->type]);
-        FAULT_GUARD(regs[w->type].drop(w->inst, lx, ly, type, data),
-                    app_recover(w));
-    }
+    if(w->type>=nregs||!regs[w->type].drop||!type||!data)return;
+    if(strlen(type)>=16||strlen(data)>=4096)return;
+    AppDrop *p=kmalloc(sizeof *p);if(!p){fault_show_banner("E42 - File drop could not be queued.");return;}
+    p->x=lx;p->y=ly;strlcpy(p->type,type,sizeof p->type);strlcpy(p->data,data,sizeof p->data);
+    if(!aq_post(AE_DROP,w-wins,(int)p,0,0,0,0)){kfree(p);fault_show_banner("E42 - Input queue is full.");}
 }
 
 static void term_csize(int inst, int *w, int *h)
@@ -928,7 +1005,7 @@ void apps_init(void)
     static const AppDesc dterm = {
         .title = "Terminal", .max_inst = MAXINST, .resizable = 1, .in_menu = 1,
         .open = term_reset, .draw = term_draw, .key = term_key,
-        .wheel = term_wheel, .client_size = term_csize, .min_client = term_min,
+        .wheel = term_wheel, .client_size = term_csize, .min_client = term_min, .drop=term_drop,
 
         .live_draw = 1,
     };

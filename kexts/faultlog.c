@@ -161,7 +161,7 @@ static void fl_close(int inst)
 static void fl_csize(int inst, int *w, int *h) { (void)inst; *w = WINW; *h = WINH; }
 
 const KextHeader kext_header = {
-    KEXT_MAGIC, KAPI_VERSION, KEXT_KIND_APP, 0, "Fault Log"
+    KEXT_MAGIC, KAPI_VERSION, KEXT_KIND_APP, KEXT_RECLAIMABLE, "Fault Log"
 };
 
 int kext_entry(const Kapi *k)

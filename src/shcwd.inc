@@ -1,7 +1,7 @@
 /* Resolves a path against the shell's current folder. */
 #pragma once
 
-#define SC_MAX 24
+#define SC_MAX 96
 
 static inline int sc_resolve(const char *cwd, const char *arg, char *out, int cap)
 {
@@ -18,10 +18,12 @@ static inline int sc_resolve(const char *cwd, const char *arg, char *out, int ca
     char buf[128];
     int n = 0;
     if (!absolute)
-        for (const char *p = cwd; *p && n < (int)sizeof buf - 1; p++) buf[n++] = *p;
-    if (n && n < (int)sizeof buf - 1) buf[n++] = '/';
-    for (const char *p = a; *p && n < (int)sizeof buf - 1; p++)
+        for (const char *p = cwd; *p; p++) {if(n>=(int)sizeof buf-1){out[0]=0;return 0;}buf[n++] = *p;}
+    if (n) {if(n>=(int)sizeof buf-1){out[0]=0;return 0;}buf[n++] = '/';}
+    for (const char *p = a; *p; p++) {
+        if(n>=(int)sizeof buf-1){out[0]=0;return 0;}
         buf[n++] = (*p == '\\') ? '/' : *p;
+    }
     buf[n] = 0;
 
     const char *seg[32];
@@ -38,7 +40,8 @@ static inline int sc_resolve(const char *cwd, const char *arg, char *out, int ca
             if (ns) ns--;
             continue;
         }
-        if (ns < 32) { seg[ns] = buf + s; seglen[ns] = len; ns++; }
+        if(ns>=32){out[0]=0;return 0;}
+        seg[ns] = buf + s; seglen[ns] = len; ns++;
     }
 
     int o = 0;

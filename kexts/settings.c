@@ -153,8 +153,8 @@ static void fit_page(void)
 
 #define PVW 180
 #define PVH 135
-static Rect wp_mode_btn(int i) { Rect r = { 48 + i * 116, 30, 112, 20 }; return r; }
-static Rect wp_prev(void)      { Rect r = { (CW - PVW) / 2, 56, PVW, PVH }; return r; }
+static Rect wp_mode_btn(int i) { Rect r = { 12 + i * ((view_w-24)/3), 32, (view_w-24)/3-3, 26 }; return r; }
+static Rect wp_prev(void)      { Rect r = { (view_w - PVW) / 2, 64, PVW, PVH }; return r; }
 
 static Rect wp_chip(int i)     { Rect r = { 112 + i * 96, 206, 88, 22 }; return r; }
 
@@ -199,8 +199,7 @@ static void wp_sw_rgb(int i, u8 *r, u8 *g, u8 *b)
     *b = (u8)((cb * mul[row] / 100) + add[row] * (255 - cb) / 255);
 }
 static Rect wp_browse(void)    { Rect r = { 24, 206, 104, 22 }; return r; }
-static Rect wp_act(int i)      { int xs[3] = {84, 180, 266}; int wd[3] = {90, 80, 90};
-                                 Rect r = { xs[i], view_h-30, wd[i], 22 }; return r; }
+static Rect wp_act(int i) { Rect r = {12+i*((view_w-24)/3),view_h-32,(view_w-24)/3-6,24}; return r; }
 
 static int hit(Rect r, int lx, int ly)
 {
@@ -219,7 +218,7 @@ static void wp_fill_rgb(int x, int y, int w, int h, const u8 *c)
     }
 }
 
-static void pv_load(void)
+static void pv_load_locked(void)
 {
     if (!settings_open) return;
     u32 generation = preview_generation;
@@ -247,6 +246,7 @@ static void pv_load(void)
         }
     u8 *b = api->kmalloc(PVW * PVH);
     if (!b) { strlcpy(wmsg, "out of memory", sizeof wmsg); return; }
+    if(api->mem_track)api->mem_track("Wallpaper preview",b,PVW*PVH);
     memset(b, C_G0 + 2, PVW * PVH);
     for (int y = 0; y < PVH; y++) {
         int sy = bmp_src_row(&h, bmp_scale(y, PVH, h.h));
@@ -263,6 +263,8 @@ static void pv_load(void)
     strlcpy(pv_of, dpath, sizeof pv_of);
     kfmt(wmsg, sizeof wmsg, "%dx%d, %u-bit", h.w, h.h, h.bpp);
 }
+static void pv_load(void){api->buffer_lock();pv_load_locked();api->buffer_unlock();}
+
 
 static void wp_picked(const char *path, void *ctx)
 {
@@ -442,13 +444,7 @@ static void settings_mouse(int lx, int ly, int ev)
 
 static void button(int cx, int cy, Rect r, const char *label, int on)
 {
-    int hov = mx >= cx + r.x && mx < cx + r.x + r.w && my >= cy + r.y && my < cy + r.y + r.h;
-    panel(cx + r.x, cy + r.y, r.w, r.h, on);
-    if (on) fill_rect(cx + r.x + 2, cy + r.y + 2, r.w - 4, r.h - 4, C_TB0 + 4);
-    else if (hov) fill_rect(cx + r.x + 2, cy + r.y + 2, r.w - 4, r.h - 4, C_HILITE);
-    int tw = strlen(label) * 8;
-    draw_text(cx + r.x + (r.w - tw) / 2, cy + r.y + (r.h - 16) / 2 + 1, label,
-              (on || hov) ? C_WHITE : C_BLACK);
+    button_label(api,cx+r.x,cy+r.y,r.w,r.h,label,on,1);
 }
 
 static void wp_draw(int cx, int cy, int cw)
@@ -539,6 +535,7 @@ static void settings_draw(Win *w, int cx, int cy, int cw)
     if (!loaded) load_fields();
     fill_rect(cx, cy, cw, view_h, C_FACE);
     if (page) { wp_draw(cx, cy, cw); return; }
+    menu_shade(api,cx,cy+24,cw,38,0);
 
     const char *tabs[3] = {"Display", "Mouse & idle", "Network"};
     for (int i = 0; i < 3; i++) {
@@ -615,8 +612,38 @@ static void set_mouse(int inst, int lx, int ly, int ev, int cw, int ch)
 { (void)inst; (void)cw; (void)ch; settings_mouse(lx, ly + (page ? 0 : 24), ev);fit_page(); }
 
 const KextHeader kext_header = {
-    KEXT_MAGIC, KAPI_VERSION, KEXT_KIND_APP, 0, "Settings"
+    KEXT_MAGIC, KAPI_VERSION, KEXT_KIND_APP, KEXT_RECLAIMABLE, "Settings"
 };
+
+static void confsec(const char *args)
+{
+    union {FCfg cfg;u8 bytes[512];} snapshot;u8 *sector=snapshot.bytes;char line[160];
+    while(*args==' ')args++;
+    int raw=!strcmp(args,"raw");
+    if(*args&&!raw){api->shell_print("Usage: confsec [raw]\n");return;}
+    if(api->config_read(sector,sizeof snapshot)!=512){api->shell_print("Settings sector is unavailable.\n");return;}
+    api->shell_print("Settings sector 256 / 512 bytes / RAM snapshot\n");
+    if(!raw){
+        const FCfg *c=&snapshot.cfg;char path[65];memcpy(path,c->wp_path,64);path[64]=0;
+        kfmt(line,sizeof line,"04  Display mode: %u     06  Mouse speed: %u\n",c->video,c->mouse_speed);api->shell_print(line);
+        kfmt(line,sizeof line,"05  Network: %s\n",c->net_mode?"Static IPv4":"Automatic (DHCP)");api->shell_print(line);
+        const char *names[]={"Static IP","Netmask","Gateway"};
+        for(int i=0;i<3;i++){const u8 *p=sector+8+4*i;kfmt(line,sizeof line,"%02x  %-10s %u.%u.%u.%u\n",8+4*i,names[i],p[0],p[1],p[2],p[3]);api->shell_print(line);}
+        kfmt(line,sizeof line,"07  Screen saver: %s   14  Delay: %u seconds\n",c->ss_enable?"On":"Off",c->ss_secs);api->shell_print(line);
+        kfmt(line,sizeof line,"15  Wallpaper mode: %u\n17  Image: %s\n",c->wp_mode,path);api->shell_print(line);
+        kfmt(line,sizeof line,"57  Color RGB: %u, %u, %u\n",c->wp_col[0],c->wp_col[1],c->wp_col[2]);api->shell_print(line);
+        kfmt(line,sizeof line,"5a  Gradient RGB: %u,%u,%u to %u,%u,%u\n",c->wp_ga[0],c->wp_ga[1],c->wp_ga[2],c->wp_gb[0],c->wp_gb[1],c->wp_gb[2]);api->shell_print(line);
+        kfmt(line,sizeof line,"60  Time zone: %d quarter-hours from UTC\n",c->tz_qh);api->shell_print(line);
+        api->shell_print("Offsets are hexadecimal. Remaining bytes hold network\nand app preferences; unused bytes normally stay zero.\n");
+        api->shell_print("Use Save changes in Settings to write to disk.\nWallpaper uses Apply; network fields must be applied.\nRun confsec again to refresh; confsec raw shows all bytes.\n");return;
+    }
+    for(int row=0;row<512;row+=16){
+        kfmt(line,sizeof line,"%03x ",row);int at=4;
+        for(int i=0;i<16;i++){kfmt(line+at,sizeof line-at,"%02x ",sector[row+i]);at+=3;}
+        line[at++]=' ';for(int i=0;i<16;i++){u8 c=sector[row+i];line[at++]=c>=32&&c<127?c:'.';}
+        line[at++]='\n';line[at]=0;api->shell_print(line);
+    }
+}
 
 int kext_entry(const Kapi *k)
 {
@@ -625,7 +652,8 @@ int kext_entry(const Kapi *k)
     gfx = gdi_bind(k, 11);
     ui_init(k, gfx);
     settings_init();
-    static const AppDesc d = {
+    k->register_cmd("confsec","confsec [raw] - inspect current settings",confsec);
+    static const AppDesc d = {.live_draw=APP_INDEPENDENT,
         .title = "Settings", .max_inst = 1, .in_menu = 1,
         .draw = set_draw, .key = set_key, .mouse = set_mouse, .wheel = set_wheel,
         .client_size = set_csize, .open = set_open, .close = set_close,

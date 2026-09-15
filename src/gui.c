@@ -11,6 +11,7 @@
 #include "shotname.inc"
 #include "../kexts/gdi.h"
 #include "../kexts/g3d.h"
+#include "../kexts/menushade.h"
 
 Win wins[MAXWIN];
 static int zord[MAXWIN];
@@ -41,6 +42,7 @@ static u8 mbtn_prev;
 static int drag_win = -1, drag_ox, drag_oy;
 static int resize_win = -1, resize_ox, resize_oy;
 static int press_win = -1;
+static int press_x, press_y, control_window = -1, redraw_window = -1;
 static int press_desk;
 static int menu_open;
 
@@ -50,6 +52,7 @@ static int  (*ov_key)(int k);
 static int  ov_owner = -1;
 
 void set_overlay_key(int (*key)(int k)) { ov_key = key; }
+int overlay_modal(void){return ov_mouse!=0;}
 
 void set_overlay(void (*draw)(void), int (*mouse)(int x, int y, int ev))
 {
@@ -62,13 +65,14 @@ void set_overlay(void (*draw)(void), int (*mouse)(int x, int y, int ev))
 
 static void ov_drop(void)
 {
+    services_dialog_drop();
     ov_draw = 0; ov_mouse = 0; ov_key = 0; ov_owner = -1;
     gui_dirty = 1;
 }
 
 void overlay_drop_owner(int owner)
 {
-    if (owner < 0 || ov_owner != owner) return;
+    if (owner < 0 || (ov_owner != owner && services_dialog_owner()!=owner)) return;
     for (int i = 0; i < MAXWIN; i++)
         if (wins[i].used && app_type_owner(wins[i].type) == owner) return;
     ov_drop();
@@ -105,10 +109,20 @@ static char datestr[12];
 
 #define BORDER 3
 #define TITLEH 18
-#define CLIX(w) ((w)->x + BORDER)
-#define CLIY(w) ((w)->y + BORDER + TITLEH + 1)
-#define CLIW(w) ((w)->w - 2 * BORDER)
-#define CLIH(w) ((w)->h - (2 * BORDER + TITLEH + 1))
+#define CLIX(v) ((v)->x + BORDER)
+#define CLIY(v) ((v)->y + BORDER + TITLEH + 1)
+#define CLIW(v) ((v)->w - 2 * BORDER)
+#define CLIH(v) ((v)->h - (2 * BORDER + TITLEH + 1))
+
+#include "winimage.inc"
+static struct {char title[24],msg[44];int on,frac;} progress[MAXWIN];
+void app_local_progress(const char *title,const char *msg,int frac)
+{
+    int i=app_current_window();if(i<0)return;
+    progress[i].on=title!=0;progress[i].frac=frac;
+    strlcpy(progress[i].title,title?title:"",sizeof progress[i].title);
+    strlcpy(progress[i].msg,msg?msg:"",sizeof progress[i].msg);gui_dirty=1;
+}
 
 #define MENUW  136
 #define MITEMH 20
@@ -246,6 +260,27 @@ int win_is_hovered(Win *w)
     return top >= 0 && &wins[top] == w;
 }
 
+int control_state(int x, int y, int w, int h)
+{
+    if (!in(mx,my,x,y,w,h)) return 0;
+    if (control_window >= 0) {
+        Win *v = &wins[control_window];
+        if (ov_draw || menu_open || busy_on || !win_is_hovered(v) ||
+            !in(mx,my,CLIX(v),CLIY(v),CLIW(v),CLIH(v))) return 0;
+        if (press_win != control_window) return 1;
+    } else if (control_window != -2) return 0;
+    return 1 | ((mbtn_prev & 1) && in(press_x,press_y,x,y,w,h) ? 2 : 0);
+}
+
+static int win_find(int type,int inst);
+void win_redraw(int type, int inst)
+{
+    int i = win_find(type,inst);
+    if (i < 0) return;
+    if (gui_dirty == 1 || (gui_dirty == 2 && redraw_window != i)) gui_dirty = 1;
+    else { redraw_window = i; gui_dirty = 2; }
+}
+
 static void win_raise(int i)
 {
     for (int k = 0; k < nz; k++)
@@ -353,12 +388,14 @@ void present(void)
     present_done();
 }
 
-static int close_pending = -1;
+static u8 close_pending[MAXWIN];
 
 void win_close(int i)
 {
 
-    if (app_handler_running(i)) { close_pending = i; return; }
+    if(i<0||i>=MAXWIN||!wins[i].used)return;
+    if(app_handler_running(i)){close_pending[i]=1;app_cancel_window(i);if(app_unresponsive(i))app_kill_request(i);return;}
+    close_pending[i]=0;app_forget_window(i);win_image_free(i);progress[i].on=0;
     for (int k = 0; k < nz; k++)
         if (zord[k] == i) {
             for (; k < nz - 1; k++) zord[k] = zord[k + 1];
@@ -377,11 +414,7 @@ void win_close(int i)
 
 void win_close_flush(void)
 {
-    if (close_pending < 0) return;
-    int i = close_pending;
-    close_pending = -1;
-    win_close(i);
-    gui_dirty = 1;
+    for(int i=0;i<MAXWIN;i++)if(close_pending[i]&&!app_handler_running(i)){close_pending[i]=0;win_close(i);gui_dirty=1;}
 }
 
 void win_fit_client(int type, int inst, int cw, int ch)
@@ -582,7 +615,7 @@ void gui_tick(void)
 
 static volatile int esc_latched;
 void esc_arm(void)     { esc_latched = 0; }
-int  esc_pending(void) { return esc_latched; }
+int  esc_pending(void) { return app_current_window()>=0 ? app_cancel_pending() : esc_latched; }
 
 static PumpBtn pump_btn;
 
@@ -591,6 +624,7 @@ static volatile int pump_thr = -1;
 
 void worker_unwind(int preempt_snap)
 {
+    keyboard_unwind();
     u32 f = irq_save();
     if (pump_thr == thr_self)    { pump_inside = 0; pump_thr = -1; }
     if (present_thr == thr_self) { presenting = 0; present_thr = -1; }
@@ -608,6 +642,7 @@ int gui_pump(void)
 
     int resident = kext_current();
 
+    pump_keyboard();
     int esc = kbd_cancel_pending();
     if (esc) esc_latched = 1;
 
@@ -625,7 +660,6 @@ int gui_pump(void)
 
     static u32 pump_last;
     if (gui_dirty && flip_due(ticks, &pump_last, timer_alive) && present_try()) {
-        gui_dirty = 0;
         preempt_disable();
         gui_compose();
         preempt_enable();
@@ -635,7 +669,7 @@ int gui_pump(void)
     kext_enter(resident);
     pump_thr = -1;
     pump_inside = 0;
-    return esc;
+    return app_current_window()>=0?app_cancel_pending():esc;
 }
 
 void gui_wheel(int dz)
@@ -686,6 +720,7 @@ static void screenshot(void)
 void gui_key(int k)
 {
     if (input_dismiss()) return;
+    if(k==27){esc_latched=1;int f=focused();if(f>=0&&!ov_mouse&&!menu_open)app_cancel_window(f);}
     if (k == K_PRTSC) { screenshot(); return; }
     if (key_hook_dispatch(k)) { gui_dirty = 1; return; }
     if (k == '\t' && (kbd_mods() & 8)) {
@@ -762,6 +797,7 @@ void gui_mouse(int dx, int dy, u8 btn, u32 when)
     gui_dirty = 1;
 
     if (lpress) {
+        press_x = mx; press_y = my;
         static u32 lpt; static int lpx, lpy;
         int dx = mx - lpx, dy = my - lpy;
         dclick_flag = timer_alive && (u32)(when - lpt) < 40 &&
@@ -947,11 +983,11 @@ static void draw_win(int i, int foc)
     const char *tt = win_title(w);
     char tbuf2[80];
     int waiting = app_busy(i);
-    if (waiting && hang_stuck_win != i) {
+    if (waiting && !app_unresponsive(i)) {
         kfmt(tbuf2, sizeof tbuf2, "%s - Working%s", tt, &"..."[2 - (ticks / 50) % 3]);
         tt = tbuf2;
     }
-    if (hang_stuck_win == i) {
+    if (app_unresponsive(i)) {
         kfmt(tbuf2, sizeof tbuf2, "%s (not responding)", tt);
         tt = tbuf2;
     }
@@ -964,7 +1000,8 @@ static void draw_win(int i, int foc)
     fill_rect(CLIX(w), CLIY(w), CLIW(w), CLIH(w), C_FACE);
     set_clip(CLIX(w), CLIY(w), CLIW(w), CLIH(w));
 
-    if (waiting && !app_live_draw(w->type)) {
+    if (app_handler_running(i) && !app_live_draw(w->type)) {
+        if(!win_image_draw(i)){
         int bw = 150, bh = 30;
         int bx = CLIX(w) + (CLIW(w) - bw) / 2, by = CLIY(w) + (CLIH(w) - bh) / 2;
         if (CLIW(w) >= bw && CLIH(w) >= bh) {
@@ -973,8 +1010,19 @@ static void draw_win(int i, int foc)
             kfmt(label, sizeof label, "Working%s", &"..."[2 - (ticks / 50) % 3]);
             draw_text(bx + 12, by + 9, label, C_G0 + 3);
         }
+        }
     } else {
+        control_window = i;
         app_draw(w, CLIX(w), CLIY(w), CLIW(w), CLIH(w));
+        control_window = -1;
+        if(w->used&&!app_live_draw(w->type)&&!app_handler_running(i))win_image_save(i);
+    }
+    if(waiting&&CLIW(w)>100){
+        int bx=CLIX(w)+4,by=CLIY(w)+CLIH(w)-22,bw=CLIW(w)-8;
+        fill_rect(bx,by,bw,20,C_FACE);hline(bx,by,bw,C_SHAD);
+        const char *msg=progress[i].on?(progress[i].msg[0]?progress[i].msg:progress[i].title):"Working...";
+        draw_text_clip(bx+4,by+3,msg,C_NAVY,bw-12);
+        if(progress[i].on&&progress[i].frac>=0){int f=progress[i].frac;if(f>256)f=256;hline(bx,by+19,bw*f/256,C_NAVY);}
     }
     clear_clip();
     if (app_resizable(w->type)) {
@@ -993,11 +1041,12 @@ static void draw_menu(void)
     int x0, y0, mh;
     topmenu_geo(&x0, &y0, &mh);
     panel(x0, y0, MENUW, mh, 0);
+    menu_shade(&kapi,x0+2,y0+2,MENUW-4,mh-4,0);
     fill_rect(x0 + 2, y0 + 2, 22, mh - 4, C_TB0 + 4);
     for (int i = 0; i < NCAT; i++) {
         int iy = topitem_y(y0, i);
         int hov = (open_cat == i) || in(mx, my, x0 + 2, iy, MENUW - 4, MITEMH);
-        if (hov) fill_rect(x0 + 2, iy, MENUW - 4, MITEMH, C_HILITE);
+        if (hov) menu_shade(&kapi,x0+2,iy,MENUW-4,MITEMH,1);
         draw_text(x0 + 30, iy + 2, cat_name[i], hov ? C_WHITE : C_BLACK);
         draw_char(x0 + MENUW - 14, iy + 2, (char)0x10,
                   hov ? C_WHITE : C_G0 + 4);
@@ -1007,17 +1056,18 @@ static void draw_menu(void)
     hline(x0 + 6, sepy + 1, MENUW - 12, C_LIGHT);
     int ry = topitem_y(y0, NCAT);
     int rhov = in(mx, my, x0 + 2, ry, MENUW - 4, MITEMH);
-    if (rhov) fill_rect(x0 + 2, ry, MENUW - 4, MITEMH, C_HILITE);
+    if (rhov) menu_shade(&kapi,x0+2,ry,MENUW-4,MITEMH,1);
     draw_text(x0 + 30, ry + 2, "Reboot", rhov ? C_WHITE : C_BLACK);
 
     if (open_cat >= 0) {
         int sx, sy, sw, sh, n = cat_count(open_cat);
         submenu_geo(open_cat, &sx, &sy, &sw, &sh);
         panel(sx, sy, sw, sh, 0);
+        menu_shade(&kapi,sx+2,sy+2,sw-4,sh-4,0);
         for (int i = 0; i < n; i++) {
             int iy = sy + 2 + i * MITEMH;
             int hov = in(mx, my, sx + 2, iy, sw - 4, MITEMH);
-            if (hov) fill_rect(sx + 2, iy, sw - 4, MITEMH, C_HILITE);
+            if (hov) menu_shade(&kapi,sx+2,iy,sw-4,MITEMH,1);
             draw_text(sx + 8, iy + 2, app_desc(cat_app(open_cat, i))->title,
                       hov ? C_WHITE : C_BLACK);
         }
@@ -1046,7 +1096,18 @@ void gui_frame_state(FrameState *s)
 
 void gui_compose(void)
 {
+    int partial = gui_dirty == 2 && redraw_window >= 0 && nz > 0 &&
+        zord[nz-1] == redraw_window && wins[redraw_window].x>=0 && wins[redraw_window].y>=0 &&
+        wins[redraw_window].x+wins[redraw_window].w<=SW && wins[redraw_window].y+wins[redraw_window].h<=SH-TBH && !ss_active && !ov_draw && !menu_open &&
+        !busy_on && !dnd_on && !drect_on && at_k < 0 &&
+        !(fault_banner[0] && ticks < fault_banner_until);
+    gui_dirty = 0;
     clear_clip();
+    if (partial) {
+        draw_win(redraw_window,focused()==redraw_window);
+        draw_cursor(mx,my);
+        return;
+    }
     if (ss_active) {
         FAULT_GUARD(ss_draw(), { ss_active = 0; });
         if (ss_active) return;
@@ -1088,11 +1149,13 @@ void gui_compose(void)
         void (*cur)(void) = ov_draw;
         int resident = kext_current();
         kext_enter(ov_owner);
+        control_window = -2;
         FAULT_GUARD(cur(), {
             klog("overlay draw handler faulted - overlay closed\n");
             ov_drop();
         });
         kext_enter(resident);
+        control_window = -1;
     }
 
     if (drect_on && (mbtn_prev & 1)) {
@@ -1148,6 +1211,7 @@ void gui_compose(void)
 
 void busy_set(const char *title, const char *msg, int frac256)
 {
+    if(app_current_window()>=0){app_local_progress(title,msg,frac256);gui_pump();return;}
     strlcpy(busy_title, title, sizeof busy_title);
     strlcpy(busy_msg, msg, sizeof busy_msg);
     busy_frac = frac256;
@@ -1158,6 +1222,7 @@ void busy_set(const char *title, const char *msg, int frac256)
 
 void busy_end(void)
 {
+    if(app_current_window()>=0){app_local_progress(0,0,-1);return;}
     busy_on = 0;
     gui_dirty = 1;
 }

@@ -61,38 +61,63 @@ int desk_key(int k)
     return r;
 }
 
-#define DEFER_CB(NAME, ARGT)                                          \
-    static struct { void (*cb)(ARGT, void *); void *ctx; int owner; } NAME; \
-    static void NAME##_tramp(ARGT a, void *c) {                       \
-        (void)c;                                                      \
-        kext_enter(NAME.owner);                                       \
-        if (NAME.cb) FAULT_GUARD(NAME.cb(a, NAME.ctx), {});           \
+static int dialog_active,dialog_owner=-1;
+static int dialog_begin(int owner)
+{
+    for(;;){
+        u32 f=irq_save();
+        if(!dialog_active&&!overlay_modal()){dialog_active=1;dialog_owner=owner;irq_restore(f);return 1;}
+        irq_restore(f);
+        if(app_cancel_pending())return 0;
+        gui_pump();thr_yield();
     }
-DEFER_CB(g_msg,   int)
-DEFER_CB(g_menu,  int)
-DEFER_CB(g_fpick, const char *)
-DEFER_CB(g_fsave, const char *)
+}
+static void dialog_end(void){dialog_active=0;dialog_owner=-1;}
+static int callback_window(int owner)
+{
+    int w=app_current_window();
+    return w>=0&&app_type_owner(wins[w].type)==owner?w:-1;
+}
+
+#define DEFER_CB(NAME, ARGT, PATH, GATED) \
+    static struct {void (*cb)(ARGT,void *);void *ctx;int owner,win;} NAME; \
+    static void NAME##_tramp(ARGT a,void *c){ \
+        (void)c;void (*fn)(ARGT,void *)=NAME.cb;void *ctx=NAME.ctx;int owner=NAME.owner,win=NAME.win;NAME.cb=0; \
+        int queued=fn?app_callback(owner,win,(void *)fn,ctx,PATH?0:(int)a,PATH?(const char *)a:0,PATH):0; \
+        if(GATED)dialog_end(); \
+        if(fn&&!queued){kext_enter(owner);FAULT_GUARD(fn(a,ctx),{});} \
+    }
+DEFER_CB(g_msg,int,0,1)
+DEFER_CB(g_menu,int,0,0)
+DEFER_CB(g_fpick,const char *,1,1)
+DEFER_CB(g_fsave,const char *,1,1)
+
+void services_dialog_drop(void)
+{
+    g_msg.cb=0;g_fpick.cb=0;g_fsave.cb=0;dialog_end();
+}
+int services_dialog_owner(void){return dialog_active?dialog_owner:-1;}
 
 int clip_set(const char *type, const void *data, u32 n)
 {
-    if (use_desk() && dops->clip_set) return dops->clip_set(type, data, n);
+    if (dops && dops->clip_set && use_desk()) return dops->clip_set(type, data, n);
     return clip_set_native(type, data, n);
 }
 int clip_get(const char *type, void *buf, u32 max)
 {
-    if (use_desk() && dops->clip_get) return dops->clip_get(type, buf, max);
+    if (dops && dops->clip_get && use_desk()) return dops->clip_get(type, buf, max);
     return clip_get_native(type, buf, max);
 }
 const char *clip_type(void)
 {
-    if (use_desk() && dops->clip_type) return dops->clip_type();
+    if (dops && dops->clip_type && use_desk()) return dops->clip_type();
     return clip_type_native();
 }
 void menu_show(int x, int y, const char *const *items, int n,
                void (*pick)(int idx, void *ctx), void *ctx)
 {
 
-    g_menu.cb = pick; g_menu.ctx = ctx; g_menu.owner = kext_current();
+    g_menu.cb = pick; g_menu.ctx = ctx; g_menu.owner = kext_current(); g_menu.win=callback_window(g_menu.owner);
     if (use_desk() && dops->menu_show)
         dops->menu_show(x, y, items, n, g_menu_tramp, 0);
     else menu_show_native(x, y, items, n, g_menu_tramp, 0);
@@ -101,6 +126,7 @@ void menu_show(int x, int y, const char *const *items, int n,
 int clip_set_text(const char *s) { return clip_set("text", s, strlen(s) + 1); }
 int clip_get_text(char *buf, int cap)
 {
+    if (!buf || cap <= 0) return -1;
     int n = clip_get("text", buf, cap - 1 > 0 ? (u32)(cap - 1) : 0);
     if (n < 0) { if (cap) buf[0] = 0; return -1; }
     if (n >= cap) n = cap - 1;
@@ -111,18 +137,22 @@ int clip_get_text(char *buf, int cap)
 void msgbox(const char *title, const char *text, int buttons,
             void (*cb)(int result, void *ctx), void *ctx)
 {
-    if (use_dlg() && dlg->msgbox) {
-        g_msg.cb = cb; g_msg.ctx = ctx; g_msg.owner = kext_current();
+    int owner=kext_current();
+    if (dlg && dlg->msgbox) {
+        if(!dialog_begin(owner)){if(cb)cb(MBR_CANCEL,ctx);return;}
+        use_dlg();g_msg.cb = cb; g_msg.ctx = ctx; g_msg.owner = owner; g_msg.win=callback_window(owner);
         dlg->msgbox(title, text, buttons, g_msg_tramp, 0);
     }
     else if (cb) cb(MBR_OK, ctx);
 }
-void notify(const char *text) { if (use_dlg() && dlg->notify) dlg->notify(text); }
+void notify(const char *text) { if(dialog_active||overlay_modal()){fault_show_banner(text);return;} if (use_dlg() && dlg->notify) dlg->notify(text); }
 void file_picker(const char *title, const char *ext, int dirs_only,
                  void (*cb)(const char *path, void *ctx), void *ctx)
 {
-    if (use_dlg() && dlg->file_picker) {
-        g_fpick.cb = cb; g_fpick.ctx = ctx; g_fpick.owner = kext_current();
+    int owner=kext_current();
+    if (dlg && dlg->file_picker) {
+        if(!dialog_begin(owner)){if(cb)cb(0,ctx);return;}
+        use_dlg();g_fpick.cb = cb; g_fpick.ctx = ctx; g_fpick.owner = owner; g_fpick.win=callback_window(owner);
         dlg->file_picker(title, ext, dirs_only, g_fpick_tramp, 0);
     }
     else if (cb) cb(0, ctx);
@@ -130,15 +160,17 @@ void file_picker(const char *title, const char *ext, int dirs_only,
 void file_save(const char *title, const char *ext, const char *defname,
                void (*cb)(const char *path, void *ctx), void *ctx)
 {
-    if (use_dlg() && dlg->file_save) {
-        g_fsave.cb = cb; g_fsave.ctx = ctx; g_fsave.owner = kext_current();
+    int owner=kext_current();
+    if (dlg && dlg->file_save) {
+        if(!dialog_begin(owner)){if(cb)cb(0,ctx);return;}
+        use_dlg();g_fsave.cb = cb; g_fsave.ctx = ctx; g_fsave.owner = owner; g_fsave.win=callback_window(owner);
         dlg->file_save(title, ext, defname, g_fsave_tramp, 0);
     }
     else if (cb) cb(0, ctx);
 }
-void progress_open(const char *title) { if (use_dlg() && dlg->progress_open) dlg->progress_open(title); }
-void progress_set(int pct, const char *label) { if (use_dlg() && dlg->progress_set) dlg->progress_set(pct, label); }
-void progress_close(void) { if (use_dlg() && dlg->progress_close) dlg->progress_close(); }
+void progress_open(const char *title) { if(app_current_window()>=0){app_local_progress(title,0,0);return;} if (use_dlg() && dlg->progress_open) dlg->progress_open(title); }
+void progress_set(int pct, const char *label) { if(app_current_window()>=0){app_local_progress("Working",label,pct<0?-1:pct>100?256:pct*256/100);gui_pump();return;} if (use_dlg() && dlg->progress_set) dlg->progress_set(pct, label); }
+void progress_close(void) { if(app_current_window()>=0){app_local_progress(0,0,-1);return;} if (use_dlg() && dlg->progress_close) dlg->progress_close(); }
 
 int fat_mount(void)        { FATLOCK(fops->mount(), 0) }
 const char *fat_label(void){ FATLOCKV(const char *, use_fat(), fops->label(), "none") }
@@ -223,4 +255,12 @@ int services_kext_busy(int owner)
 {
     return (fops && fat_owner==owner) || (nops && net_owner==owner) ||
            (dops && desk_owner==owner) || (dlg && dlg_owner==owner);
+}
+void services_drop_owner(int owner)
+{
+    if(dialog_active&&dialog_owner==owner)services_dialog_drop();
+    if(g_msg.owner==owner)g_msg.cb=0;
+    if(g_menu.owner==owner)g_menu.cb=0;
+    if(g_fpick.owner==owner)g_fpick.cb=0;
+    if(g_fsave.owner==owner)g_fsave.cb=0;
 }

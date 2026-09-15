@@ -168,7 +168,7 @@ static void pong_csize(int inst, int *w, int *h)
 }
 
 const KextHeader kext_header = {
-    KEXT_MAGIC, KAPI_VERSION, KEXT_KIND_APP, 0, "Pong"
+    KEXT_MAGIC, KAPI_VERSION, KEXT_KIND_APP, KEXT_RECLAIMABLE, "Pong"
 };
 
 int kext_entry(const Kapi *k)
@@ -176,7 +176,7 @@ int kext_entry(const Kapi *k)
     if (k->version < KAPI_VERSION) return 1;
     api = k;
     gfx = gdi_bind(k, 11);
-    static const AppDesc d = {
+    static const AppDesc d = {.live_draw=APP_LIVE_DRAW|APP_INDEPENDENT,
         .title = "Pong", .max_inst = 1, .in_menu = 1,
         .open = pong_open, .draw = pong_draw,
         .key = pong_key, .client_size = pong_csize,

@@ -4,7 +4,9 @@
 #include "ui.inc"
 static const Kapi *api;
 static Breakout game;
-static int type=-1,timer=-1,running,started,ready=1;
+static int type=-1,timer=-1,running,started,ready=1,pressed=-1;
+static u32 last_step;
+static UiRect button(int i){return ui_r(i?90:4,BO_H+29,80,22);}
 static void pause_game(void){running=0;if(timer>=0){api->timer_del(timer);timer=-1;}}
 static void tick(void *ctx)
 {
@@ -12,18 +14,23 @@ static void tick(void *ctx)
     for(int i=0;i<api->win_max();i++){const Win *w=api->win_slot(i);if(w&&w->type==type&&api->win_is_focused((Win *)w)){focused=1;break;}}
     if(!focused){pause_game();api->gui_dirty();return;}
     int dir=(api->key_down(K_RIGHT)||api->key_down('d'))-(api->key_down(K_LEFT)||api->key_down('a'));
-    bo_paddle(&game,game.paddle+dir*5);
-    if(bo_step(&game)){ready=1;pause_game();}
-    api->gui_dirty();
+    u32 elapsed=*api->ticks-last_step;
+    if(elapsed>8)elapsed=8;
+    for(;elapsed>=2;elapsed-=2){
+        bo_paddle(&game,game.paddle+dir*6);
+        if(bo_step(&game)){ready=1;pause_game();break;}
+    }
+    last_step=*api->ticks-elapsed%2;
+    api->win_redraw(type,0);
 }
 static void toggle(void)
 {
     if(running){pause_game();return;}
     if(game.over)return;
-    timer=api->timer_add(2,tick,0);running=timer>=0;if(running)ready=0;
+    last_step=*api->ticks;timer=api->timer_add(2,tick,0);running=timer>=0;if(running)ready=0;
 }
 static void opened(int i){(void)i;if(!started){bo_new(&game);started=1;}}
-static void closed(int i){(void)i;pause_game();}
+static void closed(int i){(void)i;pause_game();pressed=-1;}
 static void key(int i,int k)
 {
     (void)i;if(k==' '||k=='p')toggle();else if(k=='n'){pause_game();bo_new(&game);ready=1;}
@@ -31,13 +38,16 @@ static void key(int i,int k)
 }
 static void mouse(int i,int x,int y,int ev,int cw,int ch)
 {
-    (void)i;(void)cw;(void)ch;if(ev!=EV_PRESS&&ev!=EV_DRAG)return;
+    (void)i;(void)cw;(void)ch;
+    if(ev==EV_RELEASE){int p=pressed;pressed=-1;if(p>=0&&ui_hit(button(p),x,y)){if(!p){pause_game();bo_new(&game);ready=1;}else toggle();}return;}
+    if(ev!=EV_PRESS&&ev!=EV_DRAG)return;
+    if(ev==EV_PRESS)for(int b=0;b<2;b++)if(ui_hit(button(b),x,y)&&(!b||!game.over)){pressed=b;return;}
+    if(pressed>=0)return;
     if(y>=26&&y<26+BO_H){bo_paddle(&game,x-BO_PW/2);if(ready)bo_serve(&game);}
-    else if(ev==EV_PRESS&&y>=26+BO_H){if(x<90){pause_game();bo_new(&game);ready=1;}else toggle();}
 }
 static void draw(Win *w,int x,int y,int cw,int ch)
 {
-    (void)w;(void)ch;char text[64];
+    (void)ch;char text[64];
     api->kfmt(text,sizeof text,"%d points   Level %d   Lives %d",game.score,game.level,game.lives);ui_header(x,y,cw,text);
     int fy=y+26;api->fill_rect(x,fy,BO_W,BO_H,C_NAVY);
     static const u8 colors[]={C_RED,C_YELLOW,C_BGREEN,C_CYAN,C_PURPLE};
@@ -48,15 +58,19 @@ static void draw(Win *w,int x,int y,int cw,int ch)
     api->fill_rect(x+game.paddle,fy+BO_PY,BO_PW,6,C_SILVER);api->bevel(x+game.paddle,fy+BO_PY,BO_PW,6,0);
     api->fill_rect(x+game.x/256-BO_R,fy+game.y/256-BO_R,6,6,C_WHITE);
     if(!running){const char *s=game.over?"Game over - New to play again":"Space to play / pause";api->draw_text(x+(cw-(int)api->strlen(s)*8)/2,fy+112,s,C_WHITE);}
-    ui_button(x,y,ui_r(4,BO_H+29,80,22),"New",0,1);
-    ui_button(x,y,ui_r(90,BO_H+29,80,22),running?"Pause":"Play",0,!game.over);
+    for(int b=0;b<2;b++){
+        UiRect r=button(b);int en=!b||!game.over;
+        int hover=en&&api->win_is_hovered(w)&&ui_hit(r,*api->mouse_x-x,*api->mouse_y-y);
+        ui_button(x,y,r,b?(running?"Pause":"Play"):"New",pressed==b&&hover,en);
+        if(hover)api->focus_rect(x+r.x+3,y+r.y+3,r.w-6,r.h-6);
+    }
     api->draw_text(x+182,y+BO_H+33,"Arrows / A D",C_GRAY);
 }
 static void size(int i,int *w,int *h){(void)i;*w=BO_W;*h=BO_H+55;}
 const KextHeader kext_header={KEXT_MAGIC,KAPI_VERSION,KEXT_KIND_APP,0,"Breakout"};
 int kext_entry(const Kapi *k)
 {
-    api=k;ui_init(k,0);static const AppDesc d={.title="Breakout",.max_inst=1,.in_menu=1,.category=APP_CAT_GAMES,
+    api=k;ui_init(k,0);static const AppDesc d={.live_draw=APP_LIVE_DRAW|APP_INDEPENDENT,.title="Breakout",.max_inst=1,.in_menu=1,.category=APP_CAT_GAMES,
         .open=opened,.close=closed,.draw=draw,.key=key,.mouse=mouse,.client_size=size};
     type=k->register_app(&d);return type<0;
 }

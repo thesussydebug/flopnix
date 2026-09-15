@@ -1,4 +1,5 @@
 #include "kapi.h"
+#include "button.h"
 #include "mine_core.inc"
 
 static const Kapi *api;
@@ -97,9 +98,7 @@ static int over;
 static void draw_face(int x, int y)
 {
     int cx = x + 12, cy = y + 12;
-    int hov = over && *api->mouse_x >= x && *api->mouse_x < x + 24 &&
-              *api->mouse_y >= y && *api->mouse_y < y + 24;
-    api->panel(x, y, 24, 24, hov);
+    int state=button_face(api,x,y,24,24,0,1);cx+=state==2;cy+=state==2;
     api->fill_circle(cx, cy, 8, C_YELLOW);
     api->circle(cx, cy, 8, C_BLACK);
     if (dead) {
@@ -256,7 +255,7 @@ int kext_entry(const Kapi *k)
     if (k->version < KAPI_VERSION) return 1;
     api = k;
     new_game();
-    static const AppDesc d = {
+    static const AppDesc d = {.live_draw=APP_LIVE_DRAW|APP_INDEPENDENT,
         .title = "Minesweeper", .max_inst = 1, .in_menu = 1,
         .open = ms_open, .draw = ms_draw, .mouse = ms_mouse, .key = ms_key,
         .client_size = ms_csize, .category = APP_CAT_GAMES,

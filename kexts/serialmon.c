@@ -202,7 +202,7 @@ static void sm_close(int inst)
 }
 
 const KextHeader kext_header = {
-    KEXT_MAGIC, KAPI_VERSION, KEXT_KIND_APP, 0, "Serial Monitor"
+    KEXT_MAGIC, KAPI_VERSION, KEXT_KIND_APP, KEXT_RECLAIMABLE, "Serial Monitor"
 };
 
 int kext_entry(const Kapi *k)
@@ -210,7 +210,7 @@ int kext_entry(const Kapi *k)
     if (k->version < KAPI_VERSION) return 1;
     api = k;
     gfx = gdi_bind(k, 11);
-    static const AppDesc d = {
+    static const AppDesc d = {.live_draw=APP_INDEPENDENT,
         .title = "Serial Monitor", .max_inst = 1, .in_menu = 1,
         .open = sm_open, .close = sm_close, .draw = sm_draw, .key = sm_key, .mouse = sm_mouse,
         .client_size = sm_csize, .category = APP_CAT_DEV,

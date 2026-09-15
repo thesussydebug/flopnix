@@ -7,32 +7,38 @@ static inline int sc_eq(const char *a, const char *b)
 
 static inline const char *sh_usage(const char *c)
 {
-    if (sc_eq(c, "ls"))       return "ls [dir]      - list a directory on A:";
+    if(sc_eq(c,"uniq"))return "uniq [-c] file [> output] - collapse adjacent repeated lines";
+    if(sc_eq(c,"strings"))return "strings [-n length] file [> output] - readable text from a binary";
+    if(sc_eq(c,"crc32"))return "crc32 file [> output] - checksum a file";
+    if(sc_eq(c,"cmp"))return "cmp file1 file2 [> output] - compare files byte by byte";
+
+    if (sc_eq(c, "ls"))       return "ls [dir]      - list a directory on A: or U:";
     if (sc_eq(c, "cd"))       return "cd [dir]      - change directory (.. for up)";
     if (sc_eq(c, "tree"))     return "tree [dir]    - show the directory tree";
     if (sc_eq(c, "mkdir"))    return "mkdir <name>  - create a folder";
     if (sc_eq(c, "rmdir"))    return "rmdir <name>  - remove an empty folder";
     if (sc_eq(c, "du"))       return "du [dir]      - disk used under a folder";
     if (sc_eq(c, "map"))      return "map           - show which sectors each file owns";
-    if (sc_eq(c, "cat"))      return "cat <file>    - print a file on A:";
-    if (sc_eq(c, "rm"))       return "rm <file>     - delete a file on A:";
-    if (sc_eq(c, "cp"))       return "cp <src> <dst>- copy a file on A:";
-    if (sc_eq(c, "mv"))       return "mv <src> <dst>- rename a file on A:";
+    if (sc_eq(c, "cat"))      return "cat file [> output] - print or copy file contents";
+    if (sc_eq(c, "rm"))       return "rm <file>     - delete a file";
+    if (sc_eq(c, "cp"))       return "cp <src> <dst>- copy a file between paths";
+    if (sc_eq(c, "mv"))       return "mv <src> <dst>- move a file between paths";
     if (sc_eq(c, "touch"))    return "touch <file>  - create/update a file";
     if (sc_eq(c, "echo"))     return "echo <text> [>|>> file] - print/write/append";
     if (sc_eq(c, "hexdump"))  return "hexdump <file>- hex+ascii dump";
-    if (sc_eq(c, "wc"))       return "wc <file>     - count lines/words/bytes";
-    if (sc_eq(c, "head"))     return "head <file>   - first 10 lines";
-    if (sc_eq(c, "tail"))     return "tail <file>   - last 10 lines";
-    if (sc_eq(c, "grep"))     return "grep <text> <file> - matching lines";
+    if (sc_eq(c, "wc"))       return "wc [-lwc] file [> output] - newline, word, byte counts";
+    if (sc_eq(c, "head"))     return "head [-n count] file [> output] - first lines";
+    if (sc_eq(c, "tail"))     return "tail [-n count] file [> output] - last lines";
+    if (sc_eq(c, "grep"))     return "grep [-invc] pattern file [> output] - matching lines";
     if (sc_eq(c, "find"))     return "find <text>   - files whose name matches";
-    if (sc_eq(c, "edit"))     return "edit <file>   - open in the text editor";
+    if (sc_eq(c, "edit"))     return "edit <file>   - open a file for editing";
     if (sc_eq(c, "uls"))      return "uls [path]    - list USB (FAT) files";
     if (sc_eq(c, "ucat"))     return "ucat <path>   - print a USB file";
     if (sc_eq(c, "ucp"))      return "ucp <usb> <a> - copy USB file to A:";
     if (sc_eq(c, "urm"))      return "urm <path>    - delete a USB file";
-    if (sc_eq(c, "ipconfig")) return "ipconfig [ip] - show or set this machine's IP";
-    if (sc_eq(c, "ifconfig")) return "ifconfig [ip] - old name for ipconfig";
+    if (sc_eq(c, "ifconfig")) return "ifconfig [ip] - show or set the network interface";
+    if (sc_eq(c, "open")) return "open <path>   - open a file or extension (A: or U:)";
+    if (sc_eq(c, "confsec")) return "confsec [raw] - inspect current settings";
     if (sc_eq(c, "ping"))     return "ping <ip|host>- ICMP echo (resolves names)";
     if (sc_eq(c, "dns"))      return "dns <host>    - resolve a hostname to an IP";
     if (sc_eq(c, "ntp"))      return "ntp [+/-H:MM] - set the clock from the net";
@@ -44,7 +50,7 @@ static inline const char *sh_usage(const char *c)
     if (sc_eq(c, "uname"))    return "uname [-a]    - system name";
     if (sc_eq(c, "df"))       return "df            - disk space (A: + USB)";
     if (sc_eq(c, "cal"))      return "cal           - this month's calendar";
-    if (sc_eq(c, "sort"))     return "sort <file>   - print lines sorted";
+    if (sc_eq(c, "sort"))     return "sort [-nru] file [> output] - numeric, reverse, unique";
     if (sc_eq(c, "stat"))     return "stat <file>   - file details (A:/USB)";
     if (sc_eq(c, "history"))  return "history       - recent commands";
     if (sc_eq(c, "calc"))     return "calc <expr>   - integer math + - * / % ()";
@@ -84,11 +90,11 @@ static inline const char *sh_usage(const char *c)
     return 0;
 }
 
-static const char *const sh_names[] = {
+static const char *const sh_names[] = {"uniq","strings","crc32","cmp",
     "about", "beep", "bios", "bootsec", "cal", "calc", "cat", "cd", "clear",
     "cls", "cp", "crash", "date", "defrag", "disk", "dmesg", "dns", "du", "echo",
     "edit", "fetch", "find", "free", "fscan", "grep", "head", "help",
-    "hexdump", "history", "ifconfig", "ipconfig", "kext", "kill", "kupdate",
+    "hexdump", "history", "ifconfig", "kext", "kill", "kupdate", "open", "confsec",
     "lspci",
     "ls", "map", "matrix", "mkdir", "mv", "ntp", "pack", "ping", "ps", "pwd",
     "rainbow",

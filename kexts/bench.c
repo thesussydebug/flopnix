@@ -1,5 +1,6 @@
 #include "kapi.h"
 #include "gdi.h"
+#include "button.h"
 #include "bench_core.inc"
 
 static const Kapi *api;
@@ -128,10 +129,7 @@ static void bench_draw(Win *w, int cx, int cy, int cw, int ch)
     api->fill_rect(cx, cy, cw, ch, C_FACE);
     if (gfx) { gfx->set_dither(1); gfx->fill_gradient(cx, cy, cw, 32, GRGB(214, 218, 228), GRGB(180, 186, 202), 1); gfx->set_dither(0); }
     api->draw_text(cx + 10, cy + 8, "Computer speed", C_NAVY);
-    int hov = api->win_is_hovered(w) && *api->mouse_x >= cx + cw - 62 && *api->mouse_x < cx + cw - 10 &&
-              *api->mouse_y >= cy + 6 && *api->mouse_y < cy + 27;
-    api->panel(cx + cw - 62, cy + 6, 52, 21, hov);
-    api->draw_text(cx + cw - 48, cy + 9, "Run", C_BLACK);
+    (void)w;button_label(api,cx+cw-62,cy+6,52,21,"Run",0,!running);
 
     if (!has_res) {
         api->draw_text(cx + 10, cy + 40, running ? "Measuring..." : "Run a quick check of this computer", C_G0 + 3);

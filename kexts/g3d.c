@@ -63,6 +63,7 @@ static void cmap_ensure(void)
     if (gd->abi >= 11) gd->pal_ramps();
     cmap = (u8 *)api->kmalloc(64 * 256);
     if (!cmap) return;
+    if(api->mem_track)api->mem_track("3D palette cache",cmap,64*256);
     for (int i = 0; i < 256; i++) {
         u32 base = gd->pal_unpack((u8)i);
         for (int l = 0; l < 64; l++)
@@ -79,6 +80,7 @@ static void zbuf_ensure(G3D *c)
     u32 pixels = (u32)c->vw * (u32)c->vh;
     c->zbuf = (u16 *)api->kmalloc(pixels * 2);
     if (c->zbuf) {
+        if(api->mem_track)api->mem_track("3D depth buffer",c->zbuf,pixels*2);
         c->zbw = c->vw; c->zbh = c->vh;
         for (u32 i = 0; i < pixels; i++) c->zbuf[i] = 0xFFFF;
     }
@@ -91,6 +93,7 @@ static G3D *g3_create(void)
     if (!gdi()) return 0;
     G3D *c = (G3D *)api->kmalloc(sizeof *c);
     if (!c) return 0;
+    if(api->mem_track)api->mem_track("3D context",c,sizeof *c);
     memset(c, 0, sizeof *c);
     for (int i = 0; i < 3; i++) m4_ident(c->stk[i][0].m);
     c->zn = FX(1); c->zf = FX(16);

@@ -1,6 +1,13 @@
 /* String, memory, and number helpers without a C library. */
 #include "os.h"
 
+int memcmp(const void *a,const void *b,u32 n)
+{
+    const u8 *x=a,*y=b;
+    for(u32 i=0;i<n;i++)if(x[i]!=y[i])return (int)x[i]-y[i];
+    return 0;
+}
+
 MemoryLayout memory;
 u8 *const iobuf = (u8 *)MEM_IO_BASE;
 char   name_scratch[64][64];

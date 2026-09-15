@@ -10,7 +10,7 @@ typedef struct { int x,y,vx,vy,paddle,level,lives,left,score,over; u8 brick[40];
 static void bo_serve(Breakout *s)
 {
     s->x=(s->paddle+BO_PW/2)*256;s->y=(BO_PY-BO_R-1)*256;
-    s->vx=(s->level&1)?320:-320;s->vy=-(512+(s->level<20?s->level:20)*16);
+    s->vx=(s->level&1)?384:-384;s->vy=-(640+(s->level<12?s->level:12)*24);
 }
 static void bo_level(Breakout *s)
 {

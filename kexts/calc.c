@@ -1,5 +1,6 @@
 #include "kapi.h"
 #include "gdi.h"
+#include "ui.inc"
 
 static const Kapi *api;
 static const GdiOps *gfx;
@@ -192,26 +193,21 @@ static void calc_draw(Win *w, int cx, int cy, int cw, int ch)
     for (int r = 0; r < 5; r++)
         for (int c = 0; c < 4; c++) {
             int bx = cx + 8 + c * (BW + GAP), by = cy + 40 + r * (BH + GAP);
-            int hov = *api->mouse_x >= bx && *api->mouse_x < bx + BW &&
-                      *api->mouse_y >= by && *api->mouse_y < by + BH;
-            api->panel(bx, by, BW, BH, hov);
-            const char *s = grid[r][c];
-            int sl = (int)api->strlen(s);
-            u8 fg = (c == 3 || r == 0) ? C_NAVY : C_BLACK;
-            api->draw_text(bx + (BW - sl * 8) / 2, by + 4, s, fg);
+            button_label(api,bx,by,BW,BH,grid[r][c],0,1);
         }
 }
 
 static void calc_mouse(int inst, int lx, int ly, int ev, int cw, int ch)
 {
     (void)inst; (void)cw; (void)ch;
-    if (ev != EV_PRESS) return;
+    ui_pointer(lx,ly,ev);
+    if (ev != EV_RELEASE) return;
 
     if (lx < 8 || ly < 40) return;
     int c = (lx - 8) / (BW + GAP), r = (ly - 40) / (BH + GAP);
     if (c < 0 || c > 3 || r < 0 || r > 4) return;
     if (lx - 8 - c * (BW + GAP) >= BW || ly - 40 - r * (BH + GAP) >= BH) return;
-    press(btn_key(r, c));
+    if(ui_click(ui_r(8+c*(BW+GAP),40+r*(BH+GAP),BW,BH),lx,ly,ev))press(btn_key(r,c));
 }
 
 static void calc_key(int inst, int k)
@@ -232,7 +228,7 @@ int kext_entry(const Kapi *k)
     if (k->version < KAPI_VERSION) return 1;
     api = k;
     gfx = gdi_bind(k, 11);
-    static const AppDesc d = {
+    static const AppDesc d = {.live_draw=APP_INDEPENDENT,
         .title = "Calculator", .max_inst = 1, .in_menu = 1,
         .draw = calc_draw, .key = calc_key, .mouse = calc_mouse,
         .client_size = calc_csize,

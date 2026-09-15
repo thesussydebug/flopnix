@@ -2,268 +2,154 @@
 #include "gdi.h"
 #include "ui.inc"
 #include "sbdrag.inc"
-
+#include "kextstate.h"
 static const Kapi *api;
-static const GdiOps *gfx;
-static int my_type = -1;
-static int scroll;
-static SbDrag sbd;
-static int list_y0, list_len, list_n;
-
-#define WINW  560
-#define WINH  420
-#define BAR_Y (UI_HDR + 30)
-#define BAR_H 26
-#define GA_Y  (BAR_Y + BAR_H + 30)
-#define GA_H  140
-#define GB_Y  (GA_Y + GA_H + 14)
-#define ROWH  14
-
-typedef struct { GRGB a, b; } Shade;
-static const Shade SH_[] = {
-    { GRGB( 60, 84,168), GRGB( 26, 40,104) },
-    { GRGB(168,156, 56), GRGB(110, 98, 24) },
-    { GRGB(176, 72, 72), GRGB(112, 32, 32) },
-    { GRGB(150, 92,180), GRGB( 92, 44,124) },
-    { GRGB( 64,164,164), GRGB( 24,104,108) },
-    { GRGB( 76,140,220), GRGB( 30, 78,160) },
-    { GRGB(120,150,100), GRGB(65,90,45) },
+static int tab,top,visible,count,list;
+static SbDrag drag;
+static MemBuffer active[32];
+static int parts[32];
+#define LIST list
+#define ROW 24
+static const struct {int lo,hi;const char *name;} regions[]={
+    {MI_KERNEL_BASE,MI_KERNEL_END,"Kernel"},
+    {MI_DMA_BASE,MI_DMA_END,"Floppy DMA"},
+    {MI_FB_BASE,MI_FB_END,"Screen buffer"},
+    {MI_IO_BASE,MI_IO_END,"File transfer buffer"},
+    {MI_ARENA_BASE,MI_ARENA_END,"Extensions / core data"},
+    {MI_POOL_BASE,MI_POOL_END,"App data pages"},
+    {MI_HEAP_BASE,MI_HEAP_END,"Heap"}
 };
-
-static void grad(int x, int y, int w, int h, GRGB a, GRGB b, int vert, u8 fb)
-{
-    if (w <= 0 || h <= 0) return;
-    if (gfx) {
-        gfx->set_dither(1);
-        gfx->fill_gradient(x, y, w, h, a, b, vert);
-        gfx->set_dither(0);
-    } else api->fill_rect(x, y, w, h, fb);
-}
-
-typedef struct { int lo, hi; u8 col; const char *name; } Region;
-static const Region RG[] = {
-    { MI_KERNEL_BASE, MI_KERNEL_END, C_NAVY,   "Operating system" },
-    { MI_DMA_BASE,    MI_DMA_END,    C_OLIVE,  "Floppy transfers" },
-    { MI_FB_BASE,     MI_FB_END,     C_MAROON, "Screen drawing" },
-    { MI_ARENA_BASE,  MI_ARENA_END,  C_PURPLE, "Apps and drivers" },
-    { MI_POOL_BASE,   MI_POOL_END,   C_TEAL,   "App workspaces" },
-    { MI_HEAP_BASE,   MI_HEAP_END,   C_BBLUE,  "Temporary buffers" },
-    { MI_IO_BASE,     MI_IO_END,     C_GREEN,  "File transfers" },
+static const u8 colors[]={C_BBLUE,C_OLIVE,C_MAROON,C_TEAL,C_PURPLE,C_TEAL,C_GREEN};
+static const u32 shades[][2]={
+    {GRGB(64,128,255),GRGB(0,48,224)},{GRGB(255,192,0),GRGB(224,112,0)},
+    {GRGB(255,64,64),GRGB(192,0,0)},{GRGB(0,224,224),GRGB(0,128,192)},
+    {GRGB(224,64,255),GRGB(144,0,192)},{GRGB(0,224,192),GRGB(0,128,128)},
+    {GRGB(64,224,64),GRGB(0,144,0)}
 };
-#define NRG ((int)(sizeof RG / sizeof RG[0]))
-
-static u32 region_capacity(int i) {
-    if (!i) return api->mem_info(MI_KERNEL_BYTES);
-    return api->mem_info(RG[i].hi) - api->mem_info(RG[i].lo);
-}
-static int region_used(int i, u32 *used, u32 *cap)
+static int scale(u32 n,u32 cap,int width)
 {
-    *cap = region_capacity(i);
-    switch (RG[i].lo) {
-    case MI_ARENA_BASE:
-        *used = api->mem_info(MI_ARENA_RO) + api->mem_info(MI_ARENA_RW);
-        return 1;
-    case MI_POOL_BASE:
-        *used = api->mem_info(MI_POOL_USED);
-        return 1;
-    case MI_HEAP_BASE:
-        *used = *cap - api->mem_info(MI_HEAP_FREE);
-        return 1;
-    default:
-        return 0;
+    if(!cap||width<1)return 0;if(n>cap)n=cap;
+    while(cap>65535){cap>>=1;n>>=1;}
+    return (int)(n*(u32)width/cap);
+}
+static u32 capacity(int i)
+{
+    u32 base=api->mem_info(regions[i].lo),end=api->mem_info(regions[i].hi);
+    return i==0?api->mem_info(MI_KERNEL_BYTES):end>base?end-base:0;
+}
+static u32 usage(int i)
+{
+    u32 cap=capacity(i),n=cap;
+    if(i==4)n=api->mem_info(MI_ARENA_RO)+api->mem_info(MI_ARENA_RW);
+    else if(i==5)n=api->mem_info(MI_POOL_USED);
+    else if(i==6){u32 free=api->mem_info(MI_HEAP_FREE);n=free<cap?cap-free:0;}
+    return n>cap?cap:n;
+}
+static void shade(int x,int y,int w,int h,int i)
+{
+    if(w<1||h<1)return;
+    if(ui_gfx){ui_gfx->set_dither(1);ui_gfx->fill_gradient(x,y,w,h,shades[i][0],shades[i][1],1);ui_gfx->set_dither(0);}
+    else api->fill_rect(x,y,w,h,colors[i]);
+}
+static void bar(int x,int y,int w,int h,u32 n,u32 cap,int i)
+{
+    api->panel(x,y,w,h,1);api->fill_rect(x+2,y+2,w-4,h-4,C_G0+6);
+    shade(x+2,y+2,scale(n,cap,w-4),h-4,i);
+}
+static void overview(int x,int y,int cw)
+{
+    char s[96],a[24],b[24],c[24];u32 ram=api->mem_total_kb()*1024,allocated=0,used=api->mem_used_kb()*1024;
+    for(int i=0;i<7;i++)allocated+=capacity(i);
+    ui_group(x+10,y+78,cw-20,76,"Physical memory");
+    api->human_size(allocated,a,sizeof a);api->human_size(used,b,sizeof b);api->human_size(ram,c,sizeof c);
+    api->kfmt(s,sizeof s,"%s allocated (%s used) / %s Memory",a,b,c);api->draw_text_clip(x+22,y+90,s,C_BLACK,cw-44);
+    api->panel(x+22,y+112,cw-44,18,1);api->fill_rect(x+24,y+114,cw-48,14,C_G0+6);
+    u32 groups[]={capacity(0)+capacity(1)+capacity(2)+capacity(3),capacity(4)+capacity(5),capacity(6)};
+    const int ids[]={0,4,6};const char *legend[]={"System","Extensions","Heap","Unmapped"};u32 cumulative=0;int prev=0;
+    for(int i=0;i<3;i++){cumulative+=groups[i];int next=scale(cumulative,ram,cw-48);shade(x+24+prev,y+114,next-prev,14,ids[i]);prev=next;}
+    for(int i=0;i<4;i++){int xx=x+22+i*(cw-44)/4;if(i<3)shade(xx,y+136,8,8,ids[i]);else api->fill_rect(xx,y+136,8,8,C_G0+6);api->draw_text(xx+12,y+133,legend[i],C_BLACK);}
+    const char *names[]={"Extensions","App pages","Heap"};int gw=(cw-28)/3;
+    for(int i=0;i<3;i++){
+        int xx=x+10+i*(gw+4);u32 cap=capacity(i+4),n=usage(i+4);
+        ui_group(xx,y+161,gw,73,names[i]);api->human_size(n,a,sizeof a);api->human_size(cap,b,sizeof b);
+        api->kfmt(s,sizeof s,"%s / %s",a,b);api->draw_text_clip(xx+9,y+176,s,C_BLACK,gw-18);
+        bar(xx+9,y+199,gw-18,20,n,cap,i+4);api->kfmt(s,sizeof s,"%d%%",scale(n,cap,100));
+        int tx=xx+(gw-api->text_width(s))/2,split=xx+11+scale(n,cap,gw-22);
+        api->draw_text_clip2(tx,y+202,s,C_WHITE,xx+11,split);api->draw_text_clip2(tx,y+202,s,C_BLACK,split,xx+gw-11);
     }
 }
-
-static void mm_csize(int inst, int *w, int *h) { (void)inst; *w = WINW; *h = WINH; }
-
-static int list_rows(int ch)
+static void totals(int ch)
 {
-    int h = ch - GB_Y - 20 - UI_GTOP - 4;
-    return h > 0 ? h / ROWH : 0;
-}
-
-static void mm_draw(Win *w, int cx, int cy, int cw, int ch)
-{
-    gfx = gdi_bind(api, 11);
-    (void)w;
-    api->fill_rect(cx, cy, cw, ch, C_FACE);
-    ui_header(cx, cy, cw, "Memory Map");
-
-    char b[80], hs[16];
-    u32 memkb = api->mem_info(MI_TOTAL_KB);
-    if (!memkb) memkb = api->mem_total_kb();
-    api->human_size_kb(memkb, hs, sizeof hs);
-    api->kfmt(b, sizeof b, "%s usable", hs);
-    ui_header_right(cx, cy, cw, b, C_G0 + 3);
-
-    int bw = cw - 24, bx = cx + 12, by = cy + BAR_Y;
-    api->panel(bx - 1, by - 1, bw + 2, BAR_H + 2, 1);
-    grad(bx, by, bw, BAR_H, GRGB(228, 232, 238), GRGB(198, 204, 214), 1,
-         C_G0 + 6);
-    u32 offset = 0;
-    for (int i = 0; i < NRG; i++) {
-        u32 lo = offset, hi = offset + region_capacity(i);
-        offset = hi;
-        int x0 = (int)((lo >> 10) * (u32)bw / memkb);
-        int x1 = (int)((hi >> 10) * (u32)bw / memkb);
-        if (x1 > bw) x1 = bw;
-        if (x1 <= x0) x1 = x0 + 1;
-        grad(bx + x0, by, x1 - x0, BAR_H, SH_[i].a, SH_[i].b, 1, RG[i].col);
-
-        u32 used, cap;
-        if (region_used(i, &used, &cap) && cap) {
-            int uw = (int)((u32)(x1 - x0) * used / cap);
-            if (uw > 0) {
-                grad(bx + x0, by, uw, BAR_H, SH_[i].b, SH_[i].b, 1, RG[i].col);
-                api->vline(bx + x0 + uw, by, BAR_H, C_WHITE);
-            }
+    list=tab?110:266;
+    visible=(ch-LIST-10)/ROW;if(visible<1)visible=1;
+    if(tab==2)count=sizeof regions/sizeof regions[0];
+    else if(tab==1)count=api->kext_count();
+    else {
+        MemBuffer b;count=0;
+        for(int i=0;api->mem_buffer(i,&b);i++){
+            int slot=0;while(slot<count&&api->strcmp(active[slot].name,b.name))slot++;
+            if(slot<count){active[slot].size+=b.size;active[slot].base=0;parts[slot]++;}
+            else if(count<32){active[count]=b;parts[count++]=1;}
         }
-        if (x1 - x0 > 1) api->vline(bx + x1 - 1, by, BAR_H, C_SHAD);
+        for(int i=0;i<count;i++)for(int j=i+1;j<count;j++)if(active[j].size>active[i].size){MemBuffer b=active[i];active[i]=active[j];active[j]=b;int n=parts[i];parts[i]=parts[j];parts[j]=n;}
     }
-    api->draw_text(cx + 12, by + BAR_H + 5, "Reserved", C_G0 + 3);
-    api->human_size_kb(memkb, b, sizeof b);
-    api->draw_text(cx + cw - 12 - api->text_width(b), by + BAR_H + 5, b, C_G0 + 3);
-
-    u32 claimed = 0;
-    for (int i = 0; i < NRG; i++)
-        claimed += region_capacity(i);
-    api->kfmt(b, sizeof b, "%u%% set aside for the system", (unsigned)((claimed >> 10) * 100 / memkb));
-    api->draw_text(cx + (cw - api->text_width(b)) / 2, by + BAR_H + 5, b, C_G0 + 2);
-
-    ui_group(cx + 12, cy + GA_Y, cw - 24, GA_H, "Where memory is reserved");
-    int x = ui_gx(cx + 12), y = ui_gy(cy + GA_Y);
-    for (int i = 0; i < NRG; i++, y += ROWH) {
-        u32 used, cap;
-        int has = region_used(i, &used, &cap);
-        grad(x, y + 1, 9, 9, SH_[i].a, SH_[i].b, 1, RG[i].col);
-        api->bevel(x - 1, y, 11, 11, 1);
-        api->draw_text_clip(x + 15, y, RG[i].name, C_BLACK, cw / 2 - 28);
-        char sz[16];
-        api->human_size(cap, sz, sizeof sz);
-        api->draw_text(x + cw / 2 - 6, y, sz, C_G0 + 2);
-        int mw = 68, mx0 = cx + cw - 124;
-        if (has && cap) {
-            api->panel(mx0, y + 1, mw, 9, 1);
-            int fw = (int)((u32)(mw - 2) * used / cap);
-            if (fw > 0) grad(mx0 + 1, y + 2, fw, 7, SH_[i].a, SH_[i].b, 0, RG[i].col);
-            api->kfmt(b, sizeof b, "%u%%", (unsigned)((u32)used * 100 / cap));
-            api->draw_text(mx0 + mw + 6, y, b, C_G0 + 2);
-        } else {
-            api->draw_text(mx0 + mw / 2 - 4, y, "-", C_G0 + 4);
-        }
-    }
-
-    u32 aro = api->mem_info(MI_ARENA_RO), arw = api->mem_info(MI_ARENA_RW);
-    u32 acap = api->mem_info(MI_ARENA_END) - api->mem_info(MI_ARENA_BASE);
-    api->kfmt(b, sizeof b, "Space for more app code: %u KB", (acap - aro - arw) / 1024);
-    api->draw_text_clip(x, y, b, C_PURPLE, cw - 44);
-    y += ROWH;
-
-    char hf[16], hl[16];
-    api->human_size(api->mem_info(MI_HEAP_FREE), hf, sizeof hf);
-    api->human_size(api->mem_info(MI_HEAP_LARGEST), hl, sizeof hl);
-    api->kfmt(b, sizeof b, "Free working memory: %s", hf);
-    api->draw_text_clip(x, y, b, C_BBLUE, cw - 44);
-
-    int n = api->kext_count();
-    u32 kused = 0, failed = 0;
-    for (int i = 0; i < n; i++) {
-        const KextInfo *k = api->kext_get(i);
-        if (!k) break;
-        if (k->status) failed++;
-        else kused += k->size;
-    }
-    api->kfmt(b, sizeof b, "Loaded components: %d (%u KB)", n - failed,
-              (kused + 1023) / 1024);
-    int gh = ch - GB_Y - 20 - 4;
-    ui_group(cx + 12, cy + GB_Y, cw - 24, gh, b);
-    int rows = list_rows(ch);
-    if (scroll > n - rows) scroll = n - rows;
-    if (scroll < 0) scroll = 0;
-    x = ui_gx(cx + 12);
-    y = ui_gy(cy + GB_Y);
-    for (int i = scroll; i < n && i < scroll + rows; i++, y += ROWH) {
-        const KextInfo *k = api->kext_get(i);
-        if (!k) break;
-        if ((i - scroll) & 1)
-
-            api->fill_rect(x - 4, y - 1, cw - 36, ROWH, C_G0 + 7);
-        if (k->status) {
-            api->kfmt(b, sizeof b, "%-28s  load failed (E%d)", k->name, k->status);
-            api->draw_text_clip(x, y, b, C_RED, cw - 48);
-        } else {
-            api->draw_text_clip(x, y, k->hname, C_BLACK, 176);
-            char sz[16];
-            api->human_size(k->size, sz, sizeof sz);
-            api->draw_text(x + 186, y, sz, C_NAVY);
-            api->draw_text_clip(x + 250, y, k->name, C_G0 + 3, cw - 300);
-        }
-    }
-    if (!n) api->draw_text(x, y, "(no extensions loaded)", C_G0 + 3);
-
-    list_y0  = cy + GB_Y + UI_GTOP;
-    list_len = rows * ROWH;
-    list_n   = n;
-    if (n > rows)
-        api->draw_sbar(cx + cw - 12 - SB_W, list_y0, list_len, 0, n, rows, scroll);
-
-    ui_status(cx, cy, cw, ch,
-              "Bars show how much of each reserved area is in use.");
+    int last=count-visible;if(last<0)last=0;if(top>last)top=last;if(top<0)top=0;
 }
-
-static void mm_mouse(int inst, int lx, int ly, int ev, int cw, int ch)
+static void draw(Win *w,int x,int y,int cw,int ch)
 {
-    (void)inst;
-    int rows = list_rows(ch);
-    if (rows < 1) return;
-
-    int sbx = cw - 12 - SB_W;
-    int pos = ly - (GB_Y + UI_GTOP);
-
-    if (ev == EV_DRAG) {
-        if (sbd.active) {
-            scroll = sb_move(&sbd, list_len, list_n, rows, pos);
-            api->gui_dirty();
-        }
-        return;
+    (void)w;totals(ch);api->fill_rect(x,y,cw,ch,C_FACE);
+    char s[96],a[24];api->human_size(api->mem_info(MI_HEAP_FREE),a,sizeof a);
+    api->kfmt(s,sizeof s,"Heap free: %s",a);ui_header(x,y,cw,s);
+    api->human_size(api->mem_info(MI_HEAP_LARGEST),a,sizeof a);api->kfmt(s,sizeof s,"Largest block: %s",a);ui_header_right(x,y,cw,s,C_NAVY);
+    const char *tabs[3]={"Overview","Components","Regions"};
+    for(int i=0;i<3;i++)ui_button(x,y,ui_r(10+i*124,34,120,26),tabs[i],tab==i,1);
+    u32 max=api->mem_total_kb()*1024;
+    if(!tab){overview(x,y,cw);max=count?active[0].size:0;}
+    else{
+        max=0;for(int i=0;i<count;i++){u32 n=0;if(tab==1){const KextInfo *k=api->kext_get(i);if(k)n=k->size;}else n=capacity(i);if(n>max)max=n;}
+        api->draw_text(x+16,y+74,tab==1?"Loaded extensions":"Allocated memory regions",C_NAVY);
     }
-    if (ev == EV_RELEASE) { sbd.active = 0; return; }
-    if (ev != EV_PRESS) return;
-    sbd.active = 0;
-    if (ly < GB_Y) return;
-
-    if (lx >= sbx && list_n > rows) {
-        scroll = sb_press(&sbd, list_len, list_n, rows, scroll, pos);
-        api->gui_dirty();
-        return;
+    int address=cw-276,bytes=cw-188,bx=cw-108;
+    api->panel(x+8,y+LIST-22,cw-16,22,0);api->draw_text(x+16,y+LIST-18,tab?"Name":"Active buffer",C_BLACK);
+    api->draw_text(x+address,y+LIST-18,"Address",C_BLACK);api->draw_text(x+bytes,y+LIST-18,"Size",C_BLACK);
+    api->draw_text(x+bx,y+LIST-18,"Relative",C_BLACK);
+    api->panel(x+8,y+LIST-1,cw-16,visible*ROW+2,1);
+    for(int r=0;r<visible&&top+r<count;r++){
+        int i=top+r,yy=y+LIST+r*ROW;u32 base=0,size=0;const char *name="";u8 fg=C_BLACK;MemBuffer buf;
+        if(tab==2){base=api->mem_info(regions[i].lo);size=capacity(i);name=regions[i].name;}
+        else if(tab==1){const KextInfo *k=api->kext_get(i);if(!k)continue;base=k->base;size=k->size;name=k->hname[0]?k->hname:k->name;if(kx_failed(k->status))fg=C_MAROON;}
+        else{buf=active[i];base=buf.base;size=buf.size;name=buf.name;}
+        u32 hash=0;for(const char *p=name;*p;p++)hash=hash*33+(u8)*p;int color=tab==2?i:(int)(hash%7);
+        shade(x+16,yy+8,8,8,color);
+        if(!tab&&parts[i]>1){api->kfmt(s,sizeof s,"%s (%d)",name,parts[i]);name=s;}
+        api->draw_text_clip(x+30,yy+5,name,fg,address-36);
+        if(base)api->kfmt(s,sizeof s,"%08x",base);else api->strlcpy(s,!tab&&parts[i]>1?"Multiple":"-",sizeof s);
+        api->draw_text(x+address,yy+5,s,C_GRAY);
+        api->human_size(size,s,sizeof s);api->draw_text_clip(x+bytes,yy+5,s,C_BLACK,bx-bytes-6);
+        bar(x+bx,yy+5,80,14,size,max,color);
     }
-    scroll += (ly > GB_Y + rows * ROWH / 2) ? rows / 2 : -(rows / 2);
-    api->gui_dirty();
+    if(!count)api->draw_text(x+14,y+LIST+8,"No active buffers.",C_GRAY);
+    if(count>visible)api->draw_sbar(x+cw-8-SB_W,y+LIST,visible*ROW,0,count,visible,top);
 }
-
-static void mm_wheel(int inst, int dz)
+static void mouse(int i,int x,int y,int ev,int cw,int ch)
 {
-    (void)inst;
-    scroll -= dz * 3;
-    api->gui_dirty();
+    (void)i;totals(ch);
+    if(ev==EV_RELEASE){drag.active=0;return;}
+    if(ev==EV_DRAG){if(drag.active)top=sb_move(&drag,visible*ROW,count,visible,y-LIST);return;}
+    if(ev!=EV_PRESS)return;
+    if(x>=10&&x<382&&y>=34&&y<60&&(x-10)%124<120){tab=(x-10)/124;top=0;drag.active=0;return;}
+    if(x>=cw-8-SB_W&&x<cw-8&&y>=LIST&&y<LIST+visible*ROW&&count>visible)
+        top=sb_press(&drag,visible*ROW,count,visible,top,y-LIST);
 }
-
-const KextHeader kext_header = {
-    KEXT_MAGIC, KAPI_VERSION, KEXT_KIND_APP, 0, "Memory Map"
-};
-
+static void wheel(int i,int dz){(void)i;top-=dz*3;if(top<0)top=0;}
+static void key(int i,int k){(void)i;if(k=='\t'){tab=(tab+1)%3;top=0;}else if(k==K_UP)top--;else if(k==K_DOWN)top++;if(top<0)top=0;}
+static void size(int i,int *w,int *h){(void)i;*w=560;*h=396;}
+static void minimum(int *w,int *h){*w=516;*h=326;}
+const KextHeader kext_header={KEXT_MAGIC,KAPI_VERSION,KEXT_KIND_APP,KEXT_RECLAIMABLE,"Memory Map"};
 int kext_entry(const Kapi *k)
 {
-    if (k->version < KAPI_VERSION) return 1;
-    api = k;
-    gfx = gdi_bind(k, 11);
-    ui_init(k, gfx);
-    static const AppDesc d = {
-        .title = "Memory Map", .max_inst = 1, .in_menu = 1, .resizable = 1,
-        .draw = mm_draw, .client_size = mm_csize,
-        .mouse = mm_mouse, .wheel = mm_wheel,
-        .category = APP_CAT_SYSTEM,
-    };
-    my_type = k->register_app(&d);
-    return my_type < 0;
+    if(k->version<KAPI_VERSION)return 1;api=k;ui_init(k,0);
+    static const AppDesc d={.live_draw=APP_INDEPENDENT,.title="Memory Map",.max_inst=1,.in_menu=1,.resizable=1,.draw=draw,
+        .mouse=mouse,.wheel=wheel,.key=key,.client_size=size,.min_client=minimum,.category=APP_CAT_SYSTEM};
+    return k->register_app(&d)<0;
 }

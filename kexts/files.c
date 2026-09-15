@@ -9,6 +9,8 @@
 #include "delprompt.inc"
 #include "listkeep.inc"
 #include "textfield.inc"
+#include "menushade.h"
+#include "button.h"
 
 static const Kapi *api;
 #include "fileprops.inc"
@@ -131,6 +133,9 @@ typedef struct {
     int  band_y0, band_cur;
     Loc  hist[HISTMAX];
     int  hist_n, hist_i;
+    int menu, menu_sel, menu_n;
+    const char *menu_items[12];
+    u8 menu_actions[12];
 } Fm;
 
 static Fm fms[MAXINST];
@@ -149,13 +154,14 @@ static int over;
 static int dcliW, dcliH;
 
 #define MENU_H   20
-#define TB_H     34
-#define ADDR_H   20
+#define TB_H     32
+#define ADDR_H   32
+#define ADDR_X   80
 #define TOP_H    (MENU_H + TB_H + ADDR_H)
 #define HDR_H    17
 #define ROW_H    16
 #define SIDEBAR  150
-#define DRV_H    22
+#define DRV_H    30
 #define FOOT_H   20
 #define COL_SIZE 64
 #define COL_TYPE 76
@@ -175,7 +181,7 @@ static const char s_down[2]  = { (char)0x19, 0 };
 enum { MA_OPEN, MA_CUT, MA_COPY, MA_PASTE, MA_RENAME, MA_DUP, MA_DELETE,
        MA_PROPS, MA_INSTALL, MA_NEW, MA_REFRESH, MA_CLOSE, MA_BACK, MA_FWD,
        MA_UP, MA_DRIVEA, MA_DRIVEU, MA_SORTN, MA_SORTS, MA_SORTT, MA_SORTD,
-       MA_SELALL, MA_ABOUT, MA_NEWDIR };
+       MA_SELALL, MA_ABOUT, MA_NEWDIR, MA_PATH };
 static u8 menu_codes[12];
 
 static const struct { int action; int icon; const char *label; } TB[6] = {
@@ -197,17 +203,7 @@ static void fileman_client_size(int *w, int *h) { *w = dcliW; *h = dcliH; }
 static void fileman_min_client(int *w, int *h)
 {
     *w = SIDEBAR + 180 + SB_W;
-    *h = TOP_H + HDR_H + 3 * ROW_H + FOOT_H;
-}
-
-static void setup_gradient(void)
-{
-    for (int i = 0; i < NGRAD; i++) {
-        int r = 12  + (150 - 12)  * i / (NGRAD - 1);
-        int g = 70  + (185 - 70)  * i / (NGRAD - 1);
-        int b = 150 + (235 - 150) * i / (NGRAD - 1);
-        palette_set(GRAD0 + i, (u8)r, (u8)g, (u8)b);
-    }
+    *h = TOP_H + HDR_H + 5 * ROW_H + FOOT_H;
 }
 
 static void fileman_init(void)
@@ -218,7 +214,6 @@ static void fileman_init(void)
     dcliH = SH - 140;
     if (dcliH > 320) dcliH = 320;
     if (dcliH < 170) dcliH = 170;
-    setup_gradient();
 }
 
 static int sel_has(const char *name)
@@ -484,7 +479,6 @@ static void fileman_open(int inst)
     F->need_refresh = 1;
     F->seen_gen = api->usb_gen();
     nav_seed();
-    setup_gradient();
 }
 
 static void fm_check_usb(void)
@@ -919,12 +913,19 @@ static void act_install(void)
     if (rc != 0) strlcpy(F->fm_msg, err, sizeof F->fm_msg);
 }
 
+static void copy_path(void)
+{
+    int dropped=0,n=sel_specs(g_specs,sizeof g_specs,&dropped);
+    if(n>0){api->clip_set_text(g_specs);strlcpy(F->fm_msg,dropped?"Some paths did not fit in the clipboard":"File path copied",sizeof F->fm_msg);}
+}
+
 static void do_action(int a)
 {
     switch (a) {
     case MA_OPEN:    open_row(find_sel()); break;
     case MA_CUT:     act_cut(); break;
     case MA_COPY:    act_copy(); break;
+    case MA_PATH:    copy_path(); break;
     case MA_PASTE:   act_paste(); break;
     case MA_RENAME:  begin_rename(); break;
     case MA_DUP:     act_duplicate(); break;
@@ -945,7 +946,7 @@ static void do_action(int a)
     case MA_SORTT:   F->sort_col = 2; F->sort_desc = 0; F->need_refresh = 1; break;
     case MA_SORTD:   F->sort_col = 3; F->sort_desc = 1; F->need_refresh = 1; break;
     case MA_SELALL:  act_selall(); break;
-    case MA_ABOUT:   strlcpy(F->fm_msg, "FLOPNIX Files - Explorer style", sizeof F->fm_msg); break;
+    case MA_ABOUT:   strlcpy(F->fm_msg, "FLOPNIX Files", sizeof F->fm_msg); break;
     }
 }
 static void menu_pick(int idx, void *ctx)
@@ -958,14 +959,24 @@ static void menu_pick(int idx, void *ctx)
 static int tb_w(int i)
 {
     int lw = strlen(TB[i].label) * 8;
-    return (lw > 16 ? lw : 16) + 14;
+    return (lw > 16 ? lw : 16) + 16;
 }
 static int tb_x(int i)
 {
-    int x = 4;
-    for (int k = 0; k < i; k++) { x += tb_w(k); if (k == 2) x += 12; }
+    int x = 8;
+    for (int k = 0; k < i; k++) { x += tb_w(k) + 4; if (k == 2) x += 8; }
     return x;
 }
+static void fm_button(int x,int y,int w,int h,const char *label,int selected,int enabled)
+{
+    int state=enabled?api->control_state(x,y,w,h):0,down=(state&2)!=0;
+    u8 bg=selected?C_NAVY:state?C_G0+7:C_FACE;
+    fill_rect(x,y,w,h,bg);
+    if(selected||state)rect(x,y,w,h,down?C_NAVY:C_SHAD);
+    int tx=x+(w-api->text_width(label))/2+down,ty=y+(h-16)/2+down;
+    draw_text(tx,ty,label,!enabled?C_G0+3:selected?C_WHITE:C_BLACK);
+}
+
 static int clip_is_file(void)
 {
     const char *t = api->clip_type();
@@ -991,43 +1002,81 @@ static int menu_x(int i) { int x = 4; for (int k = 0; k < i; k++) x += menu_w(k)
 
 static void open_menu(int i, int ox, int oy)
 {
-    const char *items[8];
+    (void)ox;(void)oy;
+    const char **items=F->menu_items;
+    u8 *codes=F->menu_actions;
     int n = 0;
     switch (i) {
     case 0:
-        if (F->cur_drive == 0) { items[n] = "New"; menu_codes[n++] = MA_NEW; }
+        if (F->cur_drive == 0) { items[n] = "New"; codes[n++] = MA_NEW; }
         if (F->cur_drive == 0 ||
             (F->cur_drive != 0 && api->fat_can_mkdir()))
-            { items[n] = "New Folder"; menu_codes[n++] = MA_NEWDIR; }
-        items[n] = "Open"; menu_codes[n++] = MA_OPEN;
+            { items[n] = "New Folder"; codes[n++] = MA_NEWDIR; }
+        items[n] = "Open"; codes[n++] = MA_OPEN;
         if (F->cur_drive == 0 || (api->fat_can_mkdir() && fat_writable()))
-            { items[n] = "Delete"; menu_codes[n++] = MA_DELETE; }
-        items[n] = "Close"; menu_codes[n++] = MA_CLOSE;
+            { items[n] = "Delete"; codes[n++] = MA_DELETE; }
+        items[n] = "Close"; codes[n++] = MA_CLOSE;
         break;
     case 1:
-        items[n] = "Cut"; menu_codes[n++] = MA_CUT;
-        items[n] = "Copy"; menu_codes[n++] = MA_COPY;
-        items[n] = "Paste"; menu_codes[n++] = MA_PASTE;
+        items[n] = "Cut"; codes[n++] = MA_CUT;
+        items[n] = "Copy"; codes[n++] = MA_COPY;
+        items[n] = "Paste"; codes[n++] = MA_PASTE;
+        items[n] = "Copy filepath"; codes[n++] = MA_PATH;
+        items[n] = "Rename"; codes[n++] = MA_RENAME;
         if (F->cur_drive == 0 && find_sel() >= 0)
-            { items[n] = "Duplicate"; menu_codes[n++] = MA_DUP; }
-        items[n] = "Select All"; menu_codes[n++] = MA_SELALL;
+            { items[n] = "Duplicate"; codes[n++] = MA_DUP; }
+        items[n] = "Select All"; codes[n++] = MA_SELALL;
         break;
     case 2:
-        items[n] = "Refresh"; menu_codes[n++] = MA_REFRESH;
-        items[n] = "by Name"; menu_codes[n++] = MA_SORTN;
-        items[n] = "by Size"; menu_codes[n++] = MA_SORTS;
-        items[n] = "by Type"; menu_codes[n++] = MA_SORTT;
-        items[n] = "by Date"; menu_codes[n++] = MA_SORTD;
+        items[n] = "Refresh"; codes[n++] = MA_REFRESH;
+        items[n] = "by Name"; codes[n++] = MA_SORTN;
+        items[n] = "by Size"; codes[n++] = MA_SORTS;
+        items[n] = "by Type"; codes[n++] = MA_SORTT;
+        items[n] = "by Date"; codes[n++] = MA_SORTD;
         break;
     default:
-        items[n] = "Back"; menu_codes[n++] = MA_BACK;
-        items[n] = "Forward"; menu_codes[n++] = MA_FWD;
-        items[n] = "Up"; menu_codes[n++] = MA_UP;
-        items[n] = "Floppy"; menu_codes[n++] = MA_DRIVEA;
-        items[n] = "USB Drive"; menu_codes[n++] = MA_DRIVEU;
+        items[n] = "Back"; codes[n++] = MA_BACK;
+        items[n] = "Forward"; codes[n++] = MA_FWD;
+        items[n] = "Up"; codes[n++] = MA_UP;
+        items[n] = "Floppy"; codes[n++] = MA_DRIVEA;
+        items[n] = "USB Drive"; codes[n++] = MA_DRIVEU;
         break;
     }
-    api->menu_show(ox + menu_x(i), oy + MENU_H, items, n, menu_pick, F);
+    F->menu=i+1;F->menu_sel=-1;F->menu_n=n;
+}
+
+static int menu_left(void)
+{
+    int x=menu_x(F->menu-1);if(x+180>F->cliW)x=F->cliW-180;return x<0?0:x;
+}
+static void draw_menu(int cx,int cy)
+{
+    if(!F->menu)return;
+    int x=cx+menu_left(),y=cy+MENU_H;
+    panel(x,y,180,F->menu_n*20+4,0);
+    menu_shade(api,x+2,y+2,176,F->menu_n*20,0);
+    for(int i=0;i<F->menu_n;i++){
+        int yy=y+2+i*20;
+        int hov=F->menu_sel==i||(over&&mx>=x+2&&mx<x+178&&my>=yy&&my<yy+20);
+        if(hov)menu_shade(api,x+2,yy,176,20,1);
+        draw_text(x+10,yy+2,F->menu_items[i],hov?C_WHITE:C_BLACK);
+    }
+}
+static int menu_input(int x,int y,int ev)
+{
+    if(!F->menu)return 0;
+    if(ev==EV_PRESS&&y>=0&&y<MENU_H){
+        for(int i=0;i<NMENU;i++)if(x>=menu_x(i)&&x<menu_x(i)+menu_w(i)){
+            if(F->menu==i+1)F->menu=0;else open_menu(i,0,0);return 1;
+        }
+    }
+    if(ev==EV_DRAG){F->menu_sel=-1;return 1;}
+    if(ev==EV_PRESS||ev==EV_RPRESS){
+        int row=(y-MENU_H-2)/20;
+        int hit=x>=menu_left()+2&&x<menu_left()+178&&y>=MENU_H+2&&row<F->menu_n;
+        F->menu=0;if(hit&&ev==EV_PRESS)do_action(F->menu_actions[row]);
+    }
+    return 1;
 }
 
 static void open_drive_menu(int ox, int oy_field)
@@ -1121,19 +1170,12 @@ static void draw_sidebar(int cx, int cy, int ch)
         int bx = sx + 3 + d * (bw + 3), by = sy + 2, bh = DRV_H - 4;
         int avail = (d == 0) || usb_present();
         int cur = d == F->cur_drive;
-        int hov = over && avail && mx >= bx && mx < bx + bw && my >= by && my < by + bh;
-        if (cur) { fill_rect(bx, by, bw, bh, C_HILITE); }
-        else panel(bx, by, bw, bh, 0);
-        if (hov && !cur) fill_rect(bx + 1, by + 1, bw - 2, bh - 2, C_G0 + 5);
-        u8 fg = cur ? C_WHITE : (avail ? C_BLACK : C_G0 + 4);
-        draw_icon(IC_DRIVE, bx + 4, by + 1, cur ? C_WHITE : (avail ? 0 : C_G0 + 4));
-        draw_text(bx + 22, by + 1, dl[d], fg);
+        fm_button(bx,by,bw,bh,dl[d],cur,avail);
     }
 
-    int gy = sy + DRV_H, band = 56;
+    int gy = sy + DRV_H, band = 30;
     if (band > sh - DRV_H) band = sh - DRV_H;
-    for (int i = 0; i < NGRAD; i++)
-        fill_rect(sx, gy + i * band / NGRAD, SIDEBAR, band / NGRAD + 1, (u8)(GRAD0 + i));
+    fill_rect(sx,gy,SIDEBAR,band,C_G0+7);
 
     char title[24];
     if (F->cur_drive == 0) strlcpy(title, F->a_dir[0] ? F->a_dir : "Floppy", sizeof title);
@@ -1149,8 +1191,7 @@ static void draw_sidebar(int cx, int cy, int ch)
         }
     }
     draw_icon(F->cur_drive || F->a_dir[0] ? IC_FOLDER : IC_DRIVE, sx + 10, gy + 6, 0);
-    if (strlen(title) <= 6) draw_text_scaled(sx + 30, gy + 6, title, C_WHITE, 2, 2);
-    else draw_text(sx + 30, gy + 10, title, C_WHITE);
+    draw_text_clip(sx+30,gy+8,title,C_NAVY,SIDEBAR-36);
 
     int dy0 = gy + band;
     fill_rect(sx, dy0, SIDEBAR - 1, sh - DRV_H - band, C_G0 + 7);
@@ -1179,7 +1220,7 @@ static void draw_sidebar(int cx, int cy, int ch)
         draw_text_clip(sx + 10, dy, mb, C_G0 + 2, SIDEBAR - 16);
     } else {
         char b[28];
-        kfmt(b, sizeof b, "%d object(s)", obj_count());
+        kfmt(b, sizeof b, "%d items", obj_count());
         draw_text(sx + 10, dy, b, C_BLACK);
         dy += 17;
         if (F->cur_drive == 0) kfmt(b, sizeof b, "%u KB free", fs_free_kb());
@@ -1189,16 +1230,13 @@ static void draw_sidebar(int cx, int cy, int ch)
         if (F->nsel > 1) {
             kfmt(b, sizeof b, "%d selected", F->nsel);
             draw_text(sx + 10, dy, b, C_NAVY);
-        } else {
-            draw_text_clip(sx + 10, dy, "Select an item to", C_G0 + 3, SIDEBAR - 16);
-            draw_text_clip(sx + 10, dy + 13, "view its", C_G0 + 3, SIDEBAR - 16);
-            draw_text_clip(sx + 10, dy + 26, "description.", C_G0 + 3, SIDEBAR - 16);
         }
     }
 }
 
 static void fileman_draw(Win *w, int cx, int cy, int cw, int ch)
 {
+    Fm *previous=F;
     gfx = gdi_bind(api, 11);
     F = &fms[w->inst];
     fm_check_usb();
@@ -1212,50 +1250,42 @@ static void fileman_draw(Win *w, int cx, int cy, int cw, int ch)
     if (F->need_refresh) refresh();
     int i_sel = find_sel();
 
-    if (gfx) { gfx->set_dither(1); gfx->fill_gradient(cx, cy, cw, MENU_H + TB_H, GRGB(214, 218, 228), GRGB(180, 186, 202), 1); gfx->set_dither(0); } else fill_rect(cx, cy, cw, MENU_H, C_FACE);
+    fill_rect(cx,cy,cw,TOP_H,C_FACE);
+    menu_shade(api,cx,cy,cw,MENU_H,0);
     for (int i = 0; i < NMENU; i++) {
         int lxp = cx + menu_x(i), lwp = menu_w(i);
         int hov = over && mx >= lxp && mx < lxp + lwp && my >= cy && my < cy + MENU_H;
-        if (hov) fill_rect(lxp, cy, lwp, MENU_H, C_HILITE);
+        hov=hov||F->menu==i+1;
+        if (hov) menu_shade(api,lxp,cy,lwp,MENU_H,1);
         draw_text(lxp + MPAD, cy + 2, MENUS[i], hov ? C_WHITE : C_BLACK);
     }
     hline(cx, cy + MENU_H - 1, cw, C_SHAD);
 
-    if (!gfx) fill_rect(cx, cy + MENU_H, cw, TB_H, C_FACE);
-    hline(cx, cy + MENU_H + TB_H - 1, cw, C_SHAD);
     for (int i = 0; i < NTB; i++) {
         int bx = cx + tb_x(i), bw = tb_w(i);
-        int by = cy + MENU_H + 2, bh = TB_H - 4;
+        int by = cy + MENU_H + 4, bh = 24;
         int en = tb_enabled(i);
-        int hov = over && en && mx >= bx && mx < bx + bw && my >= by && my < by + bh;
-        if (hov || (F->btnfocus == i && en)) panel(bx, by, bw, bh, 0);
-        draw_icon(TB[i].icon, bx + (bw - 16) / 2, by + 2, en ? 0 : C_G0 + 4);
-        int lw = strlen(TB[i].label) * 8;
-        draw_text(bx + (bw - lw) / 2, by + 17, TB[i].label, en ? C_BLACK : C_G0 + 4);
-        if (F->btnfocus == i && en) focus_rect(bx + 2, by + 1, bw - 4, bh - 2);
+        fm_button(bx,by,bw,bh,TB[i].label,0,en);
+        if (F->btnfocus == i && en) focus_rect(bx + 3, by + 3, bw - 6, bh - 6);
         if (i == 2) {
             int sxp = bx + bw + 5;
-            vline(sxp, by + 3, bh - 6, C_SHAD);
-            vline(sxp + 1, by + 3, bh - 6, C_LIGHT);
+            vline(sxp, by + 4, bh - 8, C_SHAD);
         }
     }
 
     int ay = cy + MENU_H + TB_H;
-    fill_rect(cx, ay, cw, ADDR_H, C_FACE);
-    draw_text(cx + 6, ay + 3, "Address", C_BLACK);
-    int fx = cx + 64, fw = cw - 64 - 6;
-    if (fw < 60) fw = 60;
-    panel(fx, ay + 2, fw, ADDR_H - 4, 1);
-    fill_rect(fx + 2, ay + 4, fw - 4 - 16, ADDR_H - 8, C_WHITE);
-    draw_icon(IC_DRIVE, fx + 3, ay + 2, 0);
-    char addr[80];
-    addr_str(addr, sizeof addr);
-    draw_text_clip(fx + 22, ay + 4, addr, C_BLACK, fw - 24 - 16);
-    int dx = fx + fw - 16;
-    int dhov = mx >= dx && mx < dx + 16 && my >= ay + 2 && my < ay + ADDR_H - 2;
-    panel(dx, ay + 2, 16, ADDR_H - 4, dhov ? 0 : 0);
-    draw_char(dx + 4, ay + 1, s_down[0], C_BLACK);
-    hline(cx, ay + ADDR_H - 1, cw, C_SHAD);
+    draw_text(cx + 8, ay + 8, "Address", C_BLACK);
+    int fx = cx + ADDR_X, fw = cw - ADDR_X - 8;
+    int field_y = ay + 4, fh = 24, dw = 24;
+    fill_rect(fx,field_y,fw,fh,C_WHITE);
+    rect(fx,field_y,fw,fh,C_SHAD);
+    draw_icon(IC_DRIVE,fx+5,field_y+4,0);
+    char addr[160];
+    addr_str(addr,sizeof addr);
+    draw_text_clip(fx+25,field_y+4,addr,C_BLACK,fw-dw-30);
+    fm_button(fx+fw-dw,field_y+1,dw-1,fh-2,s_down,0,1);
+    vline(fx+fw-dw,field_y+1,fh-2,C_SHAD);
+    hline(cx,ay+ADDR_H-1,cw,C_SHAD);
 
     draw_sidebar(cx, cy, ch);
 
@@ -1344,21 +1374,30 @@ static void fileman_draw(Win *w, int cx, int cy, int cw, int ch)
     fill_rect(cx, fy, cw, FOOT_H, C_FACE);
     hline(cx, fy, cw, C_LIGHT);
     int p1w = F->fm_msg[0] ? cw : cw * 3 / 5;
-    bevel(cx + 2, fy + 3, p1w - 4, FOOT_H - 5, 1);
-    if(!F->fm_msg[0])bevel(cx + p1w + 2, fy + 3, cw - p1w - 6, FOOT_H - 5, 1);
+    hline(cx,fy,cw,C_SHAD);
     char left[64];
     if (F->fm_msg[0]) strlcpy(left, F->fm_msg, sizeof left);
-    else kfmt(left, sizeof left, "%d object(s)", obj_count());
+    else kfmt(left, sizeof left, "%d items", obj_count());
     draw_text_clip(cx + 7, fy + 4, left, C_BLACK, p1w - 12);
     char right[40];
     if (F->cur_drive == 0) kfmt(right, sizeof right, "%u KB free on Floppy", fs_free_kb());
     else kfmt(right, sizeof right, "USB %s", fat_label());
     if(!F->fm_msg[0])draw_text_clip(cx + p1w + 7, fy + 4, right, C_BLACK, cw - p1w - 12);
+    draw_menu(cx,cy);
+    F=previous;
 }
 
 static void fileman_key(int inst, int k)
 {
     F = &fms[inst];
+    if(F->menu){
+        if(k==27)F->menu=0;
+        else if(k==K_DOWN)F->menu_sel=(F->menu_sel+1)%F->menu_n;
+        else if(k==K_UP)F->menu_sel=F->menu_sel<=0?F->menu_n-1:F->menu_sel-1;
+        else if(k==K_LEFT||k==K_RIGHT)open_menu((F->menu-1+(k==K_LEFT?3:1))%4,0,0);
+        else if(k=='\n'&&F->menu_sel>=0){int a=F->menu_actions[F->menu_sel];F->menu=0;do_action(a);}
+        return;
+    }
     if (F->renaming) {
         if (k == '\n') { commit_rename(); return; }
         if (k == 27)   { F->renaming = 0;  return; }
@@ -1380,7 +1419,7 @@ static void fileman_key(int inst, int k)
 
     if (ctrl) {
         int c = kb_unctrl(k, 1);
-        if (c == 'c') { act_copy();   return; }
+        if (c == 'c') { if(api->kbd_mods()&1)copy_path();else act_copy(); return; }
         if (c == 'x') { act_cut();    return; }
         if (c == 'v') { act_paste();  return; }
         if (c == 'a') { act_selall(); return; }
@@ -1446,6 +1485,7 @@ static void fileman_mouse(int inst, int lx, int ly, int ev, int cw, int ch)
     F = &fms[inst];
     F->cliW = cw; F->cliH = ch;
     int ox = mx - lx, oy = my - ly;
+    if(menu_input(lx,ly,ev))return;
     FmGeo g;
     fm_geo(cw, ch, &g);
     int list_top = TOP_H + HDR_H;
@@ -1522,7 +1562,7 @@ static void fileman_mouse(int inst, int lx, int ly, int ev, int cw, int ch)
         if (lx < SIDEBAR || ly < list_top || ly >= list_top + g.list_h ||
             lx >= g.lx0 + g.lw) return;
         int row = (ly - list_top) / ROW_H + F->scroll;
-        const char *items[8];
+        const char *items[12];
         static char copylbl[16], dellbl[16];
         int n = 0;
         if (row >= 0 && row < F->nrows && strcmp(F->rows[row].name, "..")) {
@@ -1533,6 +1573,7 @@ static void fileman_mouse(int inst, int lx, int ly, int ev, int cw, int ch)
             else       strlcpy(copylbl, "Copy", sizeof copylbl);
             kfmt(dellbl, sizeof dellbl, multi ? "Delete (%d)" : "Delete", F->nsel);
             items[n] = "Open"; menu_codes[n++] = MA_OPEN;
+            items[n] = "Copy filepath"; menu_codes[n++] = MA_PATH;
             if (r->is_dir) {
 
                 if (!multi && strcmp(r->name, "..")) {
@@ -1559,7 +1600,7 @@ static void fileman_mouse(int inst, int lx, int ly, int ev, int cw, int ch)
                     if (!multi) { items[n] = "Rename"; menu_codes[n++] = MA_RENAME; }
                     items[n] = dellbl; menu_codes[n++] = MA_DELETE;
                 }
-                if (!multi && n < 7) { items[n] = "Properties"; menu_codes[n++] = MA_PROPS; }
+                if (!multi && n < 12) { items[n] = "Properties"; menu_codes[n++] = MA_PROPS; }
             }
         } else {
             items[n] = "Paste"; menu_codes[n++] = MA_PASTE;
@@ -1585,15 +1626,15 @@ static void fileman_mouse(int inst, int lx, int ly, int ev, int cw, int ch)
     if (ly < MENU_H + TB_H) {
         for (int i = 0; i < NTB; i++) {
             int bx = tb_x(i), bw = tb_w(i);
-            if (lx >= bx && lx < bx + bw && tb_enabled(i)) { do_action(TB[i].action); return; }
+            if (ly >= MENU_H+4 && ly < MENU_H+TB_H-4 && lx >= bx && lx < bx + bw && tb_enabled(i)) { do_action(TB[i].action); return; }
         }
         return;
     }
 
     if (ly < TOP_H) {
-        int fw = cw - 64 - 6; if (fw < 60) fw = 60;
-        int dx = 64 + fw - 16;
-        if (lx >= dx && lx < dx + 16) open_drive_menu(ox + dx, oy + TOP_H);
+        int dx = cw - 8 - 24;
+        if (ly >= MENU_H+TB_H+5 && ly < TOP_H-5 && lx >= dx && lx < dx+23)
+            open_drive_menu(ox+dx,oy+TOP_H);
         return;
     }
 

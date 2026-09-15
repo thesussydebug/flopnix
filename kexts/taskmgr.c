@@ -1,5 +1,6 @@
 #include "kapi.h"
 #include "gdi.h"
+#include "button.h"
 #include "shpath.h"
 #include "sbdrag.inc"
 #include "modsort.inc"
@@ -95,7 +96,7 @@ static const Win *row_at(int idx, int *id)
 
 static void tm_tick(void *ctx) { (void)ctx; api->gui_dirty(); }
 
-static void run_task(void)
+static void run_task_locked(void)
 {
     if (!runlen) { api->strlcpy(status, "type a path first", sizeof status); return; }
     char path[48];
@@ -123,6 +124,8 @@ static void run_task(void)
 done:
     runlen = 0; runpath[0] = 0; newtask = 0;
 }
+static void run_task(void){api->buffer_lock();run_task_locked();api->buffer_unlock();}
+
 
 static void end_task(void)
 {
@@ -197,10 +200,12 @@ static void meter(int x, int y, int w, int h, const char *label, u32 pm)
 
 static void draw_menubar(int cx, int cy, int cw)
 {
-    gradient(cx, cy, cw, MENU_H, GRGB(222, 226, 236), GRGB(190, 196, 212), 1, C_FACE);
+    menu_shade(api,cx,cy,cw,MENU_H,0);
     api->hline(cx, cy + MENU_H - 1, cw, C_SHAD);
-    for (int i = 0; i < 3; i++)
-        api->draw_text(cx + menu_x(i) + MPAD, cy + 4, MENUS[i], C_BLACK);
+    for(int i=0;i<3;i++){int x=cx+menu_x(i),hov=api->control_state(x,cy,menu_w(i),MENU_H);
+        if(hov)menu_shade(api,x,cy,menu_w(i),MENU_H,1);
+        api->draw_text(x+MPAD,cy+4,MENUS[i],hov?C_WHITE:C_BLACK);
+    }
 }
 
 static int col_name(void) { return COL_PID + W_PID; }
@@ -274,15 +279,12 @@ static void draw_tasks(int cx, int cy, int cw, int ch)
         char shown[64];
         api->kfmt(shown, sizeof shown, "%s_", runpath);
         api->draw_text_clip(fx + 4, y + 3, shown, C_BLACK, fw - 8);
-        api->panel(cx + cw - 56, y, 50, 18, 0);
-        api->draw_text(cx + cw - 40, y + 3, "Run", C_GREEN);
+        button_label(api,cx+cw-56,y,50,18,"Run",0,runlen>0);
         y += RUNH;
     }
 
-    api->panel(cx + 6, y, 78, 20, 0);
-    api->draw_text(cx + 14, y + 4, "New Task", C_BLACK);
-    api->panel(cx + 90, y, 78, 20, 0);
-    api->draw_text(cx + 97, y + 4, "End Task", sel_id >= 0 ? C_MAROON : C_GRAY);
+    button_label(api,cx+6,y,78,20,"New Task",0,1);
+    button_label(api,cx+90,y,78,20,"End Task",0,sel_id>=0);
     if (status[0]) api->draw_text_clip(cx + 178, y + 4, status, C_NAVY, cw - 186);
 }
 
@@ -326,7 +328,7 @@ static void module_action(int action)
     if (!k) { api->strlcpy(status,"Select a module first",sizeof status); return; }
     if (action==2) { char path[FS_NAMELEN]; api->strlcpy(path,k->name,sizeof path); module_load_result(path,0); return; }
     int rc=api->kext_unload(mod_sel);
-    api->strlcpy(status,rc==0 ? "Unloaded; memory stays reserved until restart" :
+    api->strlcpy(status,rc==0 ? (api->kext_get(mod_sel)->status==47 ? "Unloaded; memory released" : "Inactive; memory remains reserved") :
         rc==-2 ? "Required by a service or background task" :
         rc==-3 ? "Close its windows and wait for work to finish" : "This module is already inactive",sizeof status);
     api->gui_dirty();
@@ -360,7 +362,7 @@ static void draw_modules(int cx,int cy,int cw,int ch)
         else api->fill_rect(cx+6,ry,cw-12-SB_W,ROWH,(r&1) ? C_G0+7 : C_WHITE);
         u8 col=selected ? C_WHITE : C_BLACK;
         api->draw_text_clip(cx+10,ry,k->hname,col,state_x-cx-16);
-        const char *state=k->status==46 ? "Unloaded" : k->status==45 ? "Disabled" :
+        const char *state=k->status==47 ? "On demand" : k->status==46 ? "Unloaded" : k->status==45 ? "Disabled" :
             k->status ? "Failed" : k->kind==KEXT_KIND_KERNEL ? "System" : "Loaded";
         api->draw_text_clip(state_x,ry,state,col,88);
         api->human_size(k->size,sz,sizeof sz);
@@ -374,7 +376,7 @@ static void draw_modules(int cx,int cy,int cw,int ch)
     api->draw_text_clip(cx+8,y,selected ? selected->name : "Select a module to manage it",C_NAVY,cw-16);
     y+=18;
     const char *labels[]={"Load...","Unload","Reload"};
-    for (int i=0;i<3;i++) { int x=cx+6+i*82; api->panel(x,y,76,22,0); api->draw_text(x+8,y+3,labels[i],C_BLACK); }
+    for (int i=0;i<3;i++) { int x=cx+6+i*82; button_label(api,x,y,76,22,labels[i],0,1); }
     api->draw_text_clip(cx+8,y+26,status[0] ? status : "System and busy modules are protected",C_BLACK,cw-16);
 }
 
@@ -530,7 +532,7 @@ int kext_entry(const Kapi *k)
     if (k->version < KAPI_VERSION) return 1;
     api = k;
     gfx = gdi_bind(k, 11);
-    static const AppDesc d = {
+    static const AppDesc d = {.live_draw=APP_INDEPENDENT,
         .title = "Task Manager", .max_inst = 1, .in_menu = 1, .resizable = 1,
         .open = tm_open, .draw = tm_draw, .mouse = tm_mouse, .key = tm_key, .close = tm_close,
         .client_size = tm_csize, .min_client=tm_min, .category = APP_CAT_DEV,

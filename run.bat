@@ -12,8 +12,8 @@ if not exist "%IMAGE%" (
 set "NET=user,id=n0"
 if /I "%~1"=="lan-test" set "NET=user,id=n0,net=192.168.76.0/24,dhcpstart=192.168.76.100"
 if exist "%~dp0usb.img" goto withusb
-"%QEMU%" -drive if=floppy,format=raw,file="%IMAGE%" -boot a -m 16 -rtc base=localtime -netdev %NET% -device ne2k_pci,netdev=n0
+"%QEMU%" -drive if=floppy,format=raw,file="%IMAGE%" -boot a -m 12 -rtc base=localtime -netdev %NET% -device ne2k_pci,netdev=n0
 exit /b %errorlevel%
 :withusb
-"%QEMU%" -drive if=floppy,format=raw,file="%IMAGE%" -boot a -m 16 -rtc base=localtime -netdev %NET% -device ne2k_pci,netdev=n0 -device piix3-usb-uhci,id=uhci -drive if=none,id=stick,format=raw,file="%~dp0usb.img" -device usb-storage,bus=uhci.0,drive=stick
+"%QEMU%" -drive if=floppy,format=raw,file="%IMAGE%" -boot a -m 12 -rtc base=localtime -netdev %NET% -device ne2k_pci,netdev=n0 -device piix3-usb-uhci,id=uhci -drive if=none,id=stick,format=raw,file="%~dp0usb.img" -device usb-storage,bus=uhci.0,drive=stick
 exit /b %errorlevel%

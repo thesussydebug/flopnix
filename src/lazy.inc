@@ -51,7 +51,7 @@ int app_ensure_loaded(int type)
         if (!r) return 1;
         char msg[96];
         kfmt(msg, sizeof msg, "%s: %s (E%d)", lazy_specs[i].title,
-             r == 42 ? "not enough memory; restart to free loaded apps" : "could not load from floppy", r);
+             r == 42 ? "not enough memory; close another app and retry" : "could not load from floppy", r);
         klog(msg); klog("\n"); fault_show_banner(msg);
         return 0;
     }

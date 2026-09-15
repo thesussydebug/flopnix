@@ -84,27 +84,4 @@ void menu_show_native(int x, int y, const char *const *items, int n,
     gui_dirty = 1;
 }
 
-static char c_type[12];
-
-static u8   c_buf[4096];
-static u32  c_len;
-
-int clip_set_native(const char *type, const void *data, u32 n)
-{
-    if (!type || !type[0] || n > sizeof c_buf) return -1;
-    strlcpy(c_type, type, sizeof c_type);
-    if (n) memcpy(c_buf, data, n);
-    c_len = n;
-    return 0;
-}
-
-int clip_get_native(const char *type, void *buf, u32 max)
-{
-    if (!c_type[0]) return -1;
-    if (type && type[0] && strcmp(type, c_type)) return -1;
-    u32 n = c_len < max ? c_len : max;
-    if (n) memcpy(buf, c_buf, n);
-    return (int)n;
-}
-
-const char *clip_type_native(void) { return c_type[0] ? c_type : 0; }
+#include "clipboard.inc"

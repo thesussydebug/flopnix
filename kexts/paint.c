@@ -4,6 +4,7 @@
 #include "paintview.inc"
 #include "gdi.h"
 #include "menushade.h"
+#include "button.h"
 
 static const Kapi *api;
 static int paint_type = -1;
@@ -79,6 +80,9 @@ typedef struct {
     char fpath[96];
 } Paint;
 static Paint paints[PAINT_INST];
+static u8 active[PAINT_INST];
+static u8 *icon_cache;
+static u8 icon_color;
 
 static u8  undo_buf[PCW_MAX * PCH_MAX];
 static int undo_inst = -1, undo_w, undo_h;
@@ -117,7 +121,9 @@ static const char *pbase(const char *s)
 
 static void paint_reset(int inst)
 {
+    active[inst]=1;
     Paint *p = &paints[inst];
+    if(api->mem_track){api->mem_track("Paint canvas",p->canvas,sizeof p->canvas);api->mem_track("Paint undo",undo_buf,sizeof undo_buf);}
     memset(p->canvas, C_WHITE, sizeof p->canvas);
     p->cw = pdefw;
     p->ch = pdefh;
@@ -149,9 +155,7 @@ static int undo_swap(Paint *p)
         return 0;
 
     u32 n = (u32)p->cw * p->ch;
-    memcpy(iobuf, p->canvas, n);
-    memcpy(p->canvas, undo_buf, n);
-    memcpy(undo_buf, iobuf, n);
+    for(u32 i=0;i<n;i++){u8 c=p->canvas[i];p->canvas[i]=undo_buf[i];undo_buf[i]=c;}
     return 1;
 }
 
@@ -159,11 +163,13 @@ static void paint_set_size(Paint *p, int nw, int nh)
 {
     if (nw == p->cw && nh == p->ch) return;
     int ow = p->cw, oh = p->ch;
-    memcpy(iobuf, p->canvas, ow * oh);
-    memset(p->canvas, C_WHITE, sizeof p->canvas);
-    int kw = nw < ow ? nw : ow, kh = nh < oh ? nh : oh;
-    for (int y = 0; y < kh; y++)
-        memcpy(p->canvas + y * nw, iobuf + y * ow, kw);
+    int kw=nw<ow?nw:ow,kh=nh<oh?nh:oh;
+    for(int i=0;i<kh;i++){
+        int y=nw>ow?kh-1-i:i;
+        api->memmove(p->canvas+y*nw,p->canvas+y*ow,kw);
+        if(nw>kw)memset(p->canvas+y*nw+kw,C_WHITE,nw-kw);
+    }
+    if(nh>kh)memset(p->canvas+kh*nw,C_WHITE,(nh-kh)*nw);
     p->cw = nw;
     p->ch = nh;
     undo_inst = -1;
@@ -365,11 +371,13 @@ static u32 paint_build_bmp(Paint *p)
     return fsz;
 }
 
-static int paint_write_to(Paint *p, int src, const char *path)
+static int paint_write_to_locked(Paint *p, int src, const char *path)
 {
     u32 fsz = paint_build_bmp(p);
     return src == 1 ? fat_write(path, iobuf, fsz) : fs_write(path, iobuf, fsz);
 }
+static int paint_write_to(Paint *p,int src,const char *path){api->buffer_lock();int result=paint_write_to_locked(p,src,path);api->buffer_unlock();return result;}
+
 
 static int paint_save_to(Paint *p, int drive, const char *path)
 {
@@ -438,7 +446,7 @@ static void paint_bind(Paint *p, const char *spec)
     p->has_file = 1;
 }
 
-static int paint_load_spec(Paint *p, const char *spec)
+static int paint_load_spec_locked(Paint *p, const char *spec)
 {
     int drive;
     char path[96];
@@ -449,6 +457,8 @@ static int paint_load_spec(Paint *p, const char *spec)
     paint_bind(p, spec);
     return 0;
 }
+static int paint_load_spec(Paint *p,const char *spec){api->buffer_lock();int result=paint_load_spec_locked(p,spec);api->buffer_unlock();return result;}
+
 
 static void paint_opened(const char *spec, void *ctx)
 {
@@ -685,9 +695,8 @@ static void paint_mouse(int inst, int lx, int ly, int ev, int cw, int ch)
     }
 }
 
-static void tool_icon(int t, int x, int y, u8 col)
+static void tool_render(int t,PlotFn plot,void *ctx,u8 col)
 {
-    ScreenCtx sc = { x, y, 28, 24, 0, 0, 1 };
 
     static const u8 pencil[][4] = {
         {5,20,7,14}, {7,14,18,3}, {18,3,23,8}, {23,8,12,19},
@@ -723,26 +732,60 @@ static void tool_icon(int t, int x, int y, u8 col)
     case T_FILL: strokes=bucket; count=sizeof bucket / sizeof bucket[0]; break;
     case T_PICK: strokes=dropper; count=sizeof dropper / sizeof dropper[0]; break;
     case T_ERASE: strokes=eraser; count=sizeof eraser / sizeof eraser[0]; break;
-    case T_LINE: ras_line(plot_screen, &sc, 5,19,23,4,col,1); break;
+    case T_LINE: ras_line(plot, ctx, 5,19,23,4,col,1); break;
     case T_RECT: case T_BOX:
-        if (t == T_RECT) ras_rect(plot_screen,&sc,5,5,22,18,col,1);
-        else ras_box(plot_screen,&sc,5,5,22,18,col);
+        if (t == T_RECT) ras_rect(plot,ctx,5,5,22,18,col,1);
+        else ras_box(plot,ctx,5,5,22,18,col);
         break;
     case T_OVAL: case T_DISC:
-        if (t == T_OVAL) ras_oval(plot_screen,&sc,5,5,22,18,col,1);
-        else ras_disc(plot_screen,&sc,5,5,22,18,col);
+        if (t == T_OVAL) ras_oval(plot,ctx,5,5,22,18,col,1);
+        else ras_disc(plot,ctx,5,5,22,18,col);
         break;
     case T_TEXT:
-        ras_line(plot_screen,&sc,7,20,13,4,col,1);
-        ras_line(plot_screen,&sc,13,4,15,4,col,1);
-        ras_line(plot_screen,&sc,15,4,21,20,col,2);
-        ras_line(plot_screen,&sc,10,14,18,14,col,1);
-        ras_line(plot_screen,&sc,5,20,10,20,col,1);
-        ras_line(plot_screen,&sc,18,20,24,20,col,1);
+        ras_line(plot,ctx,7,20,13,4,col,1);
+        ras_line(plot,ctx,13,4,15,4,col,1);
+        ras_line(plot,ctx,15,4,21,20,col,2);
+        ras_line(plot,ctx,10,14,18,14,col,1);
+        ras_line(plot,ctx,5,20,10,20,col,1);
+        ras_line(plot,ctx,18,20,24,20,col,1);
         break;
     }
     for (unsigned i=0; i<count; i++)
-        ras_line(plot_screen,&sc,strokes[i][0],strokes[i][1],strokes[i][2],strokes[i][3],col,1);
+        ras_line(plot,ctx,strokes[i][0],strokes[i][1],strokes[i][2],strokes[i][3],col,1);
+}
+
+static void icon_plot(void *ctx,int x,int y,u8 col)
+{
+    if(x>=0&&x<28&&y>=0&&y<24)((u8 *)ctx)[y*28+x]=col;
+}
+static void tool_icon(int t,int x,int y,u8 col)
+{
+    if(!icon_cache&&api->mem_info(MI_HEAP_FREE)>32768){
+        icon_cache=api->kmalloc(2*NTOOL*28*24);
+        if(icon_cache){
+            memset(icon_cache,255,2*NTOOL*28*24);
+            for(int i=0;i<NTOOL;i++)tool_render(i,icon_plot,icon_cache+i*28*24,C_BLACK);
+            icon_color=255;
+            if(api->mem_track)api->mem_track("Paint tool icons",icon_cache,2*NTOOL*28*24);
+        }
+    }
+    if(icon_cache){
+        if(col!=C_BLACK&&icon_color!=col){
+            memset(icon_cache+NTOOL*28*24,255,NTOOL*28*24);
+            for(int i=0;i<NTOOL;i++)tool_render(i,icon_plot,icon_cache+(NTOOL+i)*28*24,col);
+            icon_color=col;
+        }
+        api->blit_key(x,y,28,24,icon_cache+((col!=C_BLACK?NTOOL:0)+t)*28*24,28,255);
+    }
+    else{ScreenCtx sc={x,y,28,24,0,0,1};tool_render(t,plot_screen,&sc,col);}
+}
+static void paint_close(int inst)
+{
+    active[inst]=0;
+    if(api->mem_track)api->mem_track("Paint canvas",paints[inst].canvas,0);
+    for(int i=0;i<PAINT_INST;i++)if(active[i])return;
+    if(icon_cache){api->kfree(icon_cache);icon_cache=0;}
+    if(api->mem_track)api->mem_track("Paint undo",undo_buf,0);
 }
 
 static void paint_draw(Win *w, int cx, int cy, int cw, int ch)
@@ -756,23 +799,22 @@ static void paint_draw(Win *w, int cx, int cy, int cw, int ch)
     static const char *const labels[3] = { "File", "Edit", "View" };
     for (int i = 0; i < 3; i++) {
         int on = p->mode == PM_FILE + i || (i == 2 && p->mode == PM_SIZE);
-        if (on) fill_rect(cx + i * 48, cy + 2, 48, 20, C_NAVY);
-        draw_text(cx + i * 48 + 8, cy + 4, labels[i], on ? C_WHITE : C_BLACK);
+        if(on||api->control_state(cx+i*48,cy+2,48,20))menu_shade(api,cx+i*48,cy+2,48,20,1);
+        draw_text(cx + i * 48 + 8, cy + 4, labels[i], (on||api->control_state(cx+i*48,cy+2,48,20)) ? C_WHITE : C_BLACK);
     }
     draw_text_clip(cx + 154, cy + 4, p->has_file ? pbase(p->fpath) : "Untitled.bmp", C_DARK, cw - 160);
     int hover = -1;
     for (int t = 0; t < NTOOL; t++) {
         int x = cx + 4 + t % 2 * 36, y = cy + TOP_H + 4 + t / 2 * 32;
-        panel(x, y, 34, 30, p->tool == t);
-        if (p->tool == t) fill_rect(x + 2, y + 2, 30, 26, C_WHITE);
-        tool_icon(t, x + 3, y + 3, p->tool == t ? C_NAVY : C_BLACK);
+        int state=button_face(api,x,y,34,30,p->tool==t,1);
+        tool_icon(t,x+3+(state==2),y+3+(state==2),state==2?C_WHITE:C_BLACK);
         if (mx >= x && mx < x + 34 && my >= y && my < y + 30) hover = t;
     }
     draw_text(cx + 12, cy + TOP_H + 166, "Brush", C_DARK);
     for (int i = 0; i < 3; i++) {
         int x = cx + 4 + i * 24, y = cy + TOP_H + 182, d = 1 + 2 * i;
-        panel(x, y, 22, 18, p->brush == d);
-        fill_rect(x + 11 - d / 2, y + 9 - d / 2, d, d, C_BLACK);
+        int state=button_face(api,x,y,22,18,p->brush==d,1);
+        fill_rect(x+11-d/2,y+9-d/2,d,d,state==2?C_WHITE:C_BLACK);
     }
 
     int ox = cx + LEFT_W, oy = cy + TOP_H + 4;
@@ -888,7 +930,7 @@ static int bmp_opener(const char *name, const char *fullpath,
 }
 
 const KextHeader kext_header = {
-    KEXT_MAGIC, KAPI_VERSION, KEXT_KIND_APP, 0, "Paint"
+    KEXT_MAGIC, KAPI_VERSION, KEXT_KIND_APP, KEXT_RECLAIMABLE, "Paint"
 };
 
 int kext_entry(const Kapi *k)
@@ -905,10 +947,10 @@ int kext_entry(const Kapi *k)
 
     static const AppDesc d = {
         .title = "Paint", .max_inst = PAINT_INST, .resizable = 1, .in_menu = 1,
-        .open = paint_reset, .draw = paint_draw, .key = paint_key,
+        .open = paint_reset, .close = paint_close, .draw = paint_draw, .key = paint_key,
         .mouse = paint_mouse, .client_size = paint_csize,
         .min_client = paint_min, .wheel = paint_wheel,
-        .live_draw = 1,
+        .live_draw = APP_LIVE_DRAW | APP_INDEPENDENT,
     };
     paint_type = api->register_app(&d);
     if (paint_type < 0) return 1;

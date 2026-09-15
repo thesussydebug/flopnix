@@ -55,13 +55,13 @@ static void key(int i,int k)
 }
 static void mouse(int i,int x,int y,int ev,int cw,int ch)
 {
-    (void)i;(void)ch;if(ev!=EV_PRESS)return;
-    if(ui_hit(ui_r(cw-94,3,86,22),x,y))fresh();else if(ui_hit(ui_r(cw-94,27,86,22),x,y))revert();
+    (void)i;(void)ch;ui_pointer(x,y,ev);
+    if(ui_click(ui_r(cw-94,3,86,22),x,y,ev))fresh();else if(ui_click(ui_r(cw-94,27,86,22),x,y,ev))revert();
 }
 const KextHeader kext_header={KEXT_MAGIC,KAPI_VERSION,KEXT_KIND_APP,0,"2048"};
 int kext_entry(const Kapi *k)
 {
-    api=k;ui_init(k,0);static const AppDesc d={.title="2048",.max_inst=1,.in_menu=1,.resizable=1,.category=APP_CAT_GAMES,
+    api=k;ui_init(k,0);static const AppDesc d={.live_draw=APP_INDEPENDENT,.title="2048",.max_inst=1,.in_menu=1,.resizable=1,.category=APP_CAT_GAMES,
         .open=opened,.draw=draw,.key=key,.mouse=mouse,.client_size=initial,.min_client=size};
     return k->register_app(&d)<0;
 }

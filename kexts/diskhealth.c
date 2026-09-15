@@ -277,7 +277,7 @@ int kext_entry(const Kapi *k)
     gfx = gdi_bind(k, 11);
     ui_init(k, gfx);
     reset_scan();
-    static const AppDesc d = {
+    static const AppDesc d = {.live_draw=APP_INDEPENDENT,
         .title = "Floppy Health", .max_inst = 1, .in_menu = 1, .resizable = 1,
         .open = fh_open, .draw = fh_draw, .mouse = fh_mouse,
         .client_size = fh_csize, .min_client = fh_min, .category = APP_CAT_SYSTEM,

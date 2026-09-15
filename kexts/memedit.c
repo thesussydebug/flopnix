@@ -1,5 +1,6 @@
 #include "kapi.h"
 #include "gdi.h"
+#include "button.h"
 #include "mepreset.inc"
 
 static const Kapi *api;
@@ -100,7 +101,6 @@ static void me_draw(Win *w, int cx, int cy, int cw, int ch)
     int bpr = bpr_for(cw);
     int rows = vis_rows(ch);
     cur_bpr = bpr; cur_cw = cw; cur_ch = ch;
-    int MX = *api->mouse_x, MY = *api->mouse_y;
     int foc = api->win_is_focused(w);
     char b[56];
 
@@ -120,10 +120,7 @@ static void me_draw(Win *w, int cx, int cy, int cw, int ch)
     }
     for (int c = 0; c < preset_fit(cw); c++) {
         int bx = cx + 134 + c * 50;
-        int hov = api->win_is_hovered(w) && MX >= bx && MX < bx + 48 && MY >= cy + 4 && MY < cy + 26;
-        api->panel(bx, cy + 4, 48, 22, hov || base == presets[c].addr);
-        api->draw_text(bx + (48 - (int)api->strlen(presets[c].label) * 8) / 2,
-                       cy + 7, presets[c].label, C_NAVY);
+        button_label(api,bx,cy+4,48,22,presets[c].label,base==presets[c].addr,1);
     }
 
     int ry = cy + TB_H;

@@ -4,6 +4,7 @@
 #define UI_ROWH  14
 #define UI_PAD   12
 #define UI_GTOP  12
+#include "button.h"
 
 typedef struct { int x, y, w, h; } UiRect;
 
@@ -70,16 +71,18 @@ static inline int ui_gy(int y) { return y + UI_GTOP; }
 static inline void ui_button(int cx, int cy, UiRect r, const char *label,
                       int pressed, int enabled)
 {
-    ui_api->panel(cx + r.x, cy + r.y, r.w, r.h, pressed);
-    int tw = ui_api->text_width(label);
-    int tx = cx + r.x + (r.w - tw) / 2 + (pressed ? 1 : 0);
+    button_label(ui_api,cx+r.x,cy+r.y,r.w,r.h,label,pressed,enabled);
+}
 
-    int ty = cy + r.y + (r.h - 16) / 2 + 1 + (pressed ? 1 : 0);
-
-    if (!enabled) {
-        ui_api->draw_text(tx + 1, ty + 1, label, C_LIGHT);
-        ui_api->draw_text(tx, ty, label, C_G0 + 3);
-    } else ui_api->draw_text(tx, ty, label, C_BLACK);
+static int ui_press_x,ui_press_y,ui_press_valid;
+static inline void ui_pointer(int x,int y,int ev)
+{
+    if(ev==EV_PRESS){ui_press_x=x;ui_press_y=y;ui_press_valid=1;}
+    else if(ev!=EV_RELEASE&&ev!=EV_DRAG)ui_press_valid=0;
+}
+static inline int ui_click(UiRect r,int x,int y,int ev)
+{
+    return ev==EV_RELEASE&&ui_press_valid&&ui_hit(r,x,y)&&ui_hit(r,ui_press_x,ui_press_y);
 }
 
 static inline void ui_row(int x, int y, const char *label, const char *value, int colw)

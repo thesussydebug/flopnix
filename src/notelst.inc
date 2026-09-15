@@ -23,7 +23,7 @@ static inline int nl_field(const char **p, int *out)
     const char *s = *p;
     int neg = 0, got = 0, v = 0;
     if (*s == '-') { neg = 1; s++; }
-    while (*s >= '0' && *s <= '9') { v = v * 10 + (*s - '0'); s++; got = 1; }
+    while (*s >= '0' && *s <= '9') { if(v>214748364||(v==214748364&&*s>'7'))return 0;v = v * 10 + (*s - '0'); s++; got = 1; }
     if (!got || *s != '\t') return 0;
     *out = neg ? -v : v;
     *p = s + 1;
@@ -46,7 +46,8 @@ static inline int nl_parse(const char *line, NoteRec *out)
     out->h = nl_clamp(h, NL_MINH, NL_MAXH);
     out->open = open ? 1 : 0;
     int i = 0;
-    while (p[i] && i < NL_NAMEMAX - 1) { out->file[i] = p[i]; i++; }
+    while (p[i] && p[i]!='\r') {if(i>=NL_NAMEMAX-1||(unsigned char)p[i]<32)return 0;out->file[i] = p[i]; i++;}
+    if(p[i]=='\r'&&p[i+1])return 0;
     out->file[i] = 0;
     return 1;
 }

@@ -41,7 +41,7 @@ int key_is_down(int k)
 
 void key_clear_held(void) { memset(keydown, 0, sizeof keydown); }
 
-static void handle_sc(u8 sc)
+void handle_sc(u8 sc)
 {
 
     int track, down;
@@ -49,6 +49,16 @@ static void handle_sc(u8 sc)
     if (track) key_state(track, down);
     if (deliver) gui_key(deliver);
 }
+
+static volatile int keyboard_owner=-1;
+int pump_keyboard(void)
+{
+    u32 f=irq_save();if(keyboard_owner>=0){irq_restore(f);return 0;}keyboard_owner=thr_self;irq_restore(f);
+    u8 sc;int count=0;
+    while(count<32&&kbd_pop(&sc)){count++;handle_sc(sc);}
+    keyboard_owner=-1;return count;
+}
+void keyboard_unwind(void){if(keyboard_owner==thr_self)keyboard_owner=-1;}
 
 u8 timer_alive;
 char boot_errs[48];
@@ -201,42 +211,19 @@ static void autoexec_run(void)
         shell_exec(line);
 }
 
-static HangWatch hangw = { -1, 0, 0, 0, 0 };
-static int hang_ask_win = -1;
-
-static void hang_cb(int result, void *ctx)
-{
-    (void)ctx;
-    int w = hang_ask_win;
-    hang_ask_win = -1;
-    if (w < 0) return;
-    u32 el;
-    if (app_stuck(&el) != w) return;
-    if (result == MBR_YES) app_kill_request(w);
-    else                   hw_rearm(&hangw, el);
-}
-
-int hang_stuck_win = -1;
-
+static HangWatch hangw[MAXWIN];
+static u32 hang_io[MAXWIN];
+int hang_stuck_win=-1;
+int app_unresponsive(int win){return win>=0&&win<MAXWIN&&hw_flagged(&hangw[win],win);}
 static void hang_watch(void)
 {
-    if (kupd_critical) return;
-    u32 el = 0;
-    int w = app_stuck(&el);
-    static u32 io_seen;
-    u32 io_done=app_io_tick;
-    if(io_seen!=io_done){io_seen=io_done;hw_io(&hangw,w,el);}
-    int fired = hw_tick(&hangw, w, w >= 0 ? el : 0, app_progress());
-
-    hang_stuck_win = (w >= 0 && hw_flagged(&hangw, w)) ? w : -1;
-    if (fired && hang_ask_win < 0) {
-        hang_ask_win = w;
-        const Win *win = win_slot(w);
-        const char *nm = win ? (win->tbuf_on ? win->tbuf : win->title)
-                             : "The app";
-        char text[64];
-        kfmt(text, sizeof text, "%s is not responding. End the task?", nm);
-        msgbox("Not responding", text, MB_YESNO, hang_cb, 0);
+    if(kupd_critical)return;app_stuck(0);hang_stuck_win=-1;
+    for(int w=0;w<MAXWIN;w++){
+        u32 elapsed,prog,io;int active=app_job_info(w,&elapsed,&prog,&io);
+        if(hang_io[w]!=io){hang_io[w]=io;hw_io(&hangw[w],active?w:-1,elapsed);}
+        int fired=hw_tick(&hangw[w],active?w:-1,elapsed,prog);
+        if(active&&hw_flagged(&hangw[w],w))hang_stuck_win=w;
+        if(fired){const Win *v=win_slot(w);char msg[72];kfmt(msg,sizeof msg,"%s is not responding. Close its window to end it.",v?(v->tbuf_on?v->tbuf:v->title):"App");fault_show_banner(msg);}
     }
 }
 
@@ -395,6 +382,8 @@ void kmain(void)
 
     thread_create(flight_worker, "flight");
     thread_create(app_worker, "appinput");
+    thread_create(app_worker, "appinput2");
+    thread_create(app_worker, "appinput3");
     thr_preempt_set(1);
     klog("threads: preemption ON, flight recorder on its own thread\n");
 
@@ -416,11 +405,10 @@ void kmain(void)
     for (;;) {
         emergency_heartbeat();
         int work = 0;
-        u8 sc;
         u32 pk, mwhen;
         u32 ts[11]; int nts = 0;
         ts[nts++] = cpu_now();
-        while (kbd_pop(&sc)) { work = 1; handle_sc(sc); }
+        if(pump_keyboard())work=1;
         while (mouse_pop(&pk, &mwhen)) {
             work = 1;
             u8 b0 = pk, b1 = pk >> 8, b2 = pk >> 16, b3 = pk >> 24;
@@ -433,13 +421,14 @@ void kmain(void)
             }
         }
         ts[nts++] = cpu_now();
+        kext_enter(-1);
         gui_tick();      ts[nts++] = cpu_now();
         fdc_tick();      ts[nts++] = cpu_now();
         net_poll();      ts[nts++] = cpu_now();
         usb_poll();      ts[nts++] = cpu_now();
         timers_poll();   ts[nts++] = cpu_now();
         static u32 last_cpu;
-        if ((u32)(ticks - last_cpu) >= 100) { last_cpu = ticks; cpu_snapshot(); }
+        if ((u32)(ticks - last_cpu) >= 100) { last_cpu = ticks; cpu_snapshot(); kext_trim_idle(); }
         hang_watch();
         ts[nts++] = cpu_now();
 
@@ -459,7 +448,7 @@ void kmain(void)
             else if (!present_try()) drew = 0;
             else fs_last = fs_now;
         }
-        if (drew) { gui_dirty = 0; preempt_disable(); gui_compose(); preempt_enable(); }
+        if (drew) { preempt_disable(); gui_compose(); preempt_enable(); }
         ts[nts++] = cpu_now();
         if (drew) { flip(); present_done(); }
         ts[nts++] = cpu_now();

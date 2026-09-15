@@ -116,7 +116,7 @@ static void reschedule(void)
     cpu_thread_switch(nxt);
     thr_self = nxt;
     thr_switch(&thr[prev].esp, thr[nxt].esp);
-    if (thr[prev].kext >= 0) kext_enter(thr[prev].kext);
+    kext_enter(thr[prev].kext);
 }
 
 void thr_yield(void)

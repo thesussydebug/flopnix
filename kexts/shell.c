@@ -4,6 +4,7 @@
 #include "net_wire.inc"
 #include "ramtest.inc"
 #include "shcwd.inc"
+#include "shspec.inc"
 #include "tree.inc"
 #include "fspath.inc"
 #include "fdchealth.inc"
@@ -119,7 +120,7 @@ static void os_release(void)
     tprint(r);
 }
 
-static FatEnt fe_scratch[64];
+static FatEnt fe_scratch[128];
 
 static void defrag_prog(int done, int total)
 {
@@ -302,9 +303,83 @@ static i32 calc_expr(const char **pp)
 
 static void resolve(const char *in, char *out, int cap)
 {
-    while (*in == ' ' || *in == '\t') in++;
+    char raw[128];int drive=0;
     const char *cwd = api->shell_cwd ? api->shell_cwd() : "";
-    if (!sc_resolve(cwd, in, out, cap)) out[0] = 0;
+    if(sp_token(&in,raw,sizeof raw)<0||*in||!sp_resolve(cwd,raw,&drive,out,cap)||drive){
+        out[0]=0;if(drive)tprint("This command requires an A: path. Use open, cat, ls or the USB commands for U:.\n");
+    }
+}
+static int path_arg(const char *args,int *drive,char *path,int cap)
+{
+    char raw[128];int n=sp_token(&args,raw,sizeof raw);
+    return n>=0&&!*args&&sp_resolve(api->shell_cwd(),raw,drive,path,cap);
+}
+static int path_info(int drive,const char *path,u32 *size,int *is_dir)
+{
+    if(!drive){
+        if(!path[0]||api->fs_is_dir(path)){*size=0;*is_dir=1;return 1;}
+        for(int i=0;i<FS_NFILES;i++){const FsEnt *e=fs_slot(i);if(e&&e->used&&!strcmp(e->name,path)){*size=e->size;*is_dir=0;return 1;}}
+        return 0;
+    }
+    if(!strcmp(path,"/")){*size=0;*is_dir=1;return 1;}
+    char parent[96];strlcpy(parent,path,sizeof parent);char *leaf=parent;
+    for(char *p=parent;*p;p++)if(*p=='/')leaf=p+1;
+    char name[64];strlcpy(name,leaf,sizeof name);
+    if(leaf==parent+1)parent[1]=0;else if(leaf>parent)leaf[-1]=0;else strlcpy(parent,"/",sizeof parent);
+    int n=fat_list(parent,fe_scratch,128);
+    for(int i=0;i<n;i++)if(!strcasecmp(fe_scratch[i].name,name)){*size=fe_scratch[i].size;*is_dir=fe_scratch[i].is_dir;return 1;}
+    return 0;
+}
+static int path_read(int drive,const char *path,u8 *buffer,int cap)
+{
+    u32 size=0;int dir=0;
+    if(!path_info(drive,path,&size,&dir))return -1;
+    if(dir)return -3;if(size>(u32)cap)return -4;
+    int n=drive?fat_read(path,buffer,cap):fs_read(path,buffer,cap);
+    return n>=0&&(u32)n!=size?FS_EIO:n;
+}
+static void copy_move(const char *args,int move)
+{
+    char raw[128],src[96],dst[96];int sd=0,dd=0;
+    if(sp_token(&args,raw,sizeof raw)<=0||!sp_resolve(api->shell_cwd(),raw,&sd,src,sizeof src)||
+       sp_token(&args,raw,sizeof raw)<=0||*args||!sp_resolve(api->shell_cwd(),raw,&dd,dst,sizeof dst)){
+        tprint("Use two paths; put names containing spaces in quotes.\n");return;
+    }
+    u32 size;int dir;
+    if(path_info(dd,dst,&size,&dir)&&dir){
+        const char *leaf=src;for(const char *p=src;*p;p++)if(*p=='/')leaf=p+1;
+        int n=strlen(dst),m=strlen(leaf),slash=n&&dst[n-1]!='/';
+        if(n+slash+m>=(!dd?FS_NAMELEN:(int)sizeof dst)){tprint("Destination path is too long.\n");return;}
+        if(slash)dst[n++]='/';strlcpy(dst+n,leaf,sizeof dst-n);
+    }
+    if(sd==dd&&!(sd?strcasecmp(src,dst):strcmp(src,dst))){tprint("Source and destination are the same file.\n");return;}
+    if(path_info(dd,dst,&size,&dir)){tprint("Destination already exists. Choose another name.\n");return;}
+    int n=path_read(sd,src,iobuf,IOBUF_SZ);
+    if(n<0){tprint(n==-4?"File exceeds the available transfer buffer.\n":n==-3?"Use Files to copy folders.\n":"Unable to read the source file.\n");return;}
+    int r=dd?fat_write(dst,iobuf,n):fs_write(dst,iobuf,n);
+    if(r){tprint("Unable to write the destination; the source was kept.\n");return;}
+    if(move&&(sd?fat_delete(src):fs_delete(src)))tprint("Copied, but unable to remove the source.\n");
+    api->broadcast("fs.changed","");
+}
+static void open_path(const char *args,int create)
+{
+    while(*args){
+        char raw[128],path[96];int drive=0;
+        if(sp_token(&args,raw,sizeof raw)<=0||!sp_resolve(api->shell_cwd(),raw,&drive,path,sizeof path)){
+            tprint("Invalid path. Use quotes around names containing spaces.\n");return;
+        }
+        const char *leaf=path;for(const char *p=path;*p;p++)if(*p=='/')leaf=p+1;
+        int len=strlen(leaf);
+        if(len>3&&!strcasecmp(leaf+len-3,".kx")){
+            if(drive)tprint("Copy the extension to A: before loading it.\n");
+            else if(opener_dispatch(path,0,0,0))tprint("Could not open that extension.\n");
+            continue;
+        }
+        if(create&&!drive&&!fs_exists(path)&&fs_write(path,(const u8 *)"",0)){tprint("Could not create the file.\n");continue;}
+        int n=path_read(drive,path,iobuf,IOBUF_SZ);
+        if(n<0){tprint("Could not read the file.\n");continue;}
+        if(opener_dispatch(drive?leaf:path,drive?path:0,iobuf,n))tprint("No compatible app could open the file.\n");
+    }
 }
 
 static int under(const char *name, const char *dir)
@@ -604,6 +679,9 @@ static void do_disk(const char *arg)
     } else tprint("\nrun 'disk scan' to read-verify the surface\n");
 }
 
+
+#include "shellfilters.inc"
+
 static void sh_exec(char *cmd)
 {
     while (*cmd == ' ') cmd++;
@@ -635,16 +713,19 @@ static void sh_exec(char *cmd)
         return;
     }
 
+    if(sf_exec(c0,cargs))return;
+
     if (!strcmp(cmd, "help")) {
         tprint("files: ls map cat rm cp mv touch hexdump wc head tail\n");
-        tprint("       grep find sort stat edit  (echo text > file)\n");
+        tprint("       grep find sort uniq strings crc32 cmp stat edit open\n");
+        tprint("filters: -h for options; > file writes, >> file appends\n");
         tprint("dirs:  cd pwd tree mkdir rmdir du\n");
         tprint("disk:  disk [scan|seek|map]  defrag fscan bootsec\n");
         tprint("usb:   uls ucat ucp urm\n");
-        tprint("net:   ipconfig [ip]  ping <ip>  dns <host>  wget <url>\n");
+        tprint("net:   ifconfig [ip]  ping <ip>  dns <host>  wget <url>\n");
         tprint("       netdiag  lspci\n");
         tprint("fun:   matrix rainbow beep\n");
-        tprint("cfg:   set [video|mouse|net ...]\n");
+        tprint("cfg:   set [video|mouse|net ...]  confsec\n");
         tprint("sys:   uname free df uptime date cal fetch clear ver\n");
         tprint("       whoami pwd dmesg usb ps kill calc history\n");
         tprint("       kext kupdate settings about reboot shutdown\n");
@@ -839,8 +920,12 @@ static void sh_exec(char *cmd)
              q < 0 ? '-' : '+', aq / 4, (aq % 4) * 15);
         tprint(buf);
     } else if (!strcmp(c0, "cd")) {
-        char t[SC_MAX];
-        resolve(cargs, t, sizeof t);
+        char t[SC_MAX],spec[SC_MAX];int drive=0;
+        if(!path_arg(cargs,&drive,t,sizeof t)){tprint("cd: invalid path\n");return;}
+        if(drive){
+            if(fat_list(t,fe_scratch,1)<0){tprint("cd: USB directory not found\n");return;}
+            kfmt(spec,sizeof spec,"u:%s",t);if(strlen(t)+2>=sizeof spec||!api->shell_set_cwd(spec))tprint("cd: path is too long\n");return;
+        }
 
         if (t[0] && !dir_exists(t)) {
             kfmt(buf, sizeof buf, "cd: no such directory: %s\n", t);
@@ -849,13 +934,14 @@ static void sh_exec(char *cmd)
             api->shell_set_cwd(t);
         }
     } else if (!strcmp(c0, "mkdir")) {
-        char t[SC_MAX];
-        resolve(cargs, t, sizeof t);
+        char t[SC_MAX];int drive=0;
+        if(!path_arg(cargs,&drive,t,sizeof t)){tprint("mkdir: invalid path\n");return;}
         if (!t[0]) tprint("usage: mkdir <name>\n");
-        else if (!api->fs_mkdir(t)) tprint("mkdir: failed\n");
+        else if (drive?api->fat_mkdir(t):api->fs_mkdir(t)) tprint("mkdir: failed\n");
     } else if (!strcmp(c0, "rmdir")) {
-        char t[SC_MAX];
-        resolve(cargs, t, sizeof t);
+        char t[SC_MAX];int drive=0;
+        if(!path_arg(cargs,&drive,t,sizeof t)){tprint("rmdir: invalid path\n");return;}
+        if(drive){if(api->fat_rmdir(t))tprint("rmdir: not empty, unavailable or read-only\n");return;}
 
         if (!t[0]) tprint("usage: rmdir <name>\n");
         else if (!api->fs_is_dir(t)) tprint("rmdir: not a directory\n");
@@ -885,6 +971,10 @@ static void sh_exec(char *cmd)
              hs, n, n == 1 ? "" : "s", sect / 2, root);
         tprint(buf);
     } else if (!strcmp(cmd, "ls") || !strcmp(c0, "ls")) {
+        char path[96];int drive=0;
+        if(!path_arg(cargs,&drive,path,sizeof path)){tprint("ls: invalid path\n");return;}
+        if(drive){int n=fat_list(path,fe_scratch,64);if(n<0){tprint("ls: USB directory not found\n");return;}
+            for(int i=0;i<n;i++){kfmt(buf,sizeof buf,"%6u %s%s\n",fe_scratch[i].size,fe_scratch[i].name,fe_scratch[i].is_dir?"/":"");tprint(buf);}return;}
         if (!fs_ensure()) { tprint("disk error\n"); return; }
         char dir[SC_MAX];
         resolve(cargs, dir, sizeof dir);
@@ -925,54 +1015,25 @@ static void sh_exec(char *cmd)
         }
         kfmt(buf, sizeof buf, "%d file%s\n", m, m == 1 ? "" : "s");
         tprint(buf);
-    } else if (!strncmp(cmd, "cat ", 4)) {
-        char fn[FS_NAMELEN]; resolve(cmd + 4, fn, sizeof fn);
-        int n = fs_read(fn, iobuf, IOBUF_SZ);
-        if (n < 0) { kfmt(buf, sizeof buf, "cat: %s: not found\n", fn); tprint(buf); return; }
-        iobuf[n] = 0;
-        tprint((char *)iobuf);
-        if (n && iobuf[n - 1] != '\n') tputc('\n');
     } else if (!strncmp(cmd, "rm ", 3)) {
-        char fn[FS_NAMELEN]; resolve(cmd + 3, fn, sizeof fn);
-        if (fs_delete(fn)) { kfmt(buf, sizeof buf, "rm: %s: not found\n", fn); tprint(buf); }
+        char fn[96];int drive=0,dir=0;u32 size=0;
+        if(!path_arg(cargs,&drive,fn,sizeof fn)||!path_info(drive,fn,&size,&dir)){tprint("rm: file not found\n");return;}
+        if(dir){tprint("rm: use rmdir for empty folders\n");return;}
+        if(drive?fat_delete(fn):fs_delete(fn))tprint("rm: unable to delete file\n");
     } else if (!strncmp(cmd, "cp ", 3) || !strncmp(cmd, "mv ", 3)) {
-        int move = cmd[0] == 'm';
-        char ra[FS_NAMELEN], rb[FS_NAMELEN], a[FS_NAMELEN], b[FS_NAMELEN];
-        const char *p = cmd + 3;
-        while (*p == ' ') p++;
-        int i = 0; while (*p && *p != ' ' && i < FS_NAMELEN - 1) ra[i++] = *p++; ra[i] = 0;
-        while (*p == ' ') p++;
-        i = 0; while (*p && *p != ' ' && i < FS_NAMELEN - 1) rb[i++] = *p++; rb[i] = 0;
-        if (!ra[0] || !rb[0]) { kfmt(buf, sizeof buf, "usage: %s src dst\n", move ? "mv" : "cp"); tprint(buf); return; }
-        resolve(ra, a, sizeof a);
-        resolve(rb, b, sizeof b);
-
-        if (!strcmp(a, b)) {
-            kfmt(buf, sizeof buf, "%s: '%s' and '%s' are the same file\n",
-                 move ? "mv" : "cp", ra, rb);
-            tprint(buf);
-            return;
-        }
-        int n = fs_read(a, iobuf, IOBUF_SZ);
-        if (n == FS_EIO) { kfmt(buf, sizeof buf, "%s: %s: read error - not copied\n", move ? "mv" : "cp", a); tprint(buf); return; }
-        if (n < 0) { kfmt(buf, sizeof buf, "%s: %s: not found\n", move ? "mv" : "cp", a); tprint(buf); return; }
-        int wr = fs_write(b, iobuf, n);
-        if (wr == -2) { tprint("disk full\n"); return; }
-        if (wr == -3) { kfmt(buf, sizeof buf, "%s: %s is a folder\n", move ? "mv" : "cp", b); tprint(buf); return; }
-        if (wr) { tprint("write error\n"); return; }
-        if (move) fs_delete(a);
+        copy_move(cargs,cmd[0]=='m');
     } else if (!strncmp(cmd, "touch ", 6)) {
-        char fn[FS_NAMELEN]; resolve(cmd + 6, fn, sizeof fn);
-
-        int r = fs_touch(fn);
-        if (r == FS_EIO) { tprint("touch: cannot write the directory\n"); return; }
-        if (r == 0) return;
-        int wr = fs_write(fn, (u8 *)"", 0);
-        if (wr == -2) tprint("disk full\n");
-        else if (wr) tprint("error\n");
+        char path[96];int drive=0,dir=0;u32 size=0;
+        if(!path_arg(cargs,&drive,path,sizeof path)){tprint("touch: invalid path\n");return;}
+        if(path_info(drive,path,&size,&dir)){
+            if(dir){tprint("touch: path is a folder\n");return;}
+            if(!drive&&fs_touch(path))tprint("touch: could not update the timestamp\n");
+            else if(drive)tprint("touch: USB file already exists; contents kept\n");
+        }else if(drive?fat_write(path,(const u8 *)"",0):fs_write(path,(const u8 *)"",0))tprint("touch: could not create the file\n");
+        api->broadcast("fs.changed","");
     } else if (!strncmp(cmd, "hexdump ", 8)) {
-        char fn[FS_NAMELEN]; resolve(cmd + 8, fn, sizeof fn);
-        int n = fs_read(fn, iobuf, 512);
+        char fn[96];int drive=0;if(!path_arg(cargs,&drive,fn,sizeof fn)){tprint("Invalid path\n");return;}
+        int n = drive?fat_read(fn,iobuf,512):fs_read(fn, iobuf, 512);
         if (n < 0) { kfmt(buf, sizeof buf, "hexdump: %s: not found\n", fn); tprint(buf); return; }
         for (int off = 0; off < n; off += 16) {
             kfmt(buf, sizeof buf, "%04x  ", off);
@@ -991,11 +1052,9 @@ static void sh_exec(char *cmd)
         }
         if (n == 512) tprint("...(first 512 bytes)\n");
     } else if (!strncmp(cmd, "edit ", 5)) {
-        char fn[FS_NAMELEN]; resolve(cmd + 5, fn, sizeof fn);
-        if (!fs_exists(fn)) fs_write(fn, (u8 *)"", 0);
-        int n = fs_read(fn, iobuf, IOBUF_SZ);
-        if (n < 0 || opener_dispatch(fn, 0, iobuf, n) != 0)
-            tprint("edit: no editor loaded (edit.kx missing?)\n");
+        open_path(cargs,1);
+    } else if (!strcmp(c0,"open")) {
+        if(!*cargs)tprint("usage: open <path>\n");else open_path(cargs,0);
     } else if (!strcmp(cmd, "matrix")) {
         api->term_fx(1);
     } else if (!strcmp(cmd, "rainbow")) {
@@ -1005,8 +1064,8 @@ static void sh_exec(char *cmd)
     } else if (!strcmp(cmd, "whoami")) {
         tprint("root\n");
     } else if (!strcmp(cmd, "pwd")) {
-        kfmt(buf, sizeof buf, "A:/%s\n",
-             api->shell_cwd ? api->shell_cwd() : "");
+        const char *cwd=api->shell_cwd();
+        kfmt(buf,sizeof buf,cwd[0]&&cwd[1]==':'?"%s\n":"A:/%s\n",cwd);
         tprint(buf);
     } else if (!strcmp(cmd, "beep") || !strncmp(cmd, "beep ", 5)) {
         if (!timer_alive) { tprint("beep: no timer (E10) - skipped\n"); return; }
@@ -1021,56 +1080,6 @@ static void sh_exec(char *cmd)
         while ((u32)(ticks - t0) < (u32)(ms / 10) + 1 && ++guard < 200000000u)
             if (gui_pump()) break;
         outb(0x61, inb(0x61) & ~3);
-    } else if (!strncmp(cmd, "wc ", 3)) {
-        char fn[FS_NAMELEN]; resolve(cmd + 3, fn, sizeof fn);
-        int n = fs_read(fn, iobuf, IOBUF_SZ);
-        if (n < 0) { kfmt(buf, sizeof buf, "wc: %s: not found\n", fn); tprint(buf); return; }
-        int lines = 0, words = 0, inword = 0;
-        for (int i = 0; i < n; i++) {
-            if (iobuf[i] == '\n') lines++;
-            if (iobuf[i] == ' ' || iobuf[i] == '\n' || iobuf[i] == '\t') inword = 0;
-            else if (!inword) { inword = 1; words++; }
-        }
-        if (n && iobuf[n - 1] != '\n') lines++;
-        kfmt(buf, sizeof buf, "%d lines  %d words  %d bytes\n", lines, words, n);
-        tprint(buf);
-    } else if (!strncmp(cmd, "head ", 5) || !strncmp(cmd, "tail ", 5)) {
-        int tail = cmd[0] == 't';
-        char fn[FS_NAMELEN]; resolve(cmd + 5, fn, sizeof fn);
-        int n = fs_read(fn, iobuf, IOBUF_SZ);
-        if (n < 0) { kfmt(buf, sizeof buf, "%s: not found\n", fn); tprint(buf); return; }
-        iobuf[n] = 0;
-        int total = 0; for (int i = 0; i < n; i++) if (iobuf[i] == '\n') total++;
-        if (n && iobuf[n - 1] != '\n') total++;
-        int start = tail ? (total > 10 ? total - 10 : 0) : 0;
-        int end = tail ? total : (total < 10 ? total : 10);
-        int ln = 0, i = 0;
-        while (i < n && ln < start) { if (iobuf[i] == '\n') ln++; i++; }
-        while (i < n && ln < end) { tputc(iobuf[i]); if (iobuf[i] == '\n') ln++; i++; }
-        if (i && iobuf[i - 1] != '\n') tputc('\n');
-    } else if (!strncmp(cmd, "grep ", 5)) {
-        const char *p = cmd + 5; while (*p == ' ') p++;
-        char pat[32]; int pi = 0;
-        while (*p && *p != ' ' && pi < 31) pat[pi++] = *p++; pat[pi] = 0;
-        while (*p == ' ') p++;
-        char fn[FS_NAMELEN]; resolve(p, fn, sizeof fn);
-        int n = fs_read(fn, iobuf, IOBUF_SZ);
-        if (n < 0) { kfmt(buf, sizeof buf, "grep: %s: not found\n", fn); tprint(buf); return; }
-        iobuf[n] = 0;
-        int ls = 0, hits = 0;
-        for (int i = 0; i <= n; i++) {
-            if (iobuf[i] == '\n' || iobuf[i] == 0) {
-                iobuf[i] = 0;
-                int m = 0;
-                for (int j = ls; j <= i - pi; j++) {
-                    int k = 0; while (pat[k] && iobuf[j + k] == pat[k]) k++;
-                    if (!pat[k]) { m = 1; break; }
-                }
-                if (m && pi) { tprint((char *)iobuf + ls); tputc('\n'); hits++; }
-                ls = i + 1;
-            }
-        }
-        if (!hits) tprint("(no matches)\n");
     } else if (!strncmp(cmd, "find ", 5)) {
         const char *pat = cmd + 5; while (*pat == ' ') pat++;
         if (!fs_ensure()) { tprint("disk error\n"); return; }
@@ -1135,8 +1144,7 @@ static void sh_exec(char *cmd)
         if (fat_mount()) { kfmt(buf, sizeof buf, ", FAT volume '%s'\n", fat_label()); tprint(buf); }
         else tprint(", no FAT filesystem\n");
 
-    } else if (!strcmp(cmd, "ipconfig") || !strncmp(cmd, "ipconfig ", 9) ||
-               !strcmp(cmd, "ifconfig") || !strncmp(cmd, "ifconfig ", 9)) {
+    } else if (!strcmp(cmd, "ifconfig") || !strncmp(cmd, "ifconfig ", 9)) {
         if (!net_up()) { tprint("eth0: no network device found\n"); return; }
         const char *arg = cmd[8] ? cmd + 9 : 0;
         if (arg) {
@@ -1307,58 +1315,15 @@ static void sh_exec(char *cmd)
             tprint(row);
             tputc('\n');
         }
-    } else if (!strncmp(cmd, "sort ", 5)) {
-        char fn[FS_NAMELEN]; resolve(cmd + 5, fn, sizeof fn);
-        int n = fs_read(fn, iobuf, IOBUF_SZ);
-        if (n < 0) { kfmt(buf, sizeof buf, "sort: %s: not found\n", fn); tprint(buf); return; }
-        iobuf[n] = 0;
-
-        char **ln = (char **)(iobuf + 40960);
-        int nl = 0;
-        char *s = (char *)iobuf;
-        while (*s && nl < 1024) {
-            ln[nl++] = s;
-            while (*s && *s != '\n') s++;
-            if (*s == '\n') *s++ = 0;
-        }
-        for (int i = 1; i < nl; i++) {
-            char *k = ln[i]; int j = i - 1;
-            while (j >= 0 && strcmp(ln[j], k) > 0) { ln[j + 1] = ln[j]; j--; }
-            ln[j + 1] = k;
-        }
-        for (int i = 0; i < nl; i++) { tprint(ln[i]); tputc('\n'); }
     } else if (!strncmp(cmd, "stat ", 5)) {
-        char fn[FS_NAMELEN]; resolve(cmd + 5, fn, sizeof fn);
-        if (fs_ensure()) {
-            for (int i = 0; i < FS_NFILES; i++) {
-                FsEnt *e = fs_slot(i);
-                if (!e->used || strcmp(e->name, fn)) continue;
-                char dt[16];
-                dos_fmt(e->mtime, dt);
-                kfmt(buf, sizeof buf, "%s: %u bytes on A:\n", e->name, e->size);
-                tprint(buf);
-                kfmt(buf, sizeof buf, "modified %s, LBA %u, %u sectors\n", dt, e->start, e->nsect);
-                tprint(buf);
-                return;
-            }
+        char path[96];int drive=0,dir=0;u32 size=0;
+        if(!path_arg(cargs,&drive,path,sizeof path)||!path_info(drive,path,&size,&dir)){tprint("stat: path not found\n");return;}
+        kfmt(buf,sizeof buf,"%s:%s%s\n",drive?"U":"A",drive?"":"/",path);tprint(buf);
+        kfmt(buf,sizeof buf,"%s, %u bytes\n",dir?"Directory":"File",size);tprint(buf);
+        if(!drive)for(int i=0;i<FS_NFILES;i++){
+            FsEnt *e=fs_slot(i);if(!e||!e->used||strcmp(e->name,path))continue;char dt[16];dos_fmt(e->mtime,dt);
+            kfmt(buf,sizeof buf,"Modified %s, LBA %u, %u sectors\n",dt,e->start,e->nsect);tprint(buf);break;
         }
-        if (fat_mount()) {
-            int n2 = fat_list("/", fe_scratch, 64);
-            for (int i = 0; i < n2; i++) {
-                if (strcasecmp(fe_scratch[i].name, fn)) continue;
-                char dt[16], hs[16];
-                dos_fmt(fe_scratch[i].mtime, dt);
-                human_size(fe_scratch[i].size, hs, sizeof hs);
-                kfmt(buf, sizeof buf, "%s: %s on USB%s\n", fe_scratch[i].name,
-                     hs, fe_scratch[i].is_dir ? " (dir)" : "");
-                tprint(buf);
-                kfmt(buf, sizeof buf, "modified %s\n", dt);
-                tprint(buf);
-                return;
-            }
-        }
-        kfmt(buf, sizeof buf, "stat: %s: not found\n", fn);
-        tprint(buf);
     } else if (!strcmp(cmd, "history")) {
         const char *h;
         int i = 0;
@@ -1449,7 +1414,9 @@ static void sh_exec(char *cmd)
         for (int i = 0; i < kext_count(); i++) {
             const KextInfo *k = kext_get(i);
             char st[12];
-            if (k->status) kfmt(st, sizeof st, "E%d", k->status);
+            if(k->status==47)strlcpy(st,"on demand",sizeof st);
+            else if(k->status==46)strlcpy(st,"inactive",sizeof st);
+            else if (k->status) kfmt(st, sizeof st, "E%d", k->status);
             else strlcpy(st, "ok", sizeof st);
             kfmt(buf, sizeof buf, "%s", k->name);
             tprint(buf);
@@ -1605,6 +1572,8 @@ static void sh_exec(char *cmd)
         kfmt(buf, sizeof buf, "usage: %s\n", sh_usage(c0));
         tprint(buf);
     } else {
+        int file_command=0;for(const char *p=cmd;*p;p++)if(*p=='.'||*p=='/'||*p=='\\'||*p==':'){file_command=1;break;}
+        if(file_command){open_path(cmd,0);return;}
         kfmt(buf, sizeof buf, "%s: command not found (try 'help')\n", cmd);
         tprint(buf);
     }
@@ -1612,7 +1581,7 @@ static void sh_exec(char *cmd)
 
 static void shell_dispatch(const char *line)
 {
-    char buf[128];
+    char buf[192];
     strlcpy(buf, line, sizeof buf);
     sh_exec(buf);
 }

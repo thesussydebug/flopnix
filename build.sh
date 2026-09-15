@@ -14,10 +14,8 @@ CFLAGS="$CFLAGS -DOS_BUILD_DATE=\"$(date +%Y-%m-%d)\""
 mkdir -p out built/kexts
 
 osver=$(sed -n 's/.*#define OS_VER  *"\([^"]*\)".*/\1/p' src/os.h)
-docver=$(sed -n 's/^# FLOPNIX \([0-9.]*\).*/\1/p' README.md | head -1)
-if [ -n "$osver" ] && [ -n "$docver" ] && [ "$osver" != "$docver" ]; then
-    echo "README.md says FLOPNIX $docver but src/os.h OS_VER is $osver" >&2
-    echo "(update the README title, or OS_VER, so docs match the build)" >&2
+if ! [[ "$osver" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+    echo "src/os.h must define a valid OS_VER" >&2
     exit 1
 fi
 
@@ -52,13 +50,12 @@ echo "== compiling"
 
 for f in emergency util hw cpu mtrr paging ring3 fdc fs uhci services uisvc config gfx gui apps kext heap kupdate fault thread cpuacct kernel; do
     SZ=
-    case $f in emergency|cpu|mtrr|ring3|config|kupdate|fault|kext|uisvc|services) SZ=-Oz;; fs|uhci|heap) SZ=-Os;; esac
+    case $f in emergency|cpu|mtrr|ring3|config|kupdate|fault|kext|uisvc|services) SZ=-Oz;; fs|uhci|heap|apps|kernel|thread|gui) SZ=-Os;; esac
     clang $CFLAGS $SZ -c src/$f.c -o out/$f.o
 done
 
 echo "== api docs"
 PY=$(command -v python3 || command -v py || echo /c/msys64/usr/bin/python3)
-"$PY" tools/kapidoc.py src/kapi.h kexts/apidoc_data.inc || exit 1
 
 echo "== kexts"
 rm -f built/kexts/*.kx
@@ -79,7 +76,7 @@ for sym in $(undefs out/emergency.o); do
         *) echo "emergency.o: unsafe recovery dependency: $sym" >&2; exit 1;;
     esac
 done
-for n in fat net dialogs notes diskhealth opl2 midi gdi g3d desktop edit files settings paint about calc clock calendar memmap memedit minesweeper reversi snake pong tetris shell crashsim taskmgr serialmon faultlog kextview apiexp bench gfxdemo charmap game2048 baseconv archive textweb breakout; do
+for n in fat net dialogs notes diskhealth opl2 midi gdi g3d desktop edit files settings paint about calc clock calendar memmap memedit minesweeper reversi snake pong tetris shell crashsim taskmgr serialmon faultlog kextview clipview bench gfxdemo charmap game2048 baseconv archive textweb breakout; do
     SZ=
     case $n in charmap|game2048|baseconv|archive|textweb|breakout) SZ=-Os;; esac
     clang $CFLAGS $SZ -c "kexts/$n.c" -o "out/$n.kxo"

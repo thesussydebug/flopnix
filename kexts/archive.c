@@ -11,12 +11,12 @@ static u32 length=8;
 static u32 capacity=AR_CAP;
 static u32 allocated;
 static int count,selected,scroll,dirty,type=-1,alive,extract_all,focus;
-static int working;
+static int working,close_timer=-1,close_question;
 static char filename[28],message[100];static TextField field;
 static void say(const char *s){api->strlcpy(message,s,sizeof message);api->gui_dirty();}
 static int reserve(void)
 {
-    if(!data){capacity=ar_buffer_limit(api->mem_total_kb());allocated=64;data=api->kmalloc(allocated+1);if(data)ar_empty(data);}
+    if(!data){capacity=ar_buffer_limit(api->mem_total_kb());allocated=64;data=api->kmalloc(allocated+1);if(data){ar_empty(data);if(api->mem_track)api->mem_track("Archive buffer",data,allocated+1);}}
     if(!data){say("Not enough memory. Close another app and try again.");return 0;}return 1;
 }
 static int grow(u32 wanted)
@@ -28,11 +28,11 @@ static int grow(u32 wanted)
     if(wanted>room-4097)wanted=room-4097;
     if(wanted<=allocated)return 0;
     u8 *next=api->kmalloc(wanted+1);if(!next)return 0;
-    api->memcpy(next,data,length);api->kfree(data);data=next;allocated=wanted;return 1;
+    api->memcpy(next,data,length);api->kfree(data);data=next;allocated=wanted;if(api->mem_track)api->mem_track("Archive buffer",data,allocated+1);return 1;
 }
 static void clear(void)
 {
-    if(data)ar_empty(data);length=8;count=selected=scroll=dirty=0;
+    if(data)api->kfree(data);data=0;allocated=0;length=8;count=selected=scroll=dirty=0;
     af_set(&field,filename,sizeof filename,"desktop/files.fpa");focus=0;
     say("Drop files here or choose Add, then Save the archive.");
 }
@@ -41,11 +41,33 @@ static int validate(void)
     count=ar_index(data,length,entries);if(count<0)return 0;
     u32 needed=1;for(int i=0;i<count;i++)if(entries[i].raw>needed)needed=entries[i].raw;
     u8 *raw=api->kmalloc(needed);if(!raw){say("Not enough memory to check this archive.");return -1;}
+    if(api->mem_track)api->mem_track("Archive workspace",raw,needed);
     int ok=1;for(int i=0;i<count;i++)if(lz_unpack(data+entries[i].offset,entries[i].packed,raw,needed)!=(int)entries[i].raw){ok=0;break;}
     api->kfree(raw);return ok;
 }
-static void opened(int i){(void)i;alive=1;if(!data)clear();else say(dirty?"Your unsaved archive is still here. Save it to keep it.":"Select a file to extract, or add more files.");}
-static void closed(int i){(void)i;alive=0;if(!working&&!dirty&&data){api->kfree(data);data=0;allocated=0;}}
+static void close_answer(int answer,void *ctx)
+{
+    (void)ctx;close_question=0;if(alive||working)return;
+    if(answer==MBR_YES)clear();
+    else api->win_open(type);
+}
+static void close_prompt(void *ctx)
+{
+    (void)ctx;api->timer_del(close_timer);close_timer=-1;
+    if(alive||working||!dirty)return;
+    close_question=1;api->msgbox("Unsaved archive","Discard the unsaved archive and close?\nChoose No to return and save your changes.",MB_YESNO,close_answer,0);
+}
+static void opened(int i)
+{
+    (void)i;alive=1;if(close_timer>=0){api->timer_del(close_timer);close_timer=-1;}
+    if(!data)clear();else say(dirty?"Your unsaved archive is still here. Save it to keep it.":"Select a file to extract, or add more files.");
+}
+static void closed(int i)
+{
+    (void)i;alive=0;if(working)return;
+    if(!dirty){clear();return;}
+    if(close_timer<0&&!close_question){close_timer=api->timer_add(1,close_prompt,0);if(close_timer<0)api->notify("Unsaved archive retained. Reopen Archive Manager to save it.");}
+}
 static void work_end(void){working=0;if(!alive)closed(0);}
 static const char *leaf(const char *s){const char *b=s;for(;*s;s++)if(*s=='/'||*s==':')b=s+1;return b;}
 static int read_path(const char *p,u8 *b,u32 cap){if((p[0]=='u'||p[0]=='U')&&p[1]==':')return api->fat_read(p+2,b,cap);if((p[0]=='a'||p[0]=='A')&&p[1]==':')p+=2;return api->fs_read(p,b,cap);}
@@ -108,6 +130,7 @@ static void add_file(const char *p)
     if(expected>AR_FILE){say("Files can be at most 128 KiB each.");return;}
     char name[24];api->strlcpy(name,b,sizeof name);
     u8 *raw=api->kmalloc(expected+1);if(!raw){say("Not enough memory to add a file. Close another app.");return;}
+    if(api->mem_track)api->mem_track("Archive workspace",raw,expected+1);
     api->busy_set("Archive Manager","Reading and compressing file...",-1);
     int n=read_path(p,raw,expected+1);u32 packed=0;
     if(n!=(int)expected)n=-1;
@@ -205,6 +228,7 @@ static void extract_files(const char *p,void *ctx)
     if(slots<last-first||sectors>api->fs_free_kb()*2){say("There is not enough free space for these files.");return;}
     u32 needed=1;for(int i=first;i<last;i++)if(entries[i].raw>needed)needed=entries[i].raw;
     u8 *raw=api->kmalloc(needed);if(!raw){say("Not enough memory to extract files.");return;}
+    if(api->mem_track)api->mem_track("Archive workspace",raw,needed);
     api->esc_arm();int done=0,error=0;
 
     for(int i=first;i<last;i++)if(lz_unpack(data+entries[i].offset,entries[i].packed,raw,needed)!=(int)entries[i].raw){error=1;break;}
@@ -275,12 +299,12 @@ static void key(int i,int k)
 }
 static void mouse(int i,int x,int y,int ev,int cw,int ch)
 {
-    (void)i;if(working||ev!=EV_PRESS)return;
-    for(int n=0;n<5;n++)if(ui_hit(ui_r(12+n*78,34,72,22),x,y)){action(n);return;}
-    focus=ui_hit(ui_r(78,ch-88,cw-90,24),x,y);if(focus)return;
-    if(ui_hit(ui_r(12,ch-56,144,24),x,y)){action(5);return;}
-    if(ui_hit(ui_r(162,ch-56,112,24),x,y)){action(6);return;}
-    if(x>=14&&x<cw-14&&y>=84&&y<ch-92){int n=scroll+(y-84)/18;if(n<count)selected=n;}
+    (void)i;if(working)return;ui_pointer(x,y,ev);
+    for(int n=0;n<5;n++)if(ui_click(ui_r(12+n*78,34,72,22),x,y,ev)){action(n);return;}
+    if(ev==EV_PRESS){focus=ui_hit(ui_r(78,ch-88,cw-90,24),x,y);if(focus)return;}
+    if(ui_click(ui_r(12,ch-56,144,24),x,y,ev)){action(5);return;}
+    if(ui_click(ui_r(162,ch-56,112,24),x,y,ev)){action(6);return;}
+    if(ev==EV_PRESS&&x>=14&&x<cw-14&&y>=84&&y<ch-92){int n=scroll+(y-84)/18;if(n<count)selected=n;}
 }
 static void wheel(int i,int dz){(void)i;if(working)return;selected+=dz*3;if(selected<0)selected=0;if(selected>=count)selected=count?count-1:0;}
 static int open_file(const char *name,const char *full,const u8 *bytes,int n)
@@ -291,7 +315,7 @@ static int open_file(const char *name,const char *full,const u8 *bytes,int n)
 const KextHeader kext_header={KEXT_MAGIC,KAPI_VERSION,KEXT_KIND_APP,0,"Archive Manager"};
 int kext_entry(const Kapi *k)
 {
-    api=k;ui_init(k,0);static const AppDesc d={.title="Archive Manager",.max_inst=1,.in_menu=1,.resizable=1,.category=APP_CAT_PROGRAMS,
+    api=k;ui_init(k,0);static const AppDesc d={.live_draw=APP_INDEPENDENT,.title="Archive Manager",.max_inst=1,.in_menu=1,.resizable=1,.category=APP_CAT_PROGRAMS,
         .open=opened,.close=closed,.draw=draw,.key=key,.mouse=mouse,.wheel=wheel,.drop=dropped,.client_size=initial,.min_client=size};
     type=k->register_app(&d);if(type<0)return 1;
     k->register_opener("fpa",open_file);k->register_opener("pz",open_file);return 0;

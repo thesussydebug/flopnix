@@ -12,10 +12,14 @@ typedef signed   int   i32;
 #endif
 
 /* New fields are appended to keep existing extension offsets stable. */
-#define KAPI_VERSION 32
+#define KAPI_VERSION 34
 
 #define KEXT_MAGIC 0x5458454B
 enum { KEXT_KIND_KERNEL = 1, KEXT_KIND_APP = 2 };
+#define KEXT_RECLAIMABLE 1
+
+typedef struct { char name[24]; u32 base, size; int owner; } MemBuffer;
+typedef struct { char type[12]; u32 size, sequence; } ClipInfo;
 typedef struct {
     u32 magic;
     u16 api_version;
@@ -123,6 +127,8 @@ typedef struct {
     i8  tz_qh;
     u8  reserved[414];
 } FCfg;
+
+enum { APP_LIVE_DRAW=1, APP_INDEPENDENT=2 };
 
 enum { APP_CAT_AUTO, APP_CAT_PROGRAMS, APP_CAT_GAMES, APP_CAT_SYSTEM,
        APP_CAT_DEV };
@@ -612,4 +618,18 @@ typedef struct {
     u32  (*net_sntp)(u32 ip_be, u32 timeout_ticks);
 
     int (*kext_unload)(int index);
+    int (*config_get)(const char *key, u32 *value);
+    int (*config_set)(const char *key, u32 value);
+    int (*config_read)(void *buf, u32 cap);
+    int (*clip_history)(int index, ClipInfo *info, void *buf, u32 cap);
+    int (*clip_restore)(int index);
+    u32 (*clip_sequence)(void);
+    void (*mem_track)(const char *name, const void *buf, u32 size);
+    int (*mem_buffer)(int index, MemBuffer *out);
+    int (*control_state)(int x, int y, int w, int h);
+    void (*win_redraw)(int type, int inst);
+    void (*buffer_lock)(void);
+    void (*buffer_unlock)(void);
+    void (*network_lock)(void);
+    void (*network_unlock)(void);
 } Kapi;

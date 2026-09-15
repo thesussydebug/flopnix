@@ -187,7 +187,7 @@ int kext_entry(const Kapi *k)
     if (k->version < KAPI_VERSION) return 1;
     api = k;
     gfx = gdi_bind(k, 11);
-    static const AppDesc d = {
+    static const AppDesc d = {.live_draw=APP_INDEPENDENT,
         .title = "Reversi", .max_inst = 1, .in_menu = 1,
         .open = reset, .draw = rv_draw, .mouse = rv_mouse,
         .client_size = rv_csize,

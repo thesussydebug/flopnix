@@ -144,7 +144,7 @@ static int edit_buffer(void)
 {
     if (!E->buf) {
         E->buf = api->kmalloc(FS_MAXFILE + 1);
-        if (E->buf) E->buf[0] = 0;
+        if (E->buf) {E->buf[0] = 0;if(api->mem_track)api->mem_track("Editor text",E->buf,FS_MAXFILE+1);}
     }
     if (E->buf) return 1;
     E->ro = 1;
@@ -824,7 +824,7 @@ static int edit_opener(const char *name, const char *fullpath,
 }
 
 const KextHeader kext_header = {
-    KEXT_MAGIC, KAPI_VERSION, KEXT_KIND_APP, 0, "Editor"
+    KEXT_MAGIC, KAPI_VERSION, KEXT_KIND_APP, KEXT_RECLAIMABLE, "Editor"
 };
 
 int kext_entry(const Kapi *k)

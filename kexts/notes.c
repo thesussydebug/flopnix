@@ -13,7 +13,7 @@ static int my_type = -1;
 #define PADY     6
 #define LINEH    12
 #define COLW     8
-#define NOTES_LST "notes.lst"
+#define NOTES_LST "sys/tmp/notes.lst"
 #define FLUSH_TICKS 100
 
 typedef struct {
@@ -21,22 +21,50 @@ typedef struct {
     int  len, car;
     u8   used;
     u8   open;
+    u8   read_failed;
     int  x, y, w, h;
     char file[NL_NAMEMAX];
 } Note;
 
 static Note notes[NMAX];
 static u8   loaded;
+static u8 storage_failed;
 static u8   dirty;
 static u32  dirty_t;
 static int  inst_of[NMAX];
+static int nl_save(void);
+static int note_dir(void)
+{
+    const char *dirs[2]={"sys","sys/tmp"};
+    for(int d=0;d<2;d++){
+        int found=0;
+        for(int i=0;i<FS_NFILES;i++){
+            const FsEnt *e=api->fs_slot(i);
+            if(e&&e->used&&!api->strcmp(e->name,dirs[d])){if(!(e->attr&FS_ATTR_DIR))return 0;found=1;break;}
+        }
+        if(!found&&api->fs_mkdir(dirs[d])!=0)return 0;
+    }
+    return 1;
+}
+static int note_name(char *name,int cap)
+{
+    for(int n=1;n<=128;n++){
+        api->kfmt(name,cap,"sys/tmp/note%d.txt",n);
+        if(api->fs_exists(name))continue;
+        int used=0;for(int i=0;i<NMAX;i++)if(notes[i].used&&!api->strcmp(notes[i].file,name))used=1;
+        if(!used)return 1;
+    }
+    name[0]=0;return 0;
+}
 
 static void nl_load(void)
 {
     loaded = 1;
     char buf[NMAX * 64];
     int n = api->fs_read(NOTES_LST, (u8 *)buf, sizeof buf - 1);
-    if (n < 0) return;
+    int legacy=n<6||api->strncmp(buf+n-6,"\n!end\n",6);
+    if(!legacy)n-=6;else n=api->fs_read("notes.lst",(u8 *)buf,sizeof buf-1);
+    if (n < 0) {storage_failed=api->fs_exists(NOTES_LST)||api->fs_exists("notes.lst");return;}
     buf[n] = 0;
     int slot = 0;
     char *p = buf;
@@ -53,6 +81,7 @@ static void nl_load(void)
             t->open = (u8)r.open;
             api->strlcpy(t->file, r.file, sizeof t->file);
             int m = api->fs_read(t->file, (u8 *)t->text, NOTECAP - 1);
+            t->read_failed=m<0;
             t->len = m > 0 ? m : 0;
             t->text[t->len] = 0;
             t->car = t->len;
@@ -62,10 +91,22 @@ static void nl_load(void)
         if (!sv) break;
         p = e + 1;
     }
+    if(legacy&&note_dir()){
+        char old[NMAX][NL_NAMEMAX];int migrated=1;
+        for(int i=0;i<slot;i++)api->strlcpy(old[i],notes[i].file,NL_NAMEMAX);
+        for(int i=0;i<slot;i++)if(api->strncmp(notes[i].file,"sys/tmp/",8)){
+            char dst[NL_NAMEMAX];
+            if(notes[i].read_failed||!note_name(dst,sizeof dst)){migrated=0;break;}
+            api->strlcpy(notes[i].file,dst,sizeof notes[i].file);
+        }
+        if(!migrated||!nl_save())for(int i=0;i<slot;i++)
+            api->strlcpy(notes[i].file,old[i],NL_NAMEMAX);
+    }
 }
 
-static void nl_save(void)
+static int nl_save(void)
 {
+    if(storage_failed||!note_dir())return 0;
     char buf[NMAX * 64];
     int o = 0;
     for (int i = 0; i < NMAX; i++) {
@@ -75,15 +116,16 @@ static void nl_save(void)
         r.w = notes[i].w; r.h = notes[i].h;
         r.open = notes[i].open;
         api->strlcpy(r.file, notes[i].file, sizeof r.file);
-        int n = nl_fmt(buf + o, (int)sizeof buf - o - 2, &r);
+        int n = nl_fmt(buf + o, (int)sizeof buf - o - 8, &r);
         if (!n) break;
         o += n;
         buf[o++] = '\n';
     }
-    api->fs_write(NOTES_LST, (const u8 *)buf, o);
     for (int i = 0; i < NMAX; i++)
         if (notes[i].used && notes[i].file[0])
-            api->fs_write(notes[i].file, (const u8 *)notes[i].text, notes[i].len);
+            if(!notes[i].read_failed&&api->fs_write(notes[i].file, (const u8 *)notes[i].text, notes[i].len)!=0)return 0;
+    api->memcpy(buf+o,"\n!end\n",6);o+=6;
+    return api->fs_write(NOTES_LST, (const u8 *)buf, o)==0;
 }
 
 static void touch(void)
@@ -103,8 +145,7 @@ static void notes_tick(void *ctx)
     (void)ctx;
     if (!dirty) return;
     if (dirty_t && (u32)(*api->ticks - dirty_t) < FLUSH_TICKS) return;
-    dirty = 0;
-    nl_save();
+    if(nl_save())dirty=0;else dirty_t=*api->ticks;
 }
 
 static int is_bound(int s)
@@ -128,13 +169,15 @@ static int slot_for(int inst)
         }
     for (int i = 0; i < NMAX; i++)
         if (!notes[i].used) {
+            char name[NL_NAMEMAX];if(!note_name(name,sizeof name))return -1;
             notes[i].used = 1;
             notes[i].open = 1;
             notes[i].len = notes[i].car = 0;
             notes[i].text[0] = 0;
             notes[i].w = 220; notes[i].h = 150;
             notes[i].x = 60 + i * 24; notes[i].y = 60 + i * 20;
-            api->kfmt(notes[i].file, sizeof notes[i].file, "note%d.txt", i + 1);
+            notes[i].read_failed=0;
+            api->strlcpy(notes[i].file,name,sizeof notes[i].file);
             inst_of[inst] = i;
             touch_now();
             return i;
@@ -153,6 +196,8 @@ static void n_draw(Win *w, int cx, int cy, int cw, int ch)
     t->w = cw; t->h = ch;
 
     api->fill_rect(cx, cy, cw, ch, C_YELLOW);
+    if(storage_failed){api->draw_text_clip(cx+PADX,cy+PADY,"Notes storage is unavailable.",C_MAROON,cw-2*PADX);return;}
+    if(t->read_failed){api->draw_text_clip(cx+PADX,cy+PADY,"Unable to read this note.",C_MAROON,cw-2*PADX);return;}
 
     int cols = (cw - PADX * 2) / COLW;
     if (cols < 1) cols = 1;
@@ -200,6 +245,7 @@ static void n_key(int inst, int k)
     if (s < 0) return;
     Note *t = &notes[s];
     NoteBuf nb = { t->text, NOTECAP, t->len, t->car };
+    if(t->read_failed||storage_failed)return;
 
     if (k == 3) { api->clip_set_text(t->text); return; }
     else if (k == 22) {
@@ -289,7 +335,7 @@ static void n_close(int inst)
     if (s < 0) return;
     notes[s].open = 0;
 
-    if (!notes[s].len) {
+    if (!notes[s].len&&!notes[s].read_failed&&!storage_failed) {
         notes[s].used = 0;
         api->fs_delete(notes[s].file);
     }
@@ -316,7 +362,7 @@ int kext_entry(const Kapi *k)
     gfx = gdi_bind(k, 11);
     for (int i = 0; i < NMAX; i++) inst_of[i] = -1;
 
-    static const AppDesc d = {
+    static const AppDesc d = {.live_draw=APP_INDEPENDENT,
         .title = "Notes", .max_inst = NMAX, .in_menu = 1, .resizable = 1,
         .open = n_open, .draw = n_draw, .mouse = n_mouse, .key = n_key,
         .client_size = n_csize, .min_client = n_min, .close = n_close,

@@ -1,191 +1,73 @@
 #include "kapi.h"
 #include "gdi.h"
-
+#include "ui.inc"
+#include "sbdrag.inc"
+#include "kextstate.h"
 static const Kapi *api;
-static const GdiOps *gfx;
-static int my_type = -1;
-static int sel = -1, scroll;
-
-#define HDR  26
-#define ROWH 15
-#define WINW 470
-#define WINH 260
-
-#define LIST_TOP  (HDR + 20)
-#define LIST_BOT  24
-
-static int list_rows(int ch)
+static int selected=-1,top,visible;
+static SbDrag drag;
+#define LIST 56
+#define ROW 16
+static void clamp(int ch)
 {
-    int r = (ch - LIST_TOP - LIST_BOT) / ROWH;
-    return r < 0 ? 0 : r;
+    visible=(ch-LIST-48)/ROW;if(visible<1)visible=1;
+    int last=api->kext_count()-visible;if(last<0)last=0;
+    if(top>last)top=last;if(top<0)top=0;
 }
-
-static void kv_clamp(int rows)
+static void draw(Win *w,int x,int y,int cw,int ch)
 {
-    int n = api->kext_count();
-    if (scroll > n - rows) scroll = n - rows;
-    if (scroll < 0) scroll = 0;
-}
-
-static void kv_scroll_to(int ypos, int rows, int ch)
-{
-    (void)ch;
-    scroll = api->sbar_from_pos(rows * ROWH, api->kext_count(), rows, ypos);
-    kv_clamp(rows);
-    api->gui_dirty();
-}
-
-static const char *status_text(int st)
-{
-    switch (st) {
-    case 0:  return "ok";
-    case 40: return "E40 truncated";
-    case 41: return "E41 unresolved symbol";
-    case 42: return "E42 arena full";
-    case 43: return "E43 newer kernel API required";
-    case 44: return "E44 extension entry failed";
-    case 45: return "E45 disabled after graphics fault";
-    case 46: return "Unloaded (memory reserved)";
-    default: return "failed";
+    (void)w;clamp(ch);api->fill_rect(x,y,cw,ch,C_FACE);
+    int count=api->kext_count(),loaded=0;u32 code=0;
+    for(int i=0;i<count;i++){const KextInfo *k=api->kext_get(i);if(k){code+=k->size;if(!k->status)loaded++;}}
+    char s[96];api->kfmt(s,sizeof s,"%d loaded / %d extensions",loaded,count);
+    ui_header(x,y,cw,s);
+    api->kfmt(s,sizeof s,"Code: %u KB",(code+1023)/1024);ui_header_right(x,y,cw,s,C_NAVY);
+    int type=cw-264,memory=cw-208,state=cw-144;
+    int edges[]={8,type-6,memory-6,state-6,cw-8};const char *labels[]={"Extension","Kind","Code","State"};
+    for(int i=0;i<4;i++){api->panel(x+edges[i],y+32,edges[i+1]-edges[i],23,0);api->draw_text(x+edges[i]+6,y+36,labels[i],C_BLACK);}
+    api->panel(x+8,y+LIST-1,cw-16,visible*ROW+2,1);
+    for(int r=0;r<visible&&top+r<count;r++){
+        int i=top+r,yy=y+LIST+r*ROW;const KextInfo *k=api->kext_get(i);if(!k)continue;
+        int on=i==selected;u8 fg=on?C_WHITE:kx_failed(k->status)?C_MAROON:C_BLACK;
+        if(on)api->fill_rect(x+10,yy,cw-20-SB_W,ROW,C_HILITE);
+        api->draw_text_clip(x+14,yy+1,k->hname[0]?k->hname:k->name,fg,type-22);
+        api->draw_text(x+type,yy+1,k->kind==KEXT_KIND_APP?"App":"Core",fg);
+        api->kfmt(s,sizeof s,"%uK",(k->size+1023)/1024);api->draw_text(x+memory,yy+1,s,fg);
+        api->draw_text_clip(x+state,yy+1,kx_state(k->status),fg,128-SB_W);
     }
+    if(count>visible)api->draw_sbar(x+cw-8-SB_W,y+LIST,visible*ROW,0,count,visible,top);
+    int dy=y+ch-40;api->panel(x+8,dy,cw-16,34,1);
+    const KextInfo *k=selected>=0?api->kext_get(selected):0;
+    if(k){
+        api->draw_text_clip(x+14,dy+3,k->name,C_NAVY,cw-28);
+        if(k->size)api->kfmt(s,sizeof s,"%08x  /  %u bytes of code",k->base,k->size);
+        else api->strlcpy(s,kx_state(k->status),sizeof s);
+        api->draw_text_clip(x+14,dy+18,s,C_BLACK,cw-28);
+    }else api->draw_text(x+14,dy+10,"Select an extension for its path and address.",C_GRAY);
 }
-
-static void kv_draw(Win *w, int cx, int cy, int cw, int ch)
+static void mouse(int i,int x,int y,int ev,int cw,int ch)
 {
-    gfx = gdi_bind(api, 11);
-    (void)w;
-    api->fill_rect(cx, cy, cw, ch, C_FACE);
-    if (gfx) {
-        gfx->set_dither(1);
-        gfx->fill_gradient(cx, cy, cw, HDR, GRGB(222, 226, 236),
-                           GRGB(190, 196, 202), 1);
-        gfx->set_dither(0);
-    }
-    api->hline(cx, cy + HDR - 1, cw, C_SHAD);
-
-    int n = api->kext_count();
-    u32 total = 0, bad = 0;
-    for (int i = 0; i < n; i++) {
-        const KextInfo *k = api->kext_get(i);
-        if (!k) continue;
-        total += k->size;
-        if (k->status) bad++;
-    }
-    char b[80];
-    api->kfmt(b, sizeof b, "%d extensions, %uK arena%s", n, (total + 1023) / 1024,
-              bad ? ", SOME FAILED" : "");
-    api->draw_text(cx + 8, cy + 6, b, bad ? C_MAROON : C_NAVY);
-
-    int hy = cy + HDR + 2;
-    api->draw_text(cx + 8,   hy, "File",   C_NAVY);
-    api->draw_text(cx + 128, hy, "Name",   C_NAVY);
-    api->draw_text(cx + 246, hy, "Kind",   C_NAVY);
-    api->draw_text(cx + 296, hy, "Base",   C_NAVY);
-    api->draw_text(cx + 360, hy, "Size",   C_NAVY);
-    api->draw_text(cx + 410, hy, "Status", C_NAVY);
-    api->hline(cx + 4, hy + 14, cw - 8, C_SHAD);
-
-    int listy = cy + LIST_TOP;
-    int rows = list_rows(ch);
-    if (scroll > n - rows) scroll = n - rows;
-    if (scroll < 0) scroll = 0;
-
-    for (int r = 0; r < rows && scroll + r < n; r++) {
-        int i = scroll + r;
-        const KextInfo *k = api->kext_get(i);
-        if (!k) continue;
-        int ry = listy + r * ROWH;
-        int on = (i == sel);
-        if (on) api->fill_rect(cx + 4, ry, cw - 8 - SB_W, ROWH, C_HILITE);
-        u8 fg = on ? C_WHITE : (k->status ? C_MAROON : C_BLACK);
-
-        api->draw_text_clip(cx + 8, ry + 1, k->name, fg, 116);
-        api->draw_text_clip(cx + 128, ry + 1, k->hname, fg, 114);
-        api->draw_text(cx + 246, ry + 1,
-                       k->kind == KEXT_KIND_KERNEL ? "kern" :
-                       k->kind == KEXT_KIND_APP    ? "app"  : "-", fg);
-        api->kfmt(b, sizeof b, "%x", k->base);
-        api->draw_text(cx + 296, ry + 1, b, fg);
-        api->kfmt(b, sizeof b, "%uK", (k->size + 1023) / 1024);
-        api->draw_text(cx + 360, ry + 1, b, fg);
-        api->draw_text(cx + 410, ry + 1, k->status ? "fail" : "ok",
-                       on ? C_WHITE : (k->status ? C_MAROON : C_GREEN));
-    }
-    if (n > rows)
-        api->draw_sbar(cx + cw - 4 - SB_W, listy, rows * ROWH, 0, n, rows, scroll);
-
-    const KextInfo *k = sel >= 0 ? api->kext_get(sel) : 0;
-    if (k) {
-        api->kfmt(b, sizeof b, "%s: %s  %u bytes at %x..%x",
-                  k->hname, status_text(k->status), k->size,
-                  k->base, k->base + k->size);
-        api->draw_text_clip(cx + 8, cy + ch - 16, b,
-                            k->status ? C_MAROON : C_NAVY, cw - 16);
-    } else {
-        api->draw_text(cx + 8, cy + ch - 16,
-                       "Select an extension for detail.", C_GRAY);
-    }
+    (void)i;clamp(ch);
+    if(ev==EV_RELEASE){drag.active=0;return;}
+    if(ev==EV_DRAG){if(drag.active)top=sb_move(&drag,visible*ROW,api->kext_count(),visible,y-LIST);return;}
+    if(ev!=EV_PRESS||y<LIST||y>=LIST+visible*ROW)return;
+    if(x>=cw-8-SB_W&&x<cw-8&&api->kext_count()>visible)top=sb_press(&drag,visible*ROW,api->kext_count(),visible,top,y-LIST);
+    else if(x>=8&&x<cw-8-SB_W){int n=top+(y-LIST)/ROW;if(n<api->kext_count())selected=n;}
 }
-
-static u8 kv_sbdrag;
-
-static void kv_mouse(int inst, int lx, int ly, int ev, int cw, int ch)
+static void wheel(int i,int dz){(void)i;top-=dz*3;if(top<0)top=0;}
+static void key(int i,int k)
 {
-    (void)inst;
-    int listy = LIST_TOP;
-    int rows = list_rows(ch);
-    if (ev == EV_RELEASE) { kv_sbdrag = 0; return; }
-    if (ev == EV_DRAG) {
-        if (kv_sbdrag) kv_scroll_to(ly - listy, rows, ch);
-        return;
-    }
-    if (ev != EV_PRESS) return;
-    if (ly < listy) return;
-    if (lx >= cw - 4 - SB_W) {
-        kv_sbdrag = 1;
-        kv_scroll_to(ly - listy, rows, ch);
-        return;
-    }
-    int r = (ly - listy) / ROWH;
-    if (r < 0 || r >= rows || scroll + r >= api->kext_count()) return;
-    sel = (sel == scroll + r) ? -1 : scroll + r;
-    api->gui_dirty();
+    (void)i;int n=api->kext_count();if(!n)return;
+    if(k==K_DOWN&&selected<n-1)selected++;else if(k==K_UP&&selected>0)selected--;else return;
+    if(selected<top)top=selected;if(selected>=top+visible)top=selected-visible+1;
 }
-
-static void kv_wheel(int inst, int dz)
-{
-    (void)inst;
-    scroll -= dz * 3;
-    if (scroll < 0) scroll = 0;
-
-    api->gui_dirty();
-}
-
-static void kv_key(int inst, int k)
-{
-    (void)inst;
-    if (k == K_UP)   { if (scroll > 0) scroll--; api->gui_dirty(); }
-    if (k == K_DOWN) { scroll++; api->gui_dirty(); }
-}
-
-static void kv_open(int inst) { (void)inst; sel = -1; scroll = 0; kv_sbdrag = 0; }
-static void kv_csize(int inst, int *w, int *h) { (void)inst; *w = WINW; *h = WINH; }
-
-const KextHeader kext_header = {
-    KEXT_MAGIC, KAPI_VERSION, KEXT_KIND_APP, 0, "KEXT Inspector"
-};
-
+static void size(int i,int *w,int *h){(void)i;*w=520;*h=300;}
+static void minimum(int *w,int *h){*w=468;*h=222;}
+const KextHeader kext_header={KEXT_MAGIC,KAPI_VERSION,KEXT_KIND_APP,KEXT_RECLAIMABLE,"KEXT Inspector"};
 int kext_entry(const Kapi *k)
 {
-    if (k->version < KAPI_VERSION) return 1;
-    api = k;
-    gfx = gdi_bind(k, 11);
-    static const AppDesc d = {
-        .title = "KEXT Inspector", .max_inst = 1, .in_menu = 1, .resizable = 1,
-        .open = kv_open, .draw = kv_draw, .mouse = kv_mouse, .key = kv_key,
-        .wheel = kv_wheel,
-        .client_size = kv_csize, .category = APP_CAT_DEV,
-    };
-    my_type = k->register_app(&d);
-    return my_type < 0;
+    if(k->version<KAPI_VERSION)return 1;api=k;ui_init(k,0);
+    static const AppDesc d={.live_draw=APP_INDEPENDENT,.title="KEXT Inspector",.max_inst=1,.in_menu=1,.resizable=1,
+        .draw=draw,.mouse=mouse,.key=key,.wheel=wheel,.client_size=size,.min_client=minimum,.category=APP_CAT_DEV};
+    return k->register_app(&d)<0;
 }

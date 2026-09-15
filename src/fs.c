@@ -14,6 +14,8 @@
 
 static FsEnt table[FS_NFILES];
 static int mounted;
+static Mutex fs_mutex=MUTEX_INIT;
+#include "fscache.inc"
 
 static int flush_table(void)
 {
@@ -86,12 +88,14 @@ static int alloc(int n)
     return -1;
 }
 
-int fs_read(const char *name, u8 *buf, u32 max)
+static int fs_read_locked(const char *name, u8 *buf, u32 max)
 {
     if (!fs_ensure()) return -1;
     FsEnt *e = find(name);
     if (!e) return -1;
     u32 size = e->size < max ? e->size : max;
+    if(fc_read(e,buf,size))return (int)size;
+    FsEnt saved=*e;e=&saved;u32 epoch=fc_epoch;
     u8 sec[512];
     u32 got = 0;
     for (u16 s = 0; got < size; s++) {
@@ -100,10 +104,12 @@ int fs_read(const char *name, u8 *buf, u32 max)
         memcpy(buf + got, sec, n);
         got += n;
     }
+    if(epoch!=fc_epoch)return FS_EIO;
+    fc_save(e,buf,size,epoch);
     return (int)size;
 }
 
-int fs_write(const char *name, const u8 *buf, u32 size)
+static int fs_write_locked(const char *name, const u8 *buf, u32 size)
 {
 
     if (!fs_name_ok(name)) return -1;
@@ -157,7 +163,7 @@ int fs_write(const char *name, const u8 *buf, u32 size)
     return flush_table() ? 0 : -1;
 }
 
-int fs_delete(const char *name)
+static int fs_delete_locked(const char *name)
 {
     if (!fs_ensure()) return -1;
     FsEnt *e = find(name);
@@ -166,7 +172,7 @@ int fs_delete(const char *name)
     return flush_table() ? 0 : -1;
 }
 
-int fs_mkdir(const char *name)
+static int fs_mkdir_locked(const char *name)
 {
     if (!fs_dirname_ok(name)) return -1;
     if (!fs_ensure()) return -1;
@@ -193,7 +199,7 @@ int fs_is_dir(const char *name)
     return e && (e->attr & FS_ATTR_DIR);
 }
 
-int fs_touch(const char *name)
+static int fs_touch_locked(const char *name)
 {
     if (!fs_ensure()) return FS_EIO;
     FsEnt *e = find(name);
@@ -202,7 +208,7 @@ int fs_touch(const char *name)
     return flush_table() ? 0 : FS_EIO;
 }
 
-int fs_rename(const char *oldname, const char *newname)
+static int fs_rename_locked(const char *oldname, const char *newname)
 {
     if (!newname || !newname[0]) return -1;
     if (!fs_ensure()) return -1;
@@ -217,7 +223,7 @@ int fs_rename(const char *oldname, const char *newname)
     return flush_table() ? 0 : -1;
 }
 
-int fs_rename_dir(const char *olddir, const char *newdir)
+static int fs_rename_dir_locked(const char *olddir, const char *newdir)
 {
     if (!fs_dirname_ok(newdir)) return -1;
     if (fs_under(newdir,olddir)) return -1;
@@ -278,7 +284,7 @@ static int dfg_wr(u32 lba, const u8 *sec)
     return -1;
 }
 
-int fs_defrag(void (*prog)(int done, int total))
+static int fs_defrag_locked(void (*prog)(int done, int total))
 {
     if (!fs_ensure()) return -1;
     static FpEnt e[FS_NFILES];
@@ -357,3 +363,19 @@ const char *ext_type(const char *name)
     if (!strcasecmp(e, "kx")) return "KExt";
     return "File";
 }
+
+int fs_read(const char *name,u8 *buf,u32 max){mtx_lock(&fs_mutex);int r=fs_read_locked(name,buf,max);mtx_unlock(&fs_mutex);return r;}
+
+int fs_write(const char *name,const u8 *buf,u32 size){mtx_lock(&fs_mutex);int r=fs_write_locked(name,buf,size);mtx_unlock(&fs_mutex);return r;}
+
+int fs_delete(const char *name){mtx_lock(&fs_mutex);int r=fs_delete_locked(name);mtx_unlock(&fs_mutex);return r;}
+
+int fs_mkdir(const char *name){mtx_lock(&fs_mutex);int r=fs_mkdir_locked(name);mtx_unlock(&fs_mutex);return r;}
+
+int fs_touch(const char *name){mtx_lock(&fs_mutex);int r=fs_touch_locked(name);mtx_unlock(&fs_mutex);return r;}
+
+int fs_rename(const char *oldname,const char *newname){mtx_lock(&fs_mutex);int r=fs_rename_locked(oldname,newname);mtx_unlock(&fs_mutex);return r;}
+
+int fs_rename_dir(const char *olddir,const char *newdir){mtx_lock(&fs_mutex);int r=fs_rename_dir_locked(olddir,newdir);mtx_unlock(&fs_mutex);return r;}
+
+int fs_defrag(void (*prog)(int,int)){mtx_lock(&fs_mutex);int r=fs_defrag_locked(prog);mtx_unlock(&fs_mutex);return r;}

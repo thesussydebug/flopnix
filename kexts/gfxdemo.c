@@ -203,7 +203,7 @@ int kext_entry(const Kapi *k)
     if (k->version < KAPI_VERSION) return 1;
     api = k;
     g = gdi_bind(k, GDI_ABI); ui_init(k, g);
-    static const AppDesc d = {
+    static const AppDesc d = {.live_draw=APP_INDEPENDENT,
         .title = "GFX Demo", .max_inst = 1, .resizable = 1, .in_menu = 1,
         .category = APP_CAT_DEV,
         .open = demo_open, .draw = demo_draw, .close = demo_close, .mouse = demo_mouse,

@@ -9,7 +9,7 @@ typedef __builtin_va_list va_list;
 #define va_arg(v, t)   __builtin_va_arg(v, t)
 
 #define OS_NAME    "FLOPNIX"
-#define OS_VER     "0.8.1"
+#define OS_VER     "0.8.2"
 #ifndef OS_BUILD_DATE
 #define OS_BUILD_DATE "unknown"
 #endif
@@ -255,6 +255,7 @@ void cursor_hide(int hide);
 void cursor_shape(int shape);
 
 void heap_init(void);
+void win_image_trim(void);
 void *kmalloc(u32 n);
 void kfree(void *p);
 u32  heap_avail(void);
@@ -324,6 +325,23 @@ int  thread_info(int slot, ThreadInfo *out);
 void threads_print(void);
 void threads_report(char *out, int cap);
 void app_worker(void);
+int app_callback(int owner,int win,void *fn,void *ctx,int value,const char *path,int is_path);
+int app_owner_busy(int owner);
+int app_current_window(void);
+int app_job_info(int win,u32 *elapsed,u32 *prog,u32 *io);
+int app_unresponsive(int win);
+void fault_show_banner(const char *msg);
+void app_buffer_lock(void);
+void app_buffer_unlock(void);
+void app_network_lock(void);
+void app_network_unlock(void);
+void app_cancel_window(int win);
+int app_cancel_pending(void);
+void handle_sc(u8 sc);
+int pump_keyboard(void);
+void keyboard_unwind(void);
+void app_forget_window(int win);
+void app_local_progress(const char *title,const char *msg,int frac);
 int  app_busy(int win);
 u32  app_q_dropped(void);
 int  app_q_depth(void);
@@ -447,6 +465,24 @@ extern FatEnt fe_scratch[128];
 #define CFG ((FCfg *)0x7100)
 void config_load(void);
 int  config_save(void);
+int memcmp(const void *a,const void *b,u32 n);
+int config_get(const char *key, u32 *value);
+int config_set(const char *key, u32 value);
+int config_read(void *buf, u32 cap);
+int clip_history(int index, ClipInfo *info, void *buf, u32 cap);
+int clip_restore(int index);
+u32 clip_sequence(void);
+void mem_track(const char *name, const void *buf, u32 size);
+int mem_buffer(int index, MemBuffer *out);
+void mem_untrack(const void *buf);
+void fs_cache_clear(void);
+void fs_cache_invalidate(u32 lba);
+void kext_trim_idle(void);
+void app_placeholder(int type,const AppDesc *desc);
+void paging_space_drop(int slot);
+void services_drop_owner(int owner);
+void services_dialog_drop(void);
+int services_dialog_owner(void);
 
 #define MAXWIN 12
 
@@ -459,6 +495,8 @@ extern u8 gui_dirty;
 extern u8 gui_blink;
 int  win_is_focused(Win *w);
 int  win_is_hovered(Win *w);
+int control_state(int x, int y, int w, int h);
+void win_redraw(int type, int inst);
 void win_close_flush(void);
 
 int  app_handler_running(int win);
@@ -486,6 +524,7 @@ void win_fit_client(int type, int inst, int cw, int ch);
 void set_overlay(void (*draw)(void), int (*mouse)(int x, int y, int ev));
 void set_overlay_key(int (*key)(int k));
 void overlay_drop_owner(int owner);
+int overlay_modal(void);
 int  drag_start(const char *type, const char *data);
 int  drag_active(void);
 void win_set_title(int type, int inst, const char *title);

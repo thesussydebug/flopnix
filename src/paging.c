@@ -145,6 +145,12 @@ void paging_space_switch(int slot)
 }
 
 int paging_space_current(void) { return pd_current; }
+void paging_space_drop(int slot)
+{
+    if(slot<0||slot>=KEXT_PD_MAX)return;
+    if(pd_current==slot)paging_space_switch(-1);
+    memset(kext_pt[slot],0,sizeof kext_pt[slot]);pd_live[slot]=0;
+}
 
 void paging_space_sync(void)
 {

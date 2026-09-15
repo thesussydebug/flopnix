@@ -3251,8 +3251,8 @@ static void t_sc_resolve(void)
     CHECK(sc_resolve("", "sys\\fat.kx", o, sizeof o) == 1 && STREQ(o, "sys/fat.kx"));
     CHECK(sc_resolve("", "/", o, sizeof o) == 1 && STREQ(o, ""));
 
-    CHECK(sc_resolve("", "0123456789012345678901234567890", o, sizeof o) == 0);
-    CHECK(sc_resolve("aaaaaaaaaa/bbbbbbbbbb", "cccccccccc", o, sizeof o) == 0);
+    CHECK(sc_resolve("", "0123456789012345678901234567890", o, 24) == 0);
+    CHECK(sc_resolve("aaaaaaaaaa/bbbbbbbbbb", "cccccccccc", o, 24) == 0);
 
     CHECK(sc_resolve("", "01234567890123456789012", o, sizeof o) == 1);
 }
@@ -3507,8 +3507,9 @@ static void t_nl_parse(void)
     CHECK(nl_parse("10 20 200 150 1 n.txt", &r) == 0);
 
     CHECK(nl_parse("1\t1\t200\t150\t1\t"
-                   "a_very_long_note_filename_beyond_the_field.txt", &r) == 1);
-    CHECK((int)api->strlen(r.file) == NL_NAMEMAX - 1);
+                   "a_very_long_note_filename_beyond_the_field.txt", &r) == 0);
+    CHECK(nl_parse("1\t1\t200\t150\t1\tnote.txt\r",&r)==1&&STREQ(r.file,"note.txt"));
+    CHECK(nl_parse("99999999999999999999\t1\t200\t150\t1\tnote.txt",&r)==0);
 }
 
 static void t_nl_fmt(void)
@@ -5001,7 +5002,11 @@ static void t_g3d_zorder(void)
 }
 
 const KextHeader kext_header = {
+#ifdef SELFTEST_SMALL
+    KEXT_MAGIC, KAPI_VERSION, KEXT_KIND_APP, 0, "SelfTest"
+#else
     KEXT_MAGIC, KAPI_VERSION, KEXT_KIND_KERNEL, 0, "SelfTest"
+#endif
 };
 
 int kext_entry(const Kapi *k)

@@ -41,7 +41,7 @@ static int tw_url(const char *s,TwUrl *u)
     if(s[p]&&s[p]!='/'&&s[p]!='?'&&s[p]!='#')return 0;
     int o=0,tabs=0;
     if(!u->http&&s[p]=='/'){p++;if(s[p]&&s[p]!='#')u->type=(u8)s[p++];}
-    if(!u->http&&u->type!='0'&&u->type!='1'&&u->type!='7'&&u->type!='h')return 0;
+    if(!u->http&&u->type!='0'&&u->type!='1'&&u->type!='7'&&u->type!='h'&&u->type!='9'&&u->type!='5'&&u->type!='4'&&u->type!='6'&&u->type!='g'&&u->type!='I'&&u->type!='s')return 0;
     if(u->http&&s[p]!='/')u->path[o++]='/';
     for(;s[p]&&s[p]!='#';p++){
         int c=(u8)s[p];
@@ -156,7 +156,7 @@ static void tw_render(TwPage *p,const char *s,int mode,const char *base)
             else if(n){
                 int tab[4],nt=0;for(int i=1;i<n&&nt<4;i++)if(s[i]=='\t')tab[nt++]=i;
                 int label=nt?tab[0]-1:n-1;
-                if(nt>=3&&(s[0]=='0'||s[0]=='1'||s[0]=='7'||s[0]=='h')){
+                if(nt>=3&&(s[0]=='0'||s[0]=='1'||s[0]=='7'||s[0]=='h'||s[0]=='9'||s[0]=='5'||s[0]=='4'||s[0]=='6'||s[0]=='g'||s[0]=='I'||s[0]=='s')){
                     char host[80],sel[176],enc[530],url[TW_URL];int pe=nt>3?tab[3]:n,ok=1;u32 port=0;
                     ok=tw_copy(host,80,s+tab[1]+1,tab[2]-tab[1]-1)&&tw_copy(sel,176,s+tab[0]+1,tab[1]-tab[0]-1);
                     for(int i=tab[2]+1;i<pe;i++){if(s[i]<'0'||s[i]>'9'){ok=0;break;}port=port*10+s[i]-'0';if(port>65535){ok=0;break;}}

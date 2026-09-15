@@ -1,5 +1,6 @@
 /* Provides message boxes, file pickers, and progress windows. */
 #include "kapi.h"
+#include "button.h"
 #include "fspath.inc"
 #include "shpath.h"
 #include "savepath.inc"
@@ -80,11 +81,7 @@ static void mb_draw(void)
     wrap_draw(x + 12, y + 26, mb_text, 36, C_BLACK);
     for (int i = 0; i < mb_nb; i++) {
         int b[4]; mb_btnrect(i, b);
-        int hov = *api->mouse_x >= b[0] && *api->mouse_x < b[0] + b[2] &&
-                  *api->mouse_y >= b[1] && *api->mouse_y < b[1] + b[3];
-        api->panel(b[0], b[1], b[2], b[3], hov);
-        api->draw_text(b[0] + (b[2] - (int)api->strlen(mb_lbl[i]) * 8) / 2,
-                       b[1] + 3, mb_lbl[i], C_BLACK);
+        button_label(api,b[0],b[1],b[2],b[3],mb_lbl[i],0,1);
     }
 }
 static int mb_mouse(int px, int py, int ev)
@@ -101,6 +98,13 @@ static int mb_mouse(int px, int py, int ev)
     }
     return 1;
 }
+static int mb_key(int k)
+{
+    if(k!=27)return 0;
+    void (*cb)(int,void *)=mb_cb;void *ctx=mb_ctx;
+    int result=mb_kind==MB_YESNO?MBR_NO:mb_kind==MB_OK?MBR_OK:MBR_CANCEL;
+    api->set_overlay(0,0);if(cb)cb(result,ctx);return 1;
+}
 static void d_msgbox(const char *title, const char *text, int buttons,
                      void (*cb)(int, void *), void *ctx)
 {
@@ -109,6 +113,7 @@ static void d_msgbox(const char *title, const char *text, int buttons,
     mb_kind = buttons; mb_cb = cb; mb_ctx = ctx;
     mb_setbtns();
     api->set_overlay(mb_draw, mb_mouse);
+    api->set_overlay_key(mb_key);
     api->gui_dirty();
 }
 
@@ -284,10 +289,8 @@ static void pk_draw(void)
     api->fill_rect(x + 2, y + 2, w - 4, 18, C_TB0 + 4);
     api->draw_text(x + 8, y + 3, pk_title, C_WHITE);
 
-    api->panel(x + w - 92, y + 2, 42, 16, pk_drive == 0);
-    api->draw_text(x + w - 86, y + 3, "A:", C_BLACK);
-    api->panel(x + w - 48, y + 2, 42, 16, pk_drive == 1);
-    api->draw_text(x + w - 42, y + 3, "USB", api->usb_present() ? C_BLACK : C_G0 + 4);
+    button_label(api,x+w-92,y+2,42,16,"A:",pk_drive==0,1);
+    button_label(api,x+w-48,y+2,42,16,"USB",pk_drive==1,api->usb_present());
 
     int ly = y + 22;
     api->fill_rect(x + 4, ly, w - 8, PK_ROWS * 16, C_WHITE);
@@ -330,14 +333,8 @@ static void pk_draw(void)
 
     int by = y + h - 26;
     const char *ok = pk_save ? "Save" : pk_dirs ? "Choose" : "Open";
-    int ho = *api->mouse_x >= x + 12 && *api->mouse_x < x + 76 &&
-             *api->mouse_y >= by && *api->mouse_y < by + 20;
-    api->panel(x + 12, by, 64, 20, ho);
-    api->draw_text(x + 12 + (64 - (int)api->strlen(ok) * 8) / 2, by + 3, ok, C_BLACK);
-    int hc = *api->mouse_x >= x + w - 76 && *api->mouse_x < x + w - 12 &&
-             *api->mouse_y >= by && *api->mouse_y < by + 20;
-    api->panel(x + w - 76, by, 64, 20, hc);
-    api->draw_text(x + w - 76 + (64 - 48) / 2, by + 3, "Cancel", C_BLACK);
+    button_label(api,x+12,by,64,20,ok,0,1);
+    button_label(api,x+w-76,by,64,20,"Cancel",0,1);
 }
 static int pk_mouse(int px, int py, int ev)
 {
@@ -405,6 +402,7 @@ static int pk_mouse(int px, int py, int ev)
 
 static int pk_key(int k)
 {
+    if(k==27){pk_choose(0);return 1;}
     if (!pk_save) return 0;
     if (k == '\n' || k == '\r') { pk_save_commit(); return 1; }
     if (k == '\b') { if (pk_nlen) pk_name[--pk_nlen] = 0; pk_error[0] = 0; api->gui_dirty(); return 1; }

@@ -1,6 +1,7 @@
 /* Runs the network adapters and IPv4 services. */
 #include "kapi.h"
 #include "nettext.h"
+#include "http_core.inc"
 
 static const Kapi *api;
 
@@ -647,7 +648,7 @@ static int arp_resolve(u32 ip, u8 *mac, u32 timeout);
 static volatile u32 sntp_answer;
 static int arp_resolve(u32 ip, u8 *mac, u32 timeout);
 
-static u32 net_sntp_impl(u32 ip, u32 timeout)
+static u32 net_sntp_impl_locked(u32 ip, u32 timeout)
 {
     if (nic_kind == NIC_NONE || !timer_alive || !ip) return 0;
     net_cancel = 0;
@@ -666,9 +667,11 @@ static u32 net_sntp_impl(u32 ip, u32 timeout)
     }
     return sntp_answer;
 }
+static u32 net_sntp_impl(u32 ip,u32 timeout){api->network_lock();u32 result=net_sntp_impl_locked(ip,timeout);api->network_unlock();return result;}
+
 
 static u32 dns_expected;
-static u32 net_dns_resolve(const char *name, u32 timeout)
+static u32 net_dns_resolve_locked(const char *name, u32 timeout)
 {
     u32 ip;
     if (nw_ip_parse(name, &ip)) return ip;
@@ -697,6 +700,8 @@ static u32 net_dns_resolve(const char *name, u32 timeout)
     dns_expected = 0;
     return dns_answer;
 }
+static u32 net_dns_resolve(const char *name,u32 timeout){api->network_lock();u32 result=net_dns_resolve_locked(name,timeout);api->network_unlock();return result;}
+
 
 static Tcb tcb;
 static u32 tcp_rip;
@@ -757,10 +762,8 @@ static void tcp_pump(void)
 
 static int (*hs_sink)(const u8 *, int, void *);
 static void *hs_ctx;
-static u8  hs_hdr[600];
-static int hs_hdrlen, hs_body, hs_status, hs_abort;
-
-static int hs_expect;
+static HttpReader hs_http;
+static int hs_raw,hs_abort;
 static u32 hs_got;
 static volatile u8 tcp_busy;
 
@@ -780,7 +783,8 @@ static void http_drain(void)
         u32 r=hs_read,n=hs_write-r;if(n>sizeof chunk)n=sizeof chunk;
         for(u32 i=0;i<n;i++)chunk[i]=hs_queue[(r+i)&8191];
         __asm__ volatile("" ::: "memory");hs_read=r+n;
-        if(hs_sink&&!hs_sink(chunk,(int)n,hs_ctx))hs_abort=1;
+        if(hs_raw){if(hs_sink&&!hs_sink(chunk,(int)n,hs_ctx))hs_abort=1;}
+        else if(!hr_feed(&hs_http,chunk,(int)n,hs_sink,hs_ctx))hs_abort=1;
     }
 
     u32 flags=net_irq_save();
@@ -791,34 +795,14 @@ static void http_drain(void)
 
 static void http_deliver(const u8 *d, int n)
 {
-    if (hs_abort) return;
-    if (hs_body) {
-        hs_got += (u32)n;
-        http_queue(d,n);
-        return;
-    }
-    int take = n, room = (int)sizeof hs_hdr - hs_hdrlen;
-    if (take > room) take = room;
-    memcpy(hs_hdr + hs_hdrlen, d, take);
-    hs_hdrlen += take;
-    int b = nw_http_body(hs_hdr, hs_hdrlen);
-    if (b < 0) {
-        if (hs_hdrlen >= (int)sizeof hs_hdr) hs_abort = 1;
-        return;
-    }
-    hs_status = nw_http_status(hs_hdr, b);
-    hs_expect = nw_http_clen(hs_hdr, b);
-    hs_body = 1;
-    if (hs_hdrlen > b) hs_got += (u32)(hs_hdrlen - b);
-    if (hs_hdrlen > b) http_queue(hs_hdr+b,hs_hdrlen-b);
-    if (n > take) hs_got += (u32)(n - take);
-    if (n > take) http_queue(d+take,n-take);
+    if(hs_abort)return;
+    hs_got+=(u32)n;http_queue(d,n);
 }
 
-static int net_transfer(u32 ip, u16 port, const char *host,
+static int net_transfer_locked(u32 ip, u16 port, const char *host,
                              const char *path,
                              int (*sink)(const u8 *, int, void *), void *ctx,
-                             u32 timeout)
+                             u32 timeout,NetHttpInfo *info)
 {
     if (nic_kind == NIC_NONE || !net_ip) return -2;
     if (!timer_alive || !port || !ip || !path || !timeout) return -1;
@@ -830,8 +814,8 @@ static int net_transfer(u32 ip, u16 port, const char *host,
     if(host){
         for(const char *p=host;*p;p++)if((u8)*p<=32||*p==127){result=-1;goto finish;}
         for(const char *p=path;*p;p++)if((u8)*p<=32||*p==127){result=-1;goto finish;}
-        if(strlen(path)+strlen(host)+48>=sizeof req){result=-1;goto finish;}
-        kfmt(req,sizeof req,"GET %s HTTP/1.0\r\nHost: %s\r\nConnection: close\r\n\r\n",path,host);
+        if(strlen(path)+strlen(host)+102>=sizeof req){result=-1;goto finish;}
+        kfmt(req,sizeof req,"GET %s HTTP/1.1\r\nHost: %s\r\nConnection: close\r\nAccept-Encoding: identity\r\nUser-Agent: FLOPNIX\r\n\r\n",path,host);
     }else strlcpy(req,path,sizeof req);
     net_cancel = 0;
     api->esc_arm();
@@ -842,11 +826,8 @@ static int net_transfer(u32 ip, u16 port, const char *host,
     tcp_rport = port;
     tcp_lport = (u16)(0xC000 | (ticks & 0x3FFF));
     hs_sink = sink; hs_ctx = ctx;
-    hs_hdrlen = hs_body = hs_abort = 0;
+    hr_init(&hs_http);hs_raw=!host;hs_abort=0;
     hs_read=hs_write=0;
-    hs_status = -1;
-    if(!host){hs_body=1;hs_status=0;}
-    hs_expect = -1;
     hs_got = 0;
     tcp_deliver = http_deliver;
     tcp_event = 0;
@@ -872,6 +853,7 @@ static int net_transfer(u32 ip, u16 port, const char *host,
     u32 seen = hs_got;
     while (!(tcp_event & (TA_CLOSED | TA_ERROR)) && !hs_abort) {
         http_drain();
+        if(!hs_raw&&hs_http.state==7)break;
         if (hs_got != seen) { seen = hs_got; t0 = ticks; }
         if (net_cancel || api->esc_pending() || (u32)(ticks - t0) > timeout) { hs_abort=1; break; }
         net_wait();
@@ -882,7 +864,8 @@ static int net_transfer(u32 ip, u16 port, const char *host,
     }
     http_drain();
 
-    result=hs_abort||(tcp_event&TA_ERROR)||(hs_expect>=0&&hs_got!=(u32)hs_expect)?-4:hs_status;
+    if(info)memcpy(info,&hs_http.info,sizeof *info);
+    result=hs_abort||(tcp_event&TA_ERROR)||(!hs_raw&&!hr_finish(&hs_http))?(hs_http.error?hs_http.error:-4):hs_raw?0:hs_http.info.status;
     goto finish;
 fail3:
     result=-3;
@@ -896,14 +879,24 @@ finish:
     net_irq_restore(finish_flags);
     return result;
 }
+static int net_transfer(u32 ip,u16 port,const char *host,const char *path,int (*sink)(const u8 *,int,void *),void *ctx,u32 timeout,NetHttpInfo *info){api->network_lock();int result=net_transfer_locked(ip,port,host,path,sink,ctx,timeout,info);api->network_unlock();return result;}
+
 
 static int net_http_get_impl(u32 ip,u16 port,const char *host,const char *path,
     int (*sink)(const u8 *,int,void *),void *ctx,u32 timeout)
-{ return net_transfer(ip,port,host,path,sink,ctx,timeout); }
+{ return net_transfer(ip,port,host,path,sink,ctx,timeout,0); }
+static int net_http_get_info(u32 ip,u16 port,const char *host,const char *path,
+    int (*sink)(const u8 *,int,void *),void *ctx,u32 timeout,NetHttpInfo *info)
+{
+    if(info)memset(info,0,sizeof *info);
+    if(!host)return -1;
+    return net_transfer(ip,port,host,path,sink,ctx,timeout,info);
+}
 static int net_text_request(u32 ip,u16 port,const char *request,
     int (*sink)(const u8 *,int,void *),void *ctx,u32 timeout)
-{ return net_transfer(ip,port,0,request,sink,ctx,timeout); }
+{ return net_transfer(ip,port,0,request,sink,ctx,timeout,0); }
 static const NetTextOps text_ops={NET_TEXT_ABI,net_text_request};
+static const NetHttpOps http_ops={NET_HTTP_ABI,net_http_get_info};
 
 static u32 dhcp_xid, dhcp_serial, dhcp_started, dhcp_due;
 static int dhcp_state, dhcp_auto, dhcp_busy, dhcp_attempts;
@@ -1136,7 +1129,7 @@ static void handle_frame(u8 *fr, u16 len)
     }
 }
 
-int net_dhcp(u32 timeout)
+static int net_dhcp_locked(u32 timeout)
 {
     if (!net_up() || !timer_alive || dhcp_busy) return 0;
     dhcp_busy = 1;
@@ -1155,6 +1148,8 @@ int net_dhcp(u32 timeout)
     dhcp_busy = 0;
     return net_dhcp_ok;
 }
+int net_dhcp(u32 timeout){api->network_lock();int result=net_dhcp_locked(timeout);api->network_unlock();return result;}
+
 
 static void tcp_pump(void);
 
@@ -1241,7 +1236,7 @@ static int arp_resolve(u32 ip, u8 *mac, u32 timeout)
     return 1;
 }
 
-int net_ping(u32 dst, u32 timeout)
+static int net_ping_locked(u32 dst, u32 timeout)
 {
     if (!net_up()) return -2;
     if (!timer_alive) return -1;
@@ -1270,6 +1265,8 @@ int net_ping(u32 dst, u32 timeout)
     }
     return (int)(ticks - t0) * 10;
 }
+int net_ping(u32 dst,u32 timeout){api->network_lock();int result=net_ping_locked(dst,timeout);api->network_unlock();return result;}
+
 
 static u32 net_link_bits(void)
 {
@@ -1421,7 +1418,7 @@ static void cmd_netdiag(const char *args)
               net_ip >> 24, net_dhcp_ok ? "DHCP" : "static");
     pr(b);
     if (!net_ip)
-        pr("  no address: run 'set net dhcp', or 'ipconfig a.b.c.d' to set one.\n");
+        pr("  no address: run 'set net dhcp', or 'ifconfig a.b.c.d' to set one.\n");
     static const char *const states[] = {
         "waiting", "discovering", "requesting", "bound", "renewing", "rebinding"
     };
@@ -1451,6 +1448,7 @@ int kext_entry(const Kapi *k)
     net_init();
     api->register_net(&net_ops);
     api->register_service("net.text",&text_ops);
+    api->register_service("net.http",&http_ops);
     api->register_cmd("netdiag", "netdiag - report NIC, link and traffic state",
                       cmd_netdiag);
     return 0;
