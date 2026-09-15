@@ -9,7 +9,7 @@ typedef __builtin_va_list va_list;
 #define va_arg(v, t)   __builtin_va_arg(v, t)
 
 #define OS_NAME    "FLOPNIX"
-#define OS_VER     "0.8.3"
+#define OS_VER     "0.8.4"
 #ifndef OS_BUILD_DATE
 #define OS_BUILD_DATE "unknown"
 #endif

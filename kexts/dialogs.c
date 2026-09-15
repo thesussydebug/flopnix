@@ -442,6 +442,7 @@ static void d_file_picker(const char *title, const char *ext, int dirs_only,
     pk_drive = 0; pk_path[0] = 0; pk_scroll = 0; pk_sel[0] = 0;
     pk_build();
     api->set_overlay(pk_draw, pk_mouse);
+    api->set_overlay_key(pk_key);
     api->gui_dirty();
 }
 

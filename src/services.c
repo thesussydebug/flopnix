@@ -18,10 +18,10 @@ static Mutex fat_mx = MUTEX_INIT;
 #define FATLOCKT(call, dflt)     FATLOCKV(int, fat_tail_ok(), call, dflt)
 #define FATLOCKV(T, ok, call, dflt)     T _r = (T)(dflt); mtx_lock(&fat_mx); if (ok) _r = (call);     mtx_unlock(&fat_mx); return _r;
 
-static int use_fat(void)  { if (!fops) return 0; kext_enter(fat_owner);  return 1; }
-static int use_net(void)  { if (!nops) return 0; kext_enter(net_owner);  return 1; }
-static int use_desk(void) { if (!dops) return 0; kext_enter(desk_owner); return 1; }
-static int use_dlg(void)  { if (!dlg)  return 0; kext_enter(dlg_owner);  return 1; }
+static int use_fat(void)  { return fops != 0; }
+static int use_net(void)  { return nops != 0; }
+static int use_desk(void) { return dops != 0; }
+static int use_dlg(void)  { return dlg != 0; }
 
 static void desk_lost(const char *what)
 {
@@ -33,31 +33,39 @@ static void desk_lost(const char *what)
 void desk_draw(void)
 {
     if (use_desk() && dops->draw) {
+        int resident=kext_current();kext_enter(desk_owner);
         void (*f)(void) = dops->draw;
         FAULT_GUARD(f(), { if (!fault_fallback[thr_self]) desk_lost("draw"); });
+        kext_enter(resident);
     }
 }
 void desk_mouse(int x, int y, int ev)
 {
     if (use_desk() && dops->mouse) {
+        int resident=kext_current();kext_enter(desk_owner);
         void (*f)(int, int, int) = dops->mouse;
         FAULT_GUARD(f(x, y, ev), desk_lost("mouse"));
+        kext_enter(resident);
     }
 }
 void desk_drop(int x, int y, const char *type, const char *data)
 {
     if (use_desk() && dops->drop) {
+        int resident=kext_current();kext_enter(desk_owner);
         void (*f)(int, int, const char *, const char *) = dops->drop;
         FAULT_GUARD(f(x, y, type, data), desk_lost("drop"));
+        kext_enter(resident);
     }
 }
 
 int desk_key(int k)
 {
     if (!use_desk() || !dops->key) return 0;
+    int resident=kext_current();kext_enter(desk_owner);
     int (*f)(int) = dops->key;
     volatile int r = 0;
     FAULT_GUARD(r = f(k), { r = 0; desk_lost("key"); });
+    kext_enter(resident);
     return r;
 }
 

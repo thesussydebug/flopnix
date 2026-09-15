@@ -56,6 +56,7 @@ int overlay_modal(void){return ov_mouse!=0;}
 
 void set_overlay(void (*draw)(void), int (*mouse)(int x, int y, int ev))
 {
+    if(mouse){press_win=-1;press_desk=0;}
     ov_key = 0;
     ov_draw = draw;
     ov_mouse = mouse;
@@ -745,6 +746,10 @@ void gui_key(int k)
         }
         if (k == 27) ov_drop();
         return;
+    }
+    if(k==20&&(kbd_mods()&2)){
+        menu_open=0;open_cat=-1;at_k=-1;
+        win_open(WT_TERM);gui_dirty=1;return;
     }
     if (k == K_MENU) {
         menu_open = !menu_open;

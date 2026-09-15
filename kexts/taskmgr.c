@@ -99,25 +99,25 @@ static void tm_tick(void *ctx) { (void)ctx; api->gui_dirty(); }
 static void run_task_locked(void)
 {
     if (!runlen) { api->strlcpy(status, "type a path first", sizeof status); return; }
-    char path[48];
-    sh_norm_path(runpath, path, sizeof path);
+    char path[48], rel[48]; int drive;
+    sh_spec_split(runpath, &drive, rel, sizeof rel);
+    sh_norm_path(rel, path, sizeof path);
     int L = (int)api->strlen(path);
     const char *base = basename_of(path);
 
-    if (L > 3 && path[L - 3] == '.' && path[L - 2] == 'k' && path[L - 1] == 'x') {
-        int drive; char rel[48]; sh_spec_split(runpath,&drive,rel,sizeof rel);
-        sh_norm_path(rel,path,sizeof path); api->strlcpy(rel,path,sizeof rel);
+    if (L > 3 && path[L - 3] == '.' && sh_ci_eq(path[L - 2], 'k') && sh_ci_eq(path[L - 1], 'x')) {
+        api->strlcpy(rel,path,sizeof rel);
         if (drive) { api->strlcpy(status,"Copy the module to the floppy first",sizeof status); goto done; }
         int rc=api->kext_load(rel);
         if (rc) { api->kfmt(status,sizeof status,"Could not load module (E%d)",rc); goto done; }
         api->strlcpy(status,api->open_with(rel,0,0,0)==0 ? "Module opened" : "Could not open its window",sizeof status);
     } else {
-        int drive = 0; char rel[48];
-        sh_spec_split(path, &drive, rel, sizeof rel);
-        int n = drive ? api->fat_read(rel, api->iobuf, api->iobuf_size)
+        char full[52];
+        if (drive) sh_spec_make(drive,path,full,sizeof full);
+        int n = drive ? api->fat_read(path, api->iobuf, api->iobuf_size)
                       : api->fs_read(path, api->iobuf, api->iobuf_size);
         if (n < 0) api->strlcpy(status, "file not found", sizeof status);
-        else if (api->open_with(base, path, api->iobuf, n) != 0)
+        else if (api->open_with(base, drive ? full : path, api->iobuf, n) != 0)
             api->strlcpy(status, "no app opens that file", sizeof status);
         else api->strlcpy(status, "opened", sizeof status);
     }
