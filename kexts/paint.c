@@ -404,21 +404,29 @@ static int paint_parse_bmp(Paint *p, const u8 *bm, int n)
     int w = (int)get32(bm + 18);
     int h = (int)get32(bm + 22);
     u16 bpp = get16(bm + 28);
-    if (get32(bm + 30) != 0) return -1;
+    u32 dib=get32(bm+14);
+    if(dib<40||dib>(u32)n-14||get16(bm+26)!=1||off<14+dib||off>(u32)n)return -1;
+    if (get32(bm + 30) != 0 || h == (-2147483647-1)) return -1;
     int topdown = h < 0; if (topdown) h = -h;
     if (w <= 0 || h <= 0 || (bpp != 8 && bpp != 24)) return -1;
+    u32 pixel_bytes=bpp/8;
+    if((u32)w>(u32)n/pixel_bytes)return -1;
+    u32 rowsz=((u32)w*pixel_bytes+3)&~3u;
+    if((u32)h>((u32)n-off)/rowsz)return -1;
 
     u8 map[256];
     if (bpp == 8) {
-        u32 paloff = 14 + get32(bm + 14);
-        for (int i = 0; i < 256; i++) {
+        u32 paloff = 14 + dib,colors=get32(bm+46);
+        if(!colors)colors=256;
+        if(colors>256||colors>(off-paloff)/4)return -1;
+        memset(map,C_BLACK,sizeof map);
+        for (u32 i = 0; i < colors; i++) {
             const u8 *e = bm + paloff + i * 4;
             map[i] = palette_nearest(e[2], e[1], e[0]);
         }
     }
     p->cw = w < 16 ? 16 : (w > PCW_MAX ? PCW_MAX : w);
     p->ch = h < 16 ? 16 : (h > PCH_MAX ? PCH_MAX : h);
-    int rowsz = bpp == 8 ? ((w + 3) & ~3) : ((w * 3 + 3) & ~3);
     memset(p->canvas, C_WHITE, sizeof p->canvas);
     for (int y = 0; y < p->ch && y < h; y++) {
         int src = topdown ? y : (h - 1 - y);

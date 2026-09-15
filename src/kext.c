@@ -78,7 +78,7 @@ void kext_enter(int k)
     if(k<0){preempt_disable();paging_space_switch(-1);cur_kext=-1;preempt_enable();return;}
     if (k < 0 || k >= nkexts) return;
     kext_touched[k]=ticks;
-    if (!kext_priv_len[k]) return;
+    if(!kext_priv_len[k]){preempt_disable();paging_space_switch(-1);cur_kext=k;preempt_enable();return;}
     preempt_disable();
     if (k != cur_kext) {
         cur_kext = k;
@@ -659,6 +659,8 @@ static struct {
     void *ctx;
     int owner;
 } timers[NTIMERS];
+static int timer_owner=-1;
+int kext_timer_busy(int owner){return owner>=0&&timer_owner==owner;}
 
 int timer_add(u32 interval, void (*fn)(void *), void *ctx)
 {
@@ -699,11 +701,12 @@ void timers_poll(void)
     if (!timer_alive) return;
     int resident = kext_current();
     for (int i = 0; i < NTIMERS; i++) {
-
+        u32 flags=irq_save();
         void (*fn)(void *) = timers[i].fn;
-        if (!fn) continue;
-        if ((i32)(ticks - timers[i].next) < 0) continue;
+        if(!fn||(i32)(ticks-timers[i].next)<0||app_owner_busy(timers[i].owner)){irq_restore(flags);continue;}
+        timer_owner=timers[i].owner;
         timers[i].next = ticks + timers[i].interval;
+        irq_restore(flags);
         int cpu_prev = cpu_context(app_type_owned(timers[i].owner));
         kext_enter(timers[i].owner);
         FAULT_GUARD(fn(timers[i].ctx), ({
@@ -715,6 +718,7 @@ void timers_poll(void)
             if (!fault_fallback[thr_self]) fault_show_banner(msg);
             timers[i].fn = 0;
         }));
+        timer_owner=-1;
         cpu_context(cpu_prev);
     }
     kext_enter(resident);

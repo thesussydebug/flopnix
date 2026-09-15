@@ -92,8 +92,12 @@ static void load_file(const char *p)
     u32 expected;
     if(!path_size(p,&expected)||expected>capacity){say("Archive is unreadable or exceeds this computer's archive limit.");return;}
     u32 needed=expected<=capacity-36?expected+36:expected;
-    grow(needed);
-    if(allocated<expected){say("Not enough memory to open this archive. Close another app.");return;}
+    u8 *previous=data;u32 previous_allocated=allocated,previous_length=length;
+    int previous_count=count;
+    u8 *next=api->kmalloc(needed+1);
+    if(!next){say("Not enough memory to open this archive. Close another app.");return;}
+    data=next;allocated=needed;
+    if(api->mem_track)api->mem_track("Archive buffer",data,allocated+1);
     api->busy_set("Archive Manager","Reading and checking archive...",-1);
     int n=read_path(p,data,expected+1),ok=0;
     if(n!=(int)expected)n=-1;
@@ -107,7 +111,12 @@ static void load_file(const char *p)
     }
     if(n>=8&&n<=(int)capacity){length=(u32)n;ok=validate();}
     api->busy_end();
-    if(ok!=1){clear();say(ok<0?"Not enough memory to check this archive.":"Could not open archive: unreadable, damaged, or too large.");return;}
+    if(ok!=1){
+        api->kfree(data);data=previous;allocated=previous_allocated;length=previous_length;count=previous_count;
+        ar_index(data,length,entries);
+        say(ok<0?"Not enough memory to check this archive.":"Could not open archive. The current archive was kept.");return;
+    }
+    api->kfree(previous);
     selected=scroll=dirty=0;af_set(&field,filename,sizeof filename,"desktop/files.fpa");
     const char *local=p;if((p[0]=='a'||p[0]=='A')&&p[1]==':')local+=2;
     int len=(int)api->strlen(local);

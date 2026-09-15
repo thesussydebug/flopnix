@@ -3,6 +3,7 @@
 #include "fsplan.inc"
 #include "fsdefrag.inc"
 #include "fspath.inc"
+#include "fscheck.inc"
 
 #define FS_SUPER 288
 #define FS_TABLE 289
@@ -38,15 +39,11 @@ int fs_ensure(void)
     int ok = *(u32 *)sec == FS_MAGIC &&
              *(u32 *)(sec + 4) == FS_VER &&
              *(u32 *)(sec + 8) == sizeof(FsEnt);
-    if (ok) {
-        for (int i = 0; i < FS_TSECT; i++)
-            if (fdc_read(FS_TABLE + i, (u8 *)table + i * 512) != 0) {
-                mounted = -1;
-                return 0;
-            }
-    } else {
-        memset(table, 0, sizeof table);
-        if (!flush_table()) { mounted = -1; return 0; }
+    if(ok)for(int i=0;i<FS_TSECT;i++)if(fdc_read(FS_TABLE+i,(u8 *)table+i*512)!=0){ok=0;break;}
+    if(!ok||!fs_table_valid(table,FS_NFILES,FS_DATA,FS_END)){
+        memset(table,0,sizeof table);mounted=-1;
+        klog("FLOPFS: metadata unreadable or invalid; disk left unchanged.\n");
+        return 0;
     }
     mounted = 1;
     return 1;
@@ -210,7 +207,7 @@ static int fs_touch_locked(const char *name)
 
 static int fs_rename_locked(const char *oldname, const char *newname)
 {
-    if (!newname || !newname[0]) return -1;
+    if (!fs_name_ok(newname)) return -1;
     if (!fs_ensure()) return -1;
     if (!strcmp(oldname, newname)) return 0;
     FsEnt *e = find(oldname);
@@ -289,7 +286,7 @@ static int fs_defrag_locked(void (*prog)(int done, int total))
     if (!fs_ensure()) return -1;
     static FpEnt e[FS_NFILES];
     for (int i = 0; i < FS_NFILES; i++) {
-        e[i].used = table[i].used;
+        e[i].used = table[i].used && table[i].nsect != 0;
         e[i].start = table[i].start;
         e[i].sects = table[i].nsect;
         e[i].idx = (u8)i;

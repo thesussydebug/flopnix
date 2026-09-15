@@ -249,10 +249,11 @@ static int fdc_guarded(u32 lba, u8 *buf, int write)
 {
     if(fdc_mutex.held&&fdc_mutex.owner==thr_self)return -1;
     mtx_lock(&fdc_mutex);
+    if(write)fs_cache_invalidate(lba);
     int rc = fdc_rw(lba, buf, write);
     mtx_unlock(&fdc_mutex);
     return rc;
 }
 
 int fdc_read(u32 lba, u8 *buf)        { return fdc_guarded(lba, buf, 0); }
-int fdc_write(u32 lba, const u8 *buf) { fs_cache_invalidate(lba); return fdc_guarded(lba, (u8 *)buf, 1); }
+int fdc_write(u32 lba, const u8 *buf) { return fdc_guarded(lba, (u8 *)buf, 1); }

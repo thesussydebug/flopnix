@@ -9,7 +9,7 @@ typedef __builtin_va_list va_list;
 #define va_arg(v, t)   __builtin_va_arg(v, t)
 
 #define OS_NAME    "FLOPNIX"
-#define OS_VER     "0.8.2"
+#define OS_VER     "0.8.3"
 #ifndef OS_BUILD_DATE
 #define OS_BUILD_DATE "unknown"
 #endif
@@ -598,6 +598,7 @@ int  opener_dispatch(const char *name, const char *fullpath,
 int  timer_add(u32 interval, void (*fn)(void *ctx), void *ctx);
 void timer_del(int id);
 void timers_poll(void);
+int kext_timer_busy(int owner);
 int  register_key_hook(int (*fn)(int k));
 void unregister_key_hook(int (*fn)(int k));
 int  key_hook_dispatch(int k);

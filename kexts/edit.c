@@ -703,6 +703,7 @@ static void draw_picker(int cx, int cy)
 
 static void edit_draw(Win *w, int cx, int cy, int cw, int ch)
 {
+    Ed *previous=E;
     gfx = gdi_bind(api, 11);
     E = &eds[w->inst];
     int textW, textH, hbar;
@@ -807,6 +808,7 @@ done:
         draw_text(bx + 12, by + 12, "Discard unsaved changes?", C_BLACK);
         draw_text(bx + 12, by + 34, "Y = discard    N = cancel", C_NAVY);
     }
+    E=previous;
 }
 
 static void edit_csize(int inst, int *w, int *h) { (void)inst; edit_client_size(w, h); }

@@ -83,9 +83,12 @@ static void save_write(void)
     if(!pending.data)return;busy=1;api->busy_set("Browser","Saving download...",0);
     int r=save_drive?api->fat_write(save_path,pending.data,pending.len):api->fs_write(save_path,pending.data,pending.len);
     api->busy_end();busy=0;
-    if(!r){api->kfmt(status,sizeof status,"Saved %u bytes to %s:%s",pending.len,save_drive?"u":"a",save_path);api->gui_dirty();api->broadcast("fs.changed",save_path);}
-    else say(r==-2?"The drive is full. Download could not be saved.":"Could not save the download. Check the drive and file name.");
-    release(&pending);if(closing)dispose();
+    if(!r){api->kfmt(status,sizeof status,"Saved %u bytes to %s:%s",pending.len,save_drive?"u":"a",save_path);api->gui_dirty();api->broadcast("fs.changed",save_path);release(&pending);}
+    else {
+        say(r==-2?"The drive is full. Download is still in memory.":"Could not save the download. It is still in memory.");
+        if(!closing)api->msgbox("Download not saved","Choose another destination? The downloaded data has been retained.",MB_OKCANCEL,choose_again,0);
+    }
+    if(closing)dispose();
 }
 static void overwrite(int result,void *ctx){(void)ctx;if(result==MBR_YES)save_write();else {release(&pending);say("Save cancelled.");}}
 static void save_picked(const char *path,void *ctx)

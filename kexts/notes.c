@@ -22,6 +22,7 @@ typedef struct {
     u8   used;
     u8   open;
     u8   read_failed;
+    u8   changed;
     int  x, y, w, h;
     char file[NL_NAMEMAX];
 } Note;
@@ -61,27 +62,33 @@ static void nl_load(void)
 {
     loaded = 1;
     char buf[NMAX * 64];
-    int n = api->fs_read(NOTES_LST, (u8 *)buf, sizeof buf - 1);
-    int legacy=n<6||api->strncmp(buf+n-6,"\n!end\n",6);
-    if(!legacy)n-=6;else n=api->fs_read("notes.lst",(u8 *)buf,sizeof buf-1);
+    int n = api->fs_read(NOTES_LST, (u8 *)buf, sizeof buf);
+    int legacy=n<0&&!api->fs_exists(NOTES_LST);
+    if(legacy)n=api->fs_read("notes.lst",(u8 *)buf,sizeof buf);
+    else if(n<6||n>=(int)sizeof buf||api->strncmp(buf+n-6,"\n!end\n",6)){storage_failed=1;return;}
+    else n-=6;
+    if(n>=(int)sizeof buf){storage_failed=1;return;}
     if (n < 0) {storage_failed=api->fs_exists(NOTES_LST)||api->fs_exists("notes.lst");return;}
     buf[n] = 0;
     int slot = 0;
     char *p = buf;
-    while (*p && slot < NMAX) {
+    while (*p) {
         char *e = p;
         while (*e && *e != '\n') e++;
         char sv = *e;
         *e = 0;
         NoteRec r;
-        if (nl_parse(p, &r)) {
+        if (*p&&(*p!='\r'||p[1])) {
+            if(slot>=NMAX||!nl_parse(p,&r)){storage_failed=1;return;}
+            for(int i=0;i<slot;i++)if(!api->strcmp(notes[i].file,r.file)){storage_failed=1;return;}
             Note *t = &notes[slot];
             t->used = 1;
             t->x = r.x; t->y = r.y; t->w = r.w; t->h = r.h;
             t->open = (u8)r.open;
             api->strlcpy(t->file, r.file, sizeof t->file);
-            int m = api->fs_read(t->file, (u8 *)t->text, NOTECAP - 1);
-            t->read_failed=m<0;
+            int m = api->fs_read(t->file, (u8 *)t->text, NOTECAP);
+            t->read_failed=m<0||m>=NOTECAP;
+            if(m>=NOTECAP)m=NOTECAP-1;
             t->len = m > 0 ? m : 0;
             t->text[t->len] = 0;
             t->car = t->len;
@@ -98,6 +105,7 @@ static void nl_load(void)
             char dst[NL_NAMEMAX];
             if(notes[i].read_failed||!note_name(dst,sizeof dst)){migrated=0;break;}
             api->strlcpy(notes[i].file,dst,sizeof notes[i].file);
+            notes[i].changed=1;
         }
         if(!migrated||!nl_save())for(int i=0;i<slot;i++)
             api->strlcpy(notes[i].file,old[i],NL_NAMEMAX);
@@ -117,13 +125,15 @@ static int nl_save(void)
         r.open = notes[i].open;
         api->strlcpy(r.file, notes[i].file, sizeof r.file);
         int n = nl_fmt(buf + o, (int)sizeof buf - o - 8, &r);
-        if (!n) break;
+        if (!n) return 0;
         o += n;
         buf[o++] = '\n';
     }
     for (int i = 0; i < NMAX; i++)
-        if (notes[i].used && notes[i].file[0])
-            if(!notes[i].read_failed&&api->fs_write(notes[i].file, (const u8 *)notes[i].text, notes[i].len)!=0)return 0;
+        if (notes[i].used && notes[i].file[0] && notes[i].changed && !notes[i].read_failed) {
+            if(api->fs_write(notes[i].file, (const u8 *)notes[i].text, notes[i].len)!=0)return 0;
+            notes[i].changed=0;
+        }
     api->memcpy(buf+o,"\n!end\n",6);o+=6;
     return api->fs_write(NOTES_LST, (const u8 *)buf, o)==0;
 }
@@ -177,6 +187,7 @@ static int slot_for(int inst)
             notes[i].w = 220; notes[i].h = 150;
             notes[i].x = 60 + i * 24; notes[i].y = 60 + i * 20;
             notes[i].read_failed=0;
+            notes[i].changed=1;
             api->strlcpy(notes[i].file,name,sizeof notes[i].file);
             inst_of[inst] = i;
             touch_now();
@@ -292,7 +303,7 @@ static void n_key(int inst, int k)
 
     t->len = nb.len;
     t->car = nb.car;
-    touch();
+    if(k!=K_LEFT&&k!=K_RIGHT&&k!=K_HOME&&k!=K_END&&k!=K_UP&&k!=K_DOWN){t->changed=1;touch();}
     api->gui_dirty();
 }
 

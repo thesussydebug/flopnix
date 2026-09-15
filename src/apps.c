@@ -873,7 +873,7 @@ static int aq_take(AppEv *ev)
         int owner=reg_owner[w->type],legacy=!(regs[w->type].live_draw&APP_INDEPENDENT),blocked=0;
         for(int t=0;t<THR_MAX;t++)if(jobs[t].active&&
             (jobs[t].type==w->type||(owner>=0&&jobs[t].owner==owner)||(legacy&&jobs[t].legacy)))blocked=1;
-        if(blocked||(legacy&&buffer_mutex.held))continue;
+        if(blocked||kext_timer_busy(owner)||(legacy&&buffer_mutex.held))continue;
         *ev=aq[i];memmove(aq+i,aq+i+1,(--aq_n-i)*sizeof *aq);
         int t=thr_self;jobs[t].active=1;jobs[t].win=ev->win;jobs[t].type=w->type;jobs[t].owner=owner;
         jobs[t].legacy=legacy;jobs[t].since=ticks;jobs[t].prog=0;jobs[t].io=0;jobs[t].kill=jobs[t].cancel=0;
