@@ -32,3 +32,4 @@ __pycache__/
 /kexts/*fixture.c
 !/tools/textinputtests.c
 !/tools/archivelimittests.c
+tools/textinputtests.c
