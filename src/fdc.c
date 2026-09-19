@@ -205,6 +205,7 @@ static int fdc_rw(u32 lba, u8 *buf, int write)
     if (lba >= 2880) return -1;
     int c = lba / 36, h = (lba / 18) % 2, s = lba % 18 + 1;
     u8 res[7];
+    fh_st[0] = fh_st[1] = fh_st[2] = 0;
     u32 t0 = ticks;
     int tries = 0;
 

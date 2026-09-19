@@ -17,14 +17,15 @@ static const struct {int lo,hi;const char *name;} regions[]={
     {MI_IO_BASE,MI_IO_END,"File transfer buffer"},
     {MI_ARENA_BASE,MI_ARENA_END,"Extensions / core data"},
     {MI_POOL_BASE,MI_POOL_END,"App data pages"},
-    {MI_HEAP_BASE,MI_HEAP_END,"Heap"}
+    {MI_HEAP_BASE,MI_HEAP_END,"Initial heap"},
+    {MI_HEAP_GROW_BASE,MI_HEAP_GROW_END,"Heap growth"}
 };
-static const u8 colors[]={C_BBLUE,C_OLIVE,C_MAROON,C_TEAL,C_PURPLE,C_TEAL,C_GREEN};
+static const u8 colors[]={C_BBLUE,C_OLIVE,C_MAROON,C_TEAL,C_PURPLE,C_TEAL,C_GREEN,C_GREEN};
 static const u32 shades[][2]={
     {GRGB(64,128,255),GRGB(0,48,224)},{GRGB(255,192,0),GRGB(224,112,0)},
     {GRGB(255,64,64),GRGB(192,0,0)},{GRGB(0,224,224),GRGB(0,128,192)},
     {GRGB(224,64,255),GRGB(144,0,192)},{GRGB(0,224,192),GRGB(0,128,128)},
-    {GRGB(64,224,64),GRGB(0,144,0)}
+    {GRGB(64,224,64),GRGB(0,144,0)},{GRGB(64,224,64),GRGB(0,144,0)}
 };
 static int scale(u32 n,u32 cap,int width)
 {
@@ -39,7 +40,7 @@ static u32 capacity(int i)
 }
 static u32 usage(int i)
 {
-    u32 cap=capacity(i),n=cap;
+    u32 cap=i==6?api->mem_info(MI_HEAP_CAPACITY):capacity(i),n=cap;
     if(i==4)n=api->mem_info(MI_ARENA_RO)+api->mem_info(MI_ARENA_RW);
     else if(i==5)n=api->mem_info(MI_POOL_USED);
     else if(i==6){u32 free=api->mem_info(MI_HEAP_FREE);n=free<cap?cap-free:0;}
@@ -59,18 +60,18 @@ static void bar(int x,int y,int w,int h,u32 n,u32 cap,int i)
 static void overview(int x,int y,int cw)
 {
     char s[96],a[24],b[24],c[24];u32 ram=api->mem_total_kb()*1024,allocated=0,used=api->mem_used_kb()*1024;
-    for(int i=0;i<7;i++)allocated+=capacity(i);
+    for(int i=0;i<8;i++)allocated+=capacity(i);
     ui_group(x+10,y+78,cw-20,76,"Physical memory");
     api->human_size(allocated,a,sizeof a);api->human_size(used,b,sizeof b);api->human_size(ram,c,sizeof c);
     api->kfmt(s,sizeof s,"%s allocated (%s used) / %s Memory",a,b,c);api->draw_text_clip(x+22,y+90,s,C_BLACK,cw-44);
     api->panel(x+22,y+112,cw-44,18,1);api->fill_rect(x+24,y+114,cw-48,14,C_G0+6);
-    u32 groups[]={capacity(0)+capacity(1)+capacity(2)+capacity(3),capacity(4)+capacity(5),capacity(6)};
+    u32 groups[]={capacity(0)+capacity(1)+capacity(2)+capacity(3),capacity(4)+capacity(5),capacity(6)+capacity(7)};
     const int ids[]={0,4,6};const char *legend[]={"System","Extensions","Heap","Unmapped"};u32 cumulative=0;int prev=0;
     for(int i=0;i<3;i++){cumulative+=groups[i];int next=scale(cumulative,ram,cw-48);shade(x+24+prev,y+114,next-prev,14,ids[i]);prev=next;}
     for(int i=0;i<4;i++){int xx=x+22+i*(cw-44)/4;if(i<3)shade(xx,y+136,8,8,ids[i]);else api->fill_rect(xx,y+136,8,8,C_G0+6);api->draw_text(xx+12,y+133,legend[i],C_BLACK);}
     const char *names[]={"Extensions","App pages","Heap"};int gw=(cw-28)/3;
     for(int i=0;i<3;i++){
-        int xx=x+10+i*(gw+4);u32 cap=capacity(i+4),n=usage(i+4);
+        int xx=x+10+i*(gw+4);u32 cap=i==2?api->mem_info(MI_HEAP_CAPACITY):capacity(i+4),n=usage(i+4);
         ui_group(xx,y+161,gw,73,names[i]);api->human_size(n,a,sizeof a);api->human_size(cap,b,sizeof b);
         api->kfmt(s,sizeof s,"%s / %s",a,b);api->draw_text_clip(xx+9,y+176,s,C_BLACK,gw-18);
         bar(xx+9,y+199,gw-18,20,n,cap,i+4);api->kfmt(s,sizeof s,"%d%%",scale(n,cap,100));

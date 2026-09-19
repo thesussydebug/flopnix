@@ -28,7 +28,7 @@ static int fc_read(const FsEnt *e,u8 *buf,u32 n)
 }
 static void fc_save(const FsEnt *e,const u8 *buf,u32 n,u32 epoch)
 {
-    u32 budget=(heap_end()-heap_base())/4;
+    u32 budget=heap_capacity()/4;
     if(budget>524288)budget=524288;
     if(!n||n!=e->size||n>budget)return;
     preempt_disable();

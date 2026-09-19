@@ -132,16 +132,13 @@ static void bench_draw(Win *w, int cx, int cy, int cw, int ch)
     (void)w;button_label(api,cx+cw-62,cy+6,52,21,"Run",0,!running);
 
     if (!has_res) {
-        api->draw_text(cx + 10, cy + 40, running ? "Measuring..." : "Run a quick check of this computer", C_G0 + 3);
-        api->draw_text(cx + 10, cy + 56, "Tests take about 5 seconds to finish", C_G0 + 3);
+        api->draw_text(cx + 10, cy + 40, running ? "Measuring..." : "Simple benchmark", C_G0 + 3);
         return;
     }
     for (int i = 0; i < 4; i++)
         if (res[i][0])
             api->draw_text_clip(cx + 10, cy + 40 + i * 20, res[i],
                                 i ? C_BLACK : C_G0 + 3, cw - 20);
-    api->draw_text_clip(cx + 10, cy + ch - 34, "Typical result from three timed runs", C_G0 + 2, cw - 20);
-    api->draw_text_clip(cx + 10, cy + ch - 18, "Higher is faster. Video output not tested.", C_G0 + 2, cw - 20);
 }
 
 static void bench_mouse(int inst, int lx, int ly, int ev, int cw, int ch)

@@ -12,7 +12,7 @@ typedef signed   int   i32;
 #endif
 
 /* New fields are appended to keep existing extension offsets stable. */
-#define KAPI_VERSION 34
+#define KAPI_VERSION 36
 
 #define KEXT_MAGIC 0x5458454B
 enum { KEXT_KIND_KERNEL = 1, KEXT_KIND_APP = 2 };
@@ -81,11 +81,12 @@ enum {
     MI_HEAP_BASE,   MI_HEAP_END,   MI_HEAP_FREE, MI_HEAP_LARGEST,
     MI_HEAP_BLOCKS,
     MI_PAGING,      MI_PAGES,
-    MI_KERNEL_BYTES, MI_IO_BASE, MI_IO_END
+    MI_KERNEL_BYTES, MI_IO_BASE, MI_IO_END,
+    MI_HEAP_GROW_BASE, MI_HEAP_GROW_END, MI_HEAP_CAPACITY, MI_HEAP_LIMIT
 };
 
 #define FS_NAMELEN 24
-#define FS_MAXFILE 131072
+#define FS_MAXFILE 524288
 
 #define FS_NFILES 128
 typedef struct {
@@ -632,4 +633,5 @@ typedef struct {
     void (*buffer_unlock)(void);
     void (*network_lock)(void);
     void (*network_unlock)(void);
+    void *(*krealloc)(void *ptr, u32 size);
 } Kapi;

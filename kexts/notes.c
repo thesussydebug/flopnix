@@ -4,6 +4,7 @@
 #include "notelst.inc"
 
 static const Kapi *api;
+#include "apptext.h"
 static const GdiOps *gfx;
 static int my_type = -1;
 
@@ -11,7 +12,7 @@ static int my_type = -1;
 #define NOTECAP  1024
 #define PADX     8
 #define PADY     6
-#define LINEH    12
+#define LINEH    16
 #define COLW     8
 #define NOTES_LST "sys/tmp/notes.lst"
 #define FLUSH_TICKS 100
@@ -19,6 +20,7 @@ static int my_type = -1;
 typedef struct {
     char text[NOTECAP];
     int  len, car;
+    int anchor, selecting, scroll;
     u8   used;
     u8   open;
     u8   read_failed;
@@ -91,7 +93,7 @@ static void nl_load(void)
             if(m>=NOTECAP)m=NOTECAP-1;
             t->len = m > 0 ? m : 0;
             t->text[t->len] = 0;
-            t->car = t->len;
+            t->car = t->anchor = t->len;
 
             slot++;
         }
@@ -182,7 +184,8 @@ static int slot_for(int inst)
             char name[NL_NAMEMAX];if(!note_name(name,sizeof name))return -1;
             notes[i].used = 1;
             notes[i].open = 1;
-            notes[i].len = notes[i].car = 0;
+            notes[i].len = notes[i].car = notes[i].anchor = 0;
+            notes[i].selecting = notes[i].scroll = 0;
             notes[i].text[0] = 0;
             notes[i].w = 220; notes[i].h = 150;
             notes[i].x = 60 + i * 24; notes[i].y = 60 + i * 20;
@@ -196,58 +199,86 @@ static int slot_for(int inst)
     return -1;
 }
 
-static void n_draw(Win *w, int cx, int cy, int cw, int ch)
+static int note_cols(Note *t)
 {
-    int s = slot_for(w->inst);
-    if (s < 0) {
-        api->draw_text(cx + PADX, cy + PADY, "No free note slot.", C_BLACK);
-        return;
-    }
-    Note *t = &notes[s];
-    t->w = cw; t->h = ch;
+    int cols = (t->w - PADX * 2) / COLW;
+    return cols > 0 ? cols : 1;
+}
 
-    api->fill_rect(cx, cy, cw, ch, C_YELLOW);
-    if(storage_failed){api->draw_text_clip(cx+PADX,cy+PADY,"Notes storage is unavailable.",C_MAROON,cw-2*PADX);return;}
-    if(t->read_failed){api->draw_text_clip(cx+PADX,cy+PADY,"Unable to read this note.",C_MAROON,cw-2*PADX);return;}
+static int note_rows(Note *t)
+{
+    int rows = (t->h - PADY * 2) / LINEH;
+    return rows > 0 ? rows : 1;
+}
 
-    int cols = (cw - PADX * 2) / COLW;
-    if (cols < 1) cols = 1;
-    int rows = (ch - PADY * 2) / LINEH;
-    int caret_shown = 0;
-
-    api->set_clip(cx + PADX, cy + PADY, cw - PADX * 2, ch - PADY * 2);
-    int i = 0, r = 0;
-    while (r < rows) {
+static int note_row(Note *t, int pos, int *col)
+{
+    int i = 0, row = 0, cols = note_cols(t);
+    for (;;) {
         int e = nb_line_end(t->text, t->len, i, cols);
-        char line[96];
-        int m = e - i;
-        if (m > (int)sizeof line - 1) m = (int)sizeof line - 1;
-        for (int k = 0; k < m; k++) line[k] = t->text[i + k];
-        line[m] = 0;
-        int ly = cy + PADY + r * LINEH;
-        api->draw_text(cx + PADX, ly, line, C_BLACK);
-
-        if (!caret_shown && t->car >= i && t->car <= e) {
-            if (*api->gui_blink) {
-                int col = t->car - i;
-
-                api->fill_rect(cx + PADX + col * COLW - 1, ly + 1, 2, 15,
-                               C_BLACK);
-            }
-            caret_shown = 1;
-
+        int nx = nb_next_line(t->text, t->len, i, cols);
+        if (pos < nx || nx <= i || (pos == e && (e == t->len || t->text[e] == '\n'))) {
+            *col = pos - i; if (*col > e - i) *col = e - i;
+            return row;
         }
-        if (e >= t->len) break;
+        i = nx; row++;
+    }
+}
+
+static int note_pos(Note *t, int row, int col)
+{
+    int i = 0, cols = note_cols(t);
+    if (col < 0) col = 0;
+    while (row-- > 0) {
         int nx = nb_next_line(t->text, t->len, i, cols);
         if (nx <= i) break;
         i = nx;
-        r++;
     }
+    int e = nb_line_end(t->text, t->len, i, cols);
+    return i + col > e ? e : i + col;
+}
 
+static void note_reveal(Note *t)
+{
+    int col, row = note_row(t, t->car, &col), rows = note_rows(t);
+    if (row < t->scroll) t->scroll = row;
+    if (row >= t->scroll + rows) t->scroll = row - rows + 1;
+}
+
+static void n_draw(Win *w, int cx, int cy, int cw, int ch)
+{
+    int s = slot_for(w->inst);
+    if (s < 0) { api->draw_text(cx + PADX, cy + PADY, "No free note slot.", C_BLACK); return; }
+    Note *t = &notes[s];
+    int resized = t->w != cw || t->h != ch;
+    t->w = cw; t->h = ch;
+    if (resized) note_reveal(t);
+    api->fill_rect(cx, cy, cw, ch, C_YELLOW);
+    if(storage_failed){api->draw_text_clip(cx+PADX,cy+PADY,"Notes storage is unavailable.",C_MAROON,cw-2*PADX);return;}
+    if(t->read_failed){api->draw_text_clip(cx+PADX,cy+PADY,"Unable to read this note.",C_MAROON,cw-2*PADX);return;}
+    int cols = note_cols(t), rows = note_rows(t);
+    int cc, cr = note_row(t, t->car, &cc);
+    TextEdit text = { t->text, NOTECAP, t->len, t->car, t->anchor };
+    api->set_clip(cx + PADX, cy + PADY, cw - PADX * 2, ch - PADY * 2);
+    int i = note_pos(t, t->scroll, 0);
+    for (int r = 0; r < rows; r++) {
+        int e = nb_line_end(t->text, t->len, i, cols);
+        int nx = nb_next_line(t->text, t->len, i, cols);
+        int ly = cy + PADY + r * LINEH;
+        for (int p = i; p < e; p++) {
+            int selected = te_selected(&text, p), x = cx + PADX + (p - i) * COLW;
+            if (selected) api->fill_rect(x, ly, COLW, LINEH, C_NAVY);
+            api->draw_char(x, ly, t->text[p], selected ? C_WHITE : C_BLACK);
+        }
+        if (nx > e && te_start(&text) < nx && te_end(&text) > e)
+            api->fill_rect(cx + PADX + (e - i) * COLW, ly, COLW, LINEH, C_NAVY);
+        if (t->car == t->anchor && cr == t->scroll + r && api->win_is_focused(w) && *api->gui_blink)
+            api->fill_rect(cx + PADX + cc * COLW, ly, 2, LINEH, C_BLACK);
+        if (nx <= i || e >= t->len) break;
+        i = nx;
+    }
     api->set_clip(cx, cy, cw, ch);
-
-    if (!t->len)
-        api->draw_text(cx + PADX, cy + PADY, "(type a note)", C_G0 + 5);
+    if (!t->len) api->draw_text(cx + PADX, cy + PADY, "(type a note)", C_G0 + 5);
 }
 
 static void n_key(int inst, int k)
@@ -255,81 +286,53 @@ static void n_key(int inst, int k)
     int s = slot_for(inst);
     if (s < 0) return;
     Note *t = &notes[s];
-    NoteBuf nb = { t->text, NOTECAP, t->len, t->car };
     if(t->read_failed||storage_failed)return;
-
-    if (k == 3) { api->clip_set_text(t->text); return; }
-    else if (k == 22) {
-        char clip[NOTECAP];
-        if (api->clip_get_text(clip, sizeof clip) <= 0) return;
-        for (int i = 0; clip[i]; i++) {
-            u8 c = (u8)clip[i];
-            if ((c == '\n' || (c >= 32 && c != 127)) && !nb_insert(&nb, c)) break;
-        }
-    }
-    else if (k == K_LEFT)  { if (nb.car > 0) nb.car--; }
-    else if (k == K_RIGHT) { if (nb.car < nb.len) nb.car++; }
-    else if (k == K_HOME)  { while (nb.car > 0 && t->text[nb.car - 1] != '\n') nb.car--; }
-    else if (k == K_END)   { while (nb.car < nb.len && t->text[nb.car] != '\n') nb.car++; }
-    else if (k == K_UP || k == K_DOWN) {
-
-        int cols = (t->w - PADX * 2) / COLW;
-        if (cols < 1) cols = 1;
-        int prev = -1, cur = 0, col = 0;
-        while (cur <= nb.len) {
-            int e = nb_line_end(t->text, nb.len, cur, cols);
-            if (nb.car >= cur && nb.car <= e) { col = nb.car - cur; break; }
-            int nx = nb_next_line(t->text, nb.len, cur, cols);
-            if (nx <= cur) break;
-            prev = cur;
-            cur = nx;
-        }
-        if (k == K_UP && prev >= 0) {
-            int e = nb_line_end(t->text, nb.len, prev, cols);
-            nb.car = prev + col > e ? e : prev + col;
-        } else if (k == K_DOWN) {
-            int nx = nb_next_line(t->text, nb.len, cur, cols);
-            if (nx > cur && nx <= nb.len) {
-                int e = nb_line_end(t->text, nb.len, nx, cols);
-                nb.car = nx + col > e ? e : nx + col;
-            }
-        }
-    }
-    else if (k == '\b')  { if (!nb_backspace(&nb)) return; }
-    else if (k == K_DEL) { if (!nb_delete(&nb)) return; }
-    else if (k == '\n' || k == '\r') { if (!nb_insert(&nb, '\n')) return; }
-    else if (k >= 32 && k < 127) { if (!nb_insert(&nb, k)) return; }
-    else return;
-
-    t->len = nb.len;
-    t->car = nb.car;
-    if(k!=K_LEFT&&k!=K_RIGHT&&k!=K_HOME&&k!=K_END&&k!=K_UP&&k!=K_DOWN){t->changed=1;touch();}
+    TextEdit text = { t->text, NOTECAP, t->len, t->car, t->anchor };
+    int r;
+    if (k == K_UP || k == K_DOWN || k == K_PGUP || k == K_PGDN) {
+        int col, row = note_row(t, t->car, &col);
+        row += k == K_UP ? -1 : k == K_DOWN ? 1 : k == K_PGUP ? -note_rows(t) : note_rows(t);
+        te_move(&text, note_pos(t, row, col), api->kbd_mods() & 1);
+        r = 1;
+    } else r = at_key(&text, k, 1, 0, 0);
+    if (r < 0) api->notify("Text did not fit; original note kept.");
+    t->len = text.len; t->car = text.caret; t->anchor = text.anchor;
+    if (r == 2) { t->changed = 1; touch(); }
+    note_reveal(t);
     api->gui_dirty();
 }
 
 static void n_mouse(int inst, int lx, int ly, int ev, int cw, int ch)
 {
-    (void)cw; (void)ch;
-    if (ev != EV_PRESS) return;
     int s = slot_for(inst);
     if (s < 0) return;
     Note *t = &notes[s];
-
-    int cols = (t->w - PADX * 2) / COLW;
-    if (cols < 1) cols = 1;
-    int want = (ly - PADY) / LINEH;
-    if (want < 0) want = 0;
-    int col = (lx - PADX) / COLW;
-    if (col < 0) col = 0;
-    int i = 0, r = 0;
-    while (r < want) {
-        int nx = nb_next_line(t->text, t->len, i, cols);
-        if (nx <= i || nx >= t->len) { i = nx > i ? nx : i; break; }
-        i = nx;
-        r++;
+    if (ev == EV_RELEASE) { t->selecting = 0; return; }
+    if (ev != EV_PRESS && !(ev == EV_DRAG && t->selecting)) return;
+    if(t->read_failed||storage_failed)return;
+    t->w = cw; t->h = ch;
+    if (ev == EV_PRESS) t->selecting = 1;
+    int row = (ly - PADY) / LINEH;
+    if (ly < PADY) { row = 0; if (t->scroll > 0) t->scroll--; }
+    if (row >= note_rows(t)) {
+        int col, last = note_row(t, t->len, &col);
+        if (t->scroll + note_rows(t) <= last) t->scroll++;
+        row = note_rows(t) - 1;
     }
-    int e = nb_line_end(t->text, t->len, i, cols);
-    t->car = i + col > e ? e : i + col;
+    t->car = note_pos(t, t->scroll + row, (lx - PADX + COLW / 2) / COLW);
+    if (ev == EV_PRESS && !(api->kbd_mods() & 1)) t->anchor = t->car;
+    api->gui_dirty();
+}
+
+static void n_wheel(int inst, int dz)
+{
+    int s = slot_for(inst), col;
+    if (s < 0) return;
+    Note *t = &notes[s];
+    int last = note_row(t, t->len, &col) - note_rows(t) + 1;
+    t->scroll -= dz * 3;
+    if (t->scroll > last) t->scroll = last;
+    if (t->scroll < 0) t->scroll = 0;
     api->gui_dirty();
 }
 
@@ -337,7 +340,8 @@ static void n_open(int inst)
 {
     if (!loaded) nl_load();
     if (inst >= 0 && inst < NMAX) inst_of[inst] = -1;
-    slot_for(inst);
+    int s = slot_for(inst);
+    if (s >= 0) { notes[s].anchor = notes[s].car; notes[s].selecting = 0; note_reveal(&notes[s]); }
 }
 
 static void n_close(int inst)
@@ -375,7 +379,7 @@ int kext_entry(const Kapi *k)
 
     static const AppDesc d = {.live_draw=APP_INDEPENDENT,
         .title = "Notes", .max_inst = NMAX, .in_menu = 1, .resizable = 1,
-        .open = n_open, .draw = n_draw, .mouse = n_mouse, .key = n_key,
+        .open = n_open, .draw = n_draw, .mouse = n_mouse, .wheel = n_wheel, .key = n_key,
         .client_size = n_csize, .min_client = n_min, .close = n_close,
         .category = APP_CAT_PROGRAMS,
     };

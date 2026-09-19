@@ -5,6 +5,7 @@
 #include "ui.inc"
 #include "opl2.h"
 #include "midifile.inc"
+#include "dynbuf.h"
 
 static const Kapi *api;
 static const GdiOps *gfx;
@@ -24,7 +25,9 @@ static int my_type = -1;
 #define GC_H  76
 
 typedef struct { u32 tick; u8 note, on; } Ev;
-static Ev  evs[MAXEV];
+static DynBuf event_storage;
+#define evs ((Ev *)event_storage.data)
+static int event_oom;
 static int nev;
 static int div_ppqn;
 static u32 us_per_qn = 500000;
@@ -112,7 +115,9 @@ static void retune(void)
 
 static void ev_add(u32 tick, int note, int on)
 {
+    if(event_oom)return;
     if (nev >= MAXEV) { ev_dropped++; return; }
+    if(!db_reserve(api,&event_storage,(u32)nev+1,sizeof(Ev),128,MAXEV,"MIDI events")){event_oom=1;return;}
     evs[nev].tick = tick;
     evs[nev].note = (u8)note;
     evs[nev].on = (u8)on;
@@ -121,7 +126,7 @@ static void ev_add(u32 tick, int note, int on)
 
 static int parse_midi(const u8 *p, int n)
 {
-    nev = 0;
+    nev = 0; event_oom=0;
     ev_dropped = 0;
     drums_dropped = 0;
     song_ticks = 0;
@@ -170,6 +175,8 @@ static int parse_midi(const u8 *p, int n)
         off = body + len;
     }
 
+    if(event_oom){nev=0;db_free(api,&event_storage);api->strlcpy(msg,"Not enough memory for this song",sizeof msg);return 0;}
+    db_trim(api,&event_storage,(u32)nev,sizeof(Ev));
     if (!nev) {
         api->strlcpy(msg, "no playable notes in that file", sizeof msg);
         return 0;
@@ -354,11 +361,12 @@ static int mid_opener(const char *name, const char *fullpath,
 
     mn_display(fullpath ? fullpath : name, fullpath ? 1 : 0, path, sizeof path);
     cur = 0;
-    return api->win_open(my_type) < 0 ? -1 : 0;
+    if(api->win_open(my_type)<0){db_free(api,&event_storage);nev=0;return -1;}
+    return 0;
 }
 
 static void m_open(int inst) { (void)inst; }
-static void m_close(int inst) { (void)inst; playing = 0; all_off(); }
+static void m_close(int inst) { (void)inst; playing = 0; all_off(); db_free(api,&event_storage);nev=cur=0;path[0]=0; }
 static void m_csize(int inst, int *w, int *h) { (void)inst; *w = WINW; *h = WINH; }
 
 const KextHeader kext_header = {

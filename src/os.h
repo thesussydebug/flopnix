@@ -9,7 +9,7 @@ typedef __builtin_va_list va_list;
 #define va_arg(v, t)   __builtin_va_arg(v, t)
 
 #define OS_NAME    "FLOPNIX"
-#define OS_VER     "0.8.4"
+#define OS_VER     "0.8.5"
 #ifndef OS_BUILD_DATE
 #define OS_BUILD_DATE "unknown"
 #endif
@@ -257,12 +257,17 @@ void cursor_shape(int shape);
 void heap_init(void);
 void win_image_trim(void);
 void *kmalloc(u32 n);
+void *krealloc(void *p, u32 n);
 void kfree(void *p);
 u32  heap_avail(void);
 u32  heap_largest(void);
 u32  heap_blocks(void);
 u32  heap_base(void);
 u32  heap_end(void);
+u32  heap_grow_base(void);
+u32  heap_grow_end(void);
+u32  heap_capacity(void);
+u32  heap_limit(void);
 
 extern volatile int kupd_critical;
 int  kernel_update(const char *name, char *err, int errcap);

@@ -1,5 +1,6 @@
 /* Parses text-browser addresses and responses. */
 #pragma once
+#include "shcwd.inc"
 #define TW_URL 256
 #define TW_TEXT 24576
 #define TW_LINKS 48
@@ -68,11 +69,41 @@ static int tw_encoded(char *out,int cap,const char *s)
     out[n]=0;return 1;
 }
 
+static int tw_local(const char *s,char *out)
+{
+    if(!s[0]||s[1]!=':'||!(s[0]=='a'||s[0]=='A'||s[0]=='u'||s[0]=='U'))return 0;
+    int usb=s[0]=='u'||s[0]=='U',n=tw_len(s);
+    if(n<3||n>=TW_URL||s[n-1]=='/'||s[n-1]=='\\')return 0;
+    for(int i=2;i<n;i++)if((u8)s[i]<32||s[i]==':'||s[i]=='"')return 0;
+    char path[128];if(!sc_resolve("",s+2,path,sizeof path)||!path[0]||(!usb&&tw_len(path)>=24))return 0;
+    out[0]=usb?'u':'a';out[1]=':';if(usb)out[2]='/';
+    return tw_copy(out+2+usb,TW_URL-2-usb,path,tw_len(path));
+}
+static int tw_local_ref(const char *base,const char *ref,char *out)
+{
+    char path[TW_URL],joined[TW_URL];int n=0;
+    if(ref[0]=='/'&&ref[1]=='/')return 0;
+    for(int i=0;ref[i]&&ref[i]!='#'&&ref[i]!='?';i++){
+        int c=(u8)ref[i];
+        if(c=='%'){
+            if(!ref[i+1]||!ref[i+2])return 0;
+            int a=tw_hex(ref[i+1]),b=tw_hex(ref[i+2]);if(a<0||b<0)return 0;c=a*16+b;i+=2;
+        }
+        if(c<32||c==127||n>=TW_URL-1)return 0;path[n++]=(char)c;
+    }
+    path[n]=0;if(!n)return tw_local(base,out);
+    if(n>1&&path[1]==':')return tw_local(path,out);
+    int cut=2;if(path[0]!='/'&&path[0]!='\\')for(int i=2;base[i];i++)if(base[i]=='/')cut=i+1;
+    if(cut+n>=TW_URL)return 0;
+    tw_copy(joined,sizeof joined,base,cut);tw_copy(joined+cut,sizeof joined-cut,path,n);
+    return tw_local(joined,out);
+}
 static int tw_resolve(const char *base,const char *ref,char *out)
 {
     TwUrl u; char tmp[TW_URL]; int r=tw_len(ref), b=tw_len(base);
     if(!r||r>=TW_URL)return 0;
     if(tw_url(ref,&u))return tw_copy(out,TW_URL,ref,r);
+    if(tw_local(base,tmp))return tw_local_ref(tmp,ref,out);
     for(int i=0;i<r&&ref[i]!='/'&&ref[i]!='?'&&ref[i]!='#';i++)if(ref[i]==':')return 0;
     if(!tw_url(base,&u)||!u.http)return 0;
     int auth=7;while(base[auth]&&base[auth]!='/'&&base[auth]!='?'&&base[auth]!='#')auth++;
@@ -122,7 +153,7 @@ static void tw_number(TwPage *p,int n)
 }
 static int tw_addlink(TwPage *p,const char *url,const char *label,int len)
 {
-    TwUrl u;if(!tw_url(url,&u))return -1;
+    TwUrl u;char local[TW_URL];if(!tw_url(url,&u)&&!tw_local(url,local))return -1;
     if(p->links>=TW_LINKS){p->clipped=1;return -1;}
     TwLink *l=&p->link[p->links];tw_copy(l->url,TW_URL,url,tw_len(url));
     if(len>79)len=79;tw_copy(l->label,80,label,len);

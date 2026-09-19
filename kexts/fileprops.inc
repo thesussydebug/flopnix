@@ -1,7 +1,9 @@
+#include "button.h"
 #define FP_COUNT MAXINST
 typedef struct { char name[72], type[40], size[48], modified[40], location[136]; } FileProps;
 static FileProps fp_data[FP_COUNT];
 static int fp_type = -1;
+static u8 fp_pressed[FP_COUNT];
 
 static void fp_size(int inst, int *w, int *h)
 { (void)inst; *w = 336; *h = 150; }
@@ -9,18 +11,24 @@ static void fp_draw(Win *w, int x, int y, int cw, int ch)
 {
     const FileProps *p = &fp_data[w->inst];
     api->fill_rect(x,y,cw,ch,C_FACE);
+    menu_shade(api,x,y,cw,28,0);
+    api->hline(x,y+27,cw,C_SHAD);
     const char *lines[] = {p->name,p->type,p->size,p->modified,p->location};
     for (int i=0;i<5;i++)
         api->draw_text_clip(x+10,y+10+i*22,lines[i],i ? C_BLACK : C_NAVY,cw-20);
-    api->panel(x+cw-78,y+ch-28,68,22,0);
-    api->draw_text(x+cw-64,y+ch-25,"Close",C_BLACK);
+    button_label(api,x+cw-78,y+ch-28,68,22,"Close",0,1);
 }
 static void fp_key(int inst, int k)
 { if (k==27 || k=='\r' || k=='\n') api->win_close_self(fp_type,inst); }
 static void fp_mouse(int inst,int x,int y,int ev,int cw,int ch)
 {
-    if (ev==EV_PRESS && x>=cw-78 && x<cw-10 && y>=ch-28 && y<ch-6)
-        api->win_close_self(fp_type,inst);
+    int inside=x>=cw-78 && x<cw-10 && y>=ch-28 && y<ch-6;
+    if(ev==EV_PRESS)fp_pressed[inst]=inside;
+    if(ev==EV_RELEASE){
+        int close=fp_pressed[inst]&&inside;
+        fp_pressed[inst]=0;
+        if(close)api->win_close_self(fp_type,inst);
+    }
 }
 static void fp_register(void)
 {

@@ -1,11 +1,14 @@
 #include "kapi.h"
 #include "shpath.h"
 #include "clipline.inc"
+#include "buffer_core.inc"
 #include "gdi.h"
+#include "menushade.h"
 
 #include "ui.inc"
 
 static const Kapi *api;
+#include "apptext.h"
 static const GdiOps *gfx;
 static int edit_type = -1;
 
@@ -81,7 +84,9 @@ enum { PA_NONE, PA_NEW, PA_OPEN };
 
 typedef struct {
     char *buf;
+    u32 capacity;
     int  len, cur, scroll;
+    int anchor, selecting;
     int  xscroll;
     int  cols, rows;
     int  sbdrag;
@@ -89,6 +94,7 @@ typedef struct {
     u8   mod, ro, wrap;
     char msg[40];
     int  mode, pending;
+    int  menu, menu_row;
     u8   src;
     char fullpath[96];
     char fbuf[32];
@@ -101,7 +107,9 @@ static Ed eds[MAXINST];
 static Ed *E;
 static int edcols, edrows;
 
-#define TB_H  22
+#define MENU_H 24
+#define MENU_W 232
+#define TB_H  50
 #define ST_H  16
 #define GUTW  40
 
@@ -114,7 +122,7 @@ static void edit_client_size(int *w, int *h)
 static void edit_min_client(int *w, int *h)
 {
     *w = GUTW + 28 * 8 + 8;
-    *h = TB_H + 4 * 16 + ST_H;
+    *h = TB_H + 6 * 16 + ST_H;
 }
 
 static void edit_init(void)
@@ -130,36 +138,56 @@ static void edit_init(void)
 static void ed_reset(void)
 {
     E->len = E->cur = E->scroll = E->xscroll = 0;
+    E->anchor = E->selecting = 0;
     E->sbdrag = 0;
     E->name[0] = 0;
     E->src = 0;
     E->fullpath[0] = 0;
     E->mod = E->ro = 0;
     E->mode = EM_NONE;
+    E->menu = E->menu_row = -1;
     E->msg[0] = 0;
     if (E->buf) E->buf[0] = 0;
 }
 
-static int edit_buffer(void)
+static int edit_buffer(u32 needed)
 {
-    if (!E->buf) {
-        E->buf = api->kmalloc(FS_MAXFILE + 1);
-        if (E->buf) {E->buf[0] = 0;if(api->mem_track)api->mem_track("Editor text",E->buf,FS_MAXFILE+1);}
+    if (needed > FS_MAXFILE) return 0;
+    if (E->buf && needed <= E->capacity) return 1;
+    u32 cap = buffer_capacity(E->capacity, needed, 1024, FS_MAXFILE);
+    char *next = api->krealloc(E->buf, cap + 1);
+    if (!next && cap > needed && E->buf) {
+        cap = needed;
+        next = api->krealloc(E->buf, cap + 1);
     }
-    if (E->buf) return 1;
-    E->ro = 1;
-    strlcpy(E->msg, "Not enough memory to open this file", sizeof E->msg);
-    return 0;
+    if (!next) { strlcpy(E->msg, "Not enough memory; text kept", sizeof E->msg); return 0; }
+    if (!E->buf) next[0] = 0;
+    E->buf = next;
+    E->capacity = cap;
+    if (api->mem_track) api->mem_track("Editor text", E->buf, cap + 1);
+    return 1;
+}
+
+static void edit_trim(void)
+{
+    u32 cap = buffer_capacity(0, (u32)E->len, 1024, FS_MAXFILE);
+    if (!E->buf || cap >= E->capacity) return;
+    char *next = api->krealloc(E->buf, cap + 1);
+    if (!next) return;
+    E->buf = next;
+    E->capacity = cap;
+    if (api->mem_track) api->mem_track("Editor text", E->buf, cap + 1);
 }
 
 static void edit_new(int inst)
 {
     E = &eds[inst];
     ed_reset();
+    edit_trim();
     E->wrap = 0;
     E->cols = edcols;
     E->rows = edrows;
-    edit_buffer();
+    edit_buffer(0);
 }
 
 static void edit_close(int inst)
@@ -167,6 +195,7 @@ static void edit_close(int inst)
     E = &eds[inst];
     if (E->buf) api->kfree(E->buf);
     E->buf = 0;
+    E->capacity = 0;
     ed_reset();
 }
 
@@ -182,35 +211,21 @@ static void strip_cr(void)
 static void mark_truncated(void)
 {
     E->ro = 1;
-    strlcpy(E->msg, "First 128 KiB only; read-only", sizeof E->msg);
-}
-
-static void edit_load(int inst, const char *name)
-{
-    E = &eds[inst];
-    ed_reset();
-    if (!edit_buffer()) return;
-    Ed *keep = E;
-    int n = fs_read(name, (u8 *)keep->buf, FS_MAXFILE + 1);
-    E = keep;
-    if (n < 0) { strlcpy(E->msg, "read error", sizeof E->msg); return; }
-    E->len = n > FS_MAXFILE ? FS_MAXFILE : n;
-    strip_cr();
-    strlcpy(E->name, name, FS_NAMELEN);
-    if (n > FS_MAXFILE) mark_truncated();
+    strlcpy(E->msg, "First 512 KiB only; read-only", sizeof E->msg);
 }
 
 static int edit_seed(int inst, const char *name, const u8 *d, int n)
 {
     E = &eds[inst];
-    ed_reset();
-    if (!edit_buffer()) return -1;
     int trunc = 0;
     if (n > FS_MAXFILE) { n = FS_MAXFILE; trunc = 1; }
     if (n < 0) n = 0;
+    if (!edit_buffer((u32)n)) return -1;
+    ed_reset();
     memcpy(E->buf, d, n);
     E->len = n;
     strip_cr();
+    edit_trim();
     strlcpy(E->name, name, FS_NAMELEN);
     return trunc;
 }
@@ -231,43 +246,33 @@ static void edit_open_usb(int inst, const char *name, const char *fullpath,
     if (trunc) mark_truncated();
 }
 
-static void ed_load_usb(const char *fullpath)
+static void edit_load(int inst, const char *name)
 {
-    ed_reset();
-    if (!edit_buffer()) return;
-    Ed *keep = E;
-    int n = fat_read(fullpath, (u8 *)keep->buf, FS_MAXFILE + 1);
-    E = keep;
-    const char *nm = fullpath;
-    for (const char *p = fullpath; *p; p++) if (*p == '/') nm = p + 1;
-    if (n < 0) { strlcpy(E->msg, "usb read error", sizeof E->msg); return; }
-    int trunc = 0;
-    if (n > FS_MAXFILE) { n = FS_MAXFILE; trunc = 1; }
-    E->len = n;
-    strip_cr();
-    strlcpy(E->name, nm, FS_NAMELEN);
-    strlcpy(E->fullpath, fullpath, sizeof E->fullpath);
-    E->src = 1;
-    E->ro = fat_writable() ? 0 : 1;
-    if (trunc) mark_truncated();
+    api->buffer_lock();
+    int n = fs_read(name, iobuf, FS_MAXFILE + 1);
+    E = &eds[inst];
+    if (n < 0) strlcpy(E->msg, "read error; text kept", sizeof E->msg);
+    else edit_open_a(inst, name, iobuf, n);
+    api->buffer_unlock();
 }
 
-static int line_start(int li)
+static void ed_load_usb(const char *fullpath)
 {
-    int i = 0;
-    while (li > 0 && i < E->len) { if (E->buf[i] == '\n') li--; i++; }
-    return i;
+    int inst = (int)(E - eds);
+    api->buffer_lock();
+    int n = fat_read(fullpath, iobuf, FS_MAXFILE + 1);
+    E = &eds[inst];
+    const char *nm = fullpath;
+    for (const char *p = fullpath; *p; p++) if (*p == '/') nm = p + 1;
+    if (n < 0) strlcpy(E->msg, "usb read error; text kept", sizeof E->msg);
+    else edit_open_usb(inst, nm, fullpath, iobuf, n);
+    api->buffer_unlock();
 }
-static int nlines(void)
-{
-    int n = 1;
-    for (int i = 0; i < E->len; i++) if (E->buf[i] == '\n') n++;
-    return n;
-}
+
 static int seg_count(int len)
 {
     if (!E->wrap) return 1;
-    int s = (len + E->cols - 1) / E->cols;
+    int s = len / E->cols + 1;
     return s ? s : 1;
 }
 static void cur_rc(int *row, int *col)
@@ -350,37 +355,35 @@ static void ed_layout(int cw, int ch, int *textW, int *textH, int *hbar)
     E->cols = cols; E->rows = rows;
 }
 
-static void ins(char ch)
+static int edit_grow(TextEdit *t, int need)
 {
-    if (E->ro) { strlcpy(E->msg, "read-only (Save copies)", sizeof E->msg); return; }
-    if (!edit_buffer()) return;
-    if (E->len >= FS_MAXFILE) { strlcpy(E->msg, "128 KiB buffer full", sizeof E->msg); return; }
-    memmove(E->buf + E->cur + 1, E->buf + E->cur, E->len - E->cur);
-    E->buf[E->cur++] = ch;
-    E->len++;
-    E->buf[E->len] = 0;
-    E->mod = 1;
-    E->msg[0] = 0;
-}
-static void del_at(int i)
-{
-    if (E->ro || i < 0 || i >= E->len) return;
-    memmove(E->buf + i, E->buf + i + 1, E->len - i - 1);
-    E->len--;
-    E->buf[E->len] = 0;
-    E->mod = 1;
-    E->msg[0] = 0;
+    if (!edit_buffer((u32)need)) return 0;
+    t->buf = E->buf;
+    t->cap = (int)E->capacity + 1;
+    return 1;
 }
 static void move_vert(int delta)
 {
-    int r, c;
-    cur_rc(&r, &c);
-    int nr = r + delta;
-    if (nr < 0) nr = 0;
-    if (nr >= nlines()) { E->cur = E->len; return; }
-    int i = line_start(nr), ll = 0;
-    while (i + ll < E->len && E->buf[i + ll] != '\n') ll++;
-    E->cur = i + (c < ll ? c : ll);
+    EdSt st;
+    ed_stats(&st);
+    int target = st.cvr + delta, v = 0, i = 0;
+    if (target < 0) target = 0;
+    for (;;) {
+        int ll = 0;
+        while (i + ll < E->len && E->buf[i + ll] != '\n') ll++;
+        int segs = seg_count(ll);
+        if (target < v + segs) {
+            int c = (E->wrap ? (target - v) * E->cols : 0) + st.cvc;
+            if (E->wrap && st.cvc >= E->cols) c = (target - v + 1) * E->cols - 1;
+            if (c > ll) c = ll;
+            E->cur = i + c;
+            return;
+        }
+        v += segs;
+        if (i + ll >= E->len) break;
+        i += ll + 1;
+    }
+    E->cur = E->len;
 }
 
 static void save_write(void)
@@ -436,7 +439,7 @@ static void run_pending(void)
     int p = E->pending;
     E->pending = PA_NONE;
     E->mode = EM_NONE;
-    if (p == PA_NEW) ed_reset();
+    if (p == PA_NEW) { ed_reset(); edit_trim(); }
     else if (p == PA_OPEN) {
         E->mode = EM_OPEN; E->pick_scroll = 0;
         if (E->pick_drive == 1) pick_usb_refresh();
@@ -461,7 +464,8 @@ static void find_next(void)
 
         while (k < E->flen && ed_low(E->buf[i + k]) == ed_low(E->fbuf[k])) k++;
         if (k == E->flen) {
-            E->cur = i;
+            E->anchor = i;
+            E->cur = i + E->flen;
             E->msg[0] = 0;
             scroll_to_cursor();
             return;
@@ -470,9 +474,82 @@ static void find_next(void)
     strlcpy(E->msg, "not found", sizeof E->msg);
 }
 
+enum { EC_SAVE_AS = 0x200 };
+
+typedef struct {
+    const char *label, *shortcut;
+    int key;
+} EdMenuItem;
+
+static const EdMenuItem ed_menus[3][6] = {
+    { { "New", "Ctrl+N", 14 }, { "Open...", "Ctrl+O", 15 },
+      { "Save", "Ctrl+S", 19 }, { "Save As...", "", EC_SAVE_AS } },
+    { { "Cut", "Ctrl+X", 24 }, { "Copy", "Ctrl+C", 3 },
+      { "Paste", "Ctrl+V", 22 }, { "Select All", "Ctrl+A", 1 },
+      { "Find...", "Ctrl+F", 6 }, { "Find Next", "Ctrl+G", 7 } },
+    { { "Word Wrap", "Ctrl+W", 23 } }
+};
+static const int ed_menu_count[3] = { 4, 6, 1 };
+static const int ed_toolbar_keys[5] = { 14, 15, 19, 6, 23 };
+
+static int ed_enabled(int key)
+{
+    switch (key) {
+    case 19: return E->buf && !E->ro && E->mod;
+    case EC_SAVE_AS: return E->buf != 0;
+    case 24: return !E->ro && E->cur != E->anchor;
+    case 3: return E->cur != E->anchor;
+    case 22: {
+        const char *type = api->clip_type();
+        return !E->ro && type && !strcmp(type, "text");
+    }
+    case 1: return E->len > 0;
+    case 7: return E->flen > 0 && E->len > 0;
+    default: return 1;
+    }
+}
+
+static UiRect ed_menu_rect(int menu, int cw)
+{
+    int x = 4 + menu * 48;
+    if (x + MENU_W > cw) x = cw - MENU_W;
+    if (x < 0) x = 0;
+    return ui_r(x, MENU_H, MENU_W, ed_menu_count[menu] * 20 + 4);
+}
+
+static UiRect ed_toolbar_rect(int button)
+{
+    return ui_r(4 + button * 52, MENU_H + 2, 48, 22);
+}
+
 static void edit_key(int inst, int k)
 {
     E = &eds[inst];
+    if (E->menu >= 0) {
+        if (k == 27) { E->menu = E->menu_row = -1; return; }
+        if (k == K_LEFT || k == K_RIGHT) {
+            E->menu = (E->menu + (k == K_LEFT ? 2 : 1)) % 3;
+            E->menu_row = -1;
+            return;
+        }
+        if (k == K_UP || k == K_DOWN) {
+            int n = ed_menu_count[E->menu];
+            int row = E->menu_row;
+            if (row < 0) row = k == K_DOWN ? n - 1 : 0;
+            for (int i = 0; i < n; i++) {
+                row = (row + (k == K_DOWN ? 1 : n - 1)) % n;
+                if (ed_enabled(ed_menus[E->menu][row].key)) break;
+            }
+            E->menu_row = row;
+            return;
+        }
+        if (k == '\n' || k == '\r') {
+            if (E->menu_row < 0) return;
+            k = ed_menus[E->menu][E->menu_row].key;
+            if (!ed_enabled(k)) return;
+        }
+        E->menu = E->menu_row = -1;
+    }
     if (E->mode == EM_GUARD) {
         if (k == 'y' || k == 'Y') run_pending();
         else if (k == 'n' || k == 'N' || k == 27) { E->pending = PA_NONE; E->mode = EM_NONE; }
@@ -497,49 +574,30 @@ static void edit_key(int inst, int k)
         return;
     }
 
+    TextEdit t = { E->buf, (int)E->capacity + 1, E->len, E->cur, E->anchor };
+    int r = 0;
     switch (k) {
     case 0x13: do_save(); break;
-    case 0x03: {
-        int a = E->cur, b = E->cur;
-        while (a > 0 && E->buf[a - 1] != '\n') a--;
-        while (b < E->len && E->buf[b] != '\n') b++;
-        char line[256];
-        int n = b - a;
-        if (n > (int)sizeof line - 1) n = sizeof line - 1;
-        for (int i = 0; i < n; i++) line[i] = E->buf[a + i];
-        line[n] = 0;
-        api->clip_set_text(line);
-        strlcpy(E->msg, "line copied", sizeof E->msg);
+    case EC_SAVE_AS:
+        api->file_save("Save As", "", E->name[0] ? E->name : "untitled.txt", save_picked, E);
         break;
-    }
-    case 0x16: {
-        char clip[1024];
-        if (api->clip_get_text(clip, sizeof clip) > 0) {
-            for (const char *p = clip; *p; p++)
-                if (*p == '\n' || ((u8)*p >= 32 && (u8)*p != 127)) ins(*p);
-        }
-        break;
-    }
     case 0x06: E->mode = EM_FIND; E->flen = 0; E->fbuf[0] = 0; break;
     case 0x07: find_next(); break;
     case 0x0E: guarded(PA_NEW); break;
     case 0x0F: guarded(PA_OPEN); break;
     case 0x17: E->wrap = !E->wrap; E->scroll = E->xscroll = 0; break;
-    case '\n': ins('\n'); break;
-    case '\b': if (E->cur > 0) { E->cur--; del_at(E->cur); } break;
-    case K_DEL: del_at(E->cur); break;
-    case '\t': ins(' '); ins(' '); ins(' '); ins(' '); break;
-    case K_LEFT:  if (E->cur > 0) E->cur--; break;
-    case K_RIGHT: if (E->cur < E->len) E->cur++; break;
-    case K_UP:   move_vert(-1); break;
-    case K_DOWN: move_vert(1); break;
-    case K_PGUP: move_vert(-E->rows); break;
-    case K_PGDN: move_vert(E->rows); break;
-    case K_HOME: { int r, c; cur_rc(&r, &c); E->cur = line_start(r); break; }
-    case K_END:  { int i = E->cur;
-                   while (i < E->len && E->buf[i] != '\n') i++;
-                   E->cur = i; break; }
-    default: if (k >= 32 && k <= 126) ins((char)k); break;
+    case K_UP: case K_DOWN: case K_PGUP: case K_PGDN:
+        move_vert(k == K_UP ? -1 : k == K_DOWN ? 1 : k == K_PGUP ? -E->rows : E->rows);
+        if (!(api->kbd_mods() & 1)) E->anchor = E->cur;
+        break;
+    default:
+        r = at_key(&t, k, 1, E->ro, edit_grow);
+        E->len = t.len; E->cur = t.caret; E->anchor = t.anchor;
+        if (r == 2) {
+            E->mod = 1; E->msg[0] = 0;
+            if (E->capacity > 1024 && (u32)E->len < E->capacity / 4) edit_trim();
+        } else if (r < 0) strlcpy(E->msg, k == 3 || k == 24 ? "Selection exceeds clipboard capacity" : "Text did not fit; original kept", sizeof E->msg);
+        break;
     }
     scroll_to_cursor();
 }
@@ -620,9 +678,36 @@ static void edit_mouse(int inst, int lx, int ly, int ev, int cw, int ch)
             E->xscroll = sbar_from_pos(textW, max_line_len() + 1, E->cols, lx - GUTW);
         return;
     }
+    if (ev == EV_RELEASE) { E->selecting = 0; return; }
+    if (ev == EV_DRAG && E->selecting) goto select_text;
     if (ev != EV_PRESS) return;
+    E->selecting = 0;
     if (E->mode == EM_OPEN) { picker_click(lx, ly); return; }
     if (E->mode == EM_GUARD) return;
+
+    if (ly >= 2 && ly < MENU_H - 2 && lx >= 4 && lx < 4 + 3 * 48) {
+        int menu = (lx - 4) / 48;
+        E->menu = E->menu == menu ? -1 : menu;
+        E->menu_row = -1;
+        E->mode = EM_NONE;
+        return;
+    }
+    if (E->menu >= 0) {
+        UiRect r = ed_menu_rect(E->menu, cw);
+        if (ui_hit(r, lx, ly)) {
+            int row = (ly - r.y - 2) / 20;
+            if (ly >= r.y + 2 && ly < r.y + r.h - 2 &&
+                lx >= r.x + 2 && lx < r.x + r.w - 2 &&
+                row < ed_menu_count[E->menu]) {
+                int key = ed_menus[E->menu][row].key;
+                if (ed_enabled(key)) {
+                    E->menu = E->menu_row = -1;
+                    edit_key(inst, key);
+                }
+            }
+        } else E->menu = E->menu_row = -1;
+        return;
+    }
 
     if (lx >= GUTW + textW && ly >= TB_H && ly < TB_H + textH) {
         E->sbdrag = 1;
@@ -636,20 +721,29 @@ static void edit_mouse(int inst, int lx, int ly, int ev, int cw, int ch)
     }
 
     if (ly < TB_H) {
-        int b = lx / 52;
-        switch (b) {
-        case 0: guarded(PA_NEW); break;
-        case 1: guarded(PA_OPEN); break;
-        case 2: do_save(); break;
-        case 3: E->mode = EM_FIND; E->flen = 0; E->fbuf[0] = 0; break;
-        case 4: E->wrap = !E->wrap; E->scroll = E->xscroll = 0; scroll_to_cursor(); break;
+        for (int b = 0; b < 5; b++) {
+            if (ui_hit(ed_toolbar_rect(b), lx, ly) && ed_enabled(ed_toolbar_keys[b])) {
+                E->mode = EM_NONE;
+                edit_key(inst, ed_toolbar_keys[b]);
+                break;
+            }
         }
         return;
     }
     if (E->mode == EM_FIND) return;
 
+    if (ly >= TB_H + textH || lx < GUTW) return;
+    E->selecting = 1;
+select_text:
+    if (ev == EV_DRAG) {
+        if (ly < TB_H && E->scroll > 0) E->scroll--;
+        if (ly >= TB_H + textH && E->scroll + E->rows < total_vrows()) E->scroll++;
+        if (!E->wrap && lx < GUTW && E->xscroll > 0) E->xscroll--;
+        if (!E->wrap && lx >= GUTW + textW && E->xscroll < max_line_len()) E->xscroll++;
+    }
     int ty = ly - TB_H;
-    if (ty >= textH) return;
+    if (ty < 0) ty = 0;
+    if (ty >= textH) ty = textH - 1;
     int target = E->scroll + ty / 16;
     int col = (lx - GUTW - 4) / 8;
     if (col < 0) col = 0;
@@ -666,6 +760,7 @@ static void edit_mouse(int inst, int lx, int ly, int ev, int cw, int ch)
             int c = base + col;
             if (c > ll) c = ll;
             E->cur = i + c;
+            if (ev == EV_PRESS && !(api->kbd_mods() & 1)) E->anchor = E->cur;
             return;
         }
         v += segs;
@@ -673,6 +768,14 @@ static void edit_mouse(int inst, int lx, int ly, int ev, int cw, int ch)
         i += ll + 1;
     }
     E->cur = E->len;
+    if (ev == EV_PRESS && !(api->kbd_mods() & 1)) E->anchor = E->cur;
+}
+
+static void edit_wheel(int inst, int dz)
+{
+    E = &eds[inst];
+    E->scroll -= dz * 3;
+    if (E->scroll < 0) E->scroll = 0;
 }
 
 static void draw_picker(int cx, int cy)
@@ -709,29 +812,31 @@ static void edit_draw(Win *w, int cx, int cy, int cw, int ch)
     int textW, textH, hbar;
     ed_layout(cw, ch, &textW, &textH, &hbar);
 
-    if (gfx) {
-        gfx->set_dither(1);
-        gfx->fill_gradient(cx, cy, cw, TB_H, GRGB(214, 218, 228),
-                           GRGB(180, 186, 202), 1);
-        gfx->set_dither(0);
-    } else fill_rect(cx, cy, cw, TB_H, C_FACE);
+    menu_shade(api, cx, cy, cw, MENU_H - 1, 0);
+    hline(cx, cy + MENU_H - 1, cw, C_SHAD);
+    fill_rect(cx, cy + MENU_H, cw, TB_H - MENU_H, C_FACE);
+    hline(cx, cy + MENU_H, cw, C_LIGHT);
     hline(cx, cy + TB_H - 1, cw, C_SHAD);
+    static const char *const labels[3] = { "File", "Edit", "View" };
+    int active = win_is_focused(w) && E->mode != EM_OPEN && E->mode != EM_GUARD;
+    for (int m = 0; m < 3; m++) {
+        int x = cx + 4 + m * 48;
+        int on = active && (E->menu == m || api->control_state(x, cy + 2, 48, 20));
+        if (on) menu_shade(api, x, cy + 2, 48, 20, 1);
+        draw_text(x + 8, cy + 4, labels[m], on ? C_WHITE : C_BLACK);
+    }
     static const char *const tb[5] = { "New", "Open", "Save", "Find", "Wrap" };
     for (int b = 0; b < 5; b++) {
-        UiRect r = ui_r(b * 52 + 2, 2, 48, 18);
-        int hov = mx >= cx + r.x && mx < cx + r.x + r.w &&
-                  my >= cy + r.y && my < cy + r.y + r.h;
-        int on  = (b == 4 && E->wrap) || hov;
-        int en  = !(b == 2 && (E->ro || !E->mod));
+        UiRect r = ed_toolbar_rect(b);
+        int on  = b == 4 && E->wrap;
+        int en  = E->menu < 0 && E->mode != EM_OPEN && E->mode != EM_GUARD && ed_enabled(ed_toolbar_keys[b]);
         ui_button(cx, cy, r, tb[b], on, en);
     }
 
-    if (E->name[0]) {
+    {
         char nm[40];
-        kfmt(nm, sizeof nm, "%s%s", E->name, E->mod ? " *" : "");
-        int nw = (int)strlen(nm) * 8;
-        if (5 * 52 + 8 + nw < cw - 8)
-            draw_text(cx + cw - 8 - nw, cy + 6, nm, C_NAVY);
+        kfmt(nm, sizeof nm, "%s%s", E->name[0] ? E->name : "Untitled", E->mod ? " *" : "");
+        draw_text_clip(cx + 160, cy + 4, nm, C_DARK, cw - 168);
     }
 
     int tx = cx + GUTW, ty = cy + TB_H;
@@ -764,8 +869,15 @@ static void edit_draw(Win *w, int cx, int cy, int cw, int ch)
             int from = E->wrap ? s * E->cols : E->xscroll;
             int cnt = ll - from;
             if (cnt > E->cols) cnt = E->cols;
-            for (int c = 0; c < cnt; c++)
-                draw_char(tx + 4 + c * 8, yy, E->buf[ls + from + c], C_BLACK);
+            int a = E->cur < E->anchor ? E->cur : E->anchor;
+            int b = E->cur > E->anchor ? E->cur : E->anchor;
+            for (int c = 0; c < cnt; c++) {
+                int pos = ls + from + c, selected = pos >= a && pos < b;
+                if (selected) fill_rect(tx + 4 + c * 8, yy, 8, 16, C_NAVY);
+                draw_char(tx + 4 + c * 8, yy, E->buf[pos], selected ? C_WHITE : C_BLACK);
+            }
+            if (cnt >= 0 && cnt < E->cols && ls + ll < E->len && ls + ll >= a && ls + ll < b && s == segs - 1)
+                fill_rect(tx + 4 + cnt * 8, yy, 8, 16, C_NAVY);
             if (!E->wrap && ll - E->xscroll > E->cols)
                 draw_char(tx + 4 + (E->cols - 1) * 8, yy, '\x1a', C_G0 + 4);
         }
@@ -773,7 +885,7 @@ static void edit_draw(Win *w, int cx, int cy, int cw, int ch)
         li++;
     }
 done:
-    if (win_is_focused(w) && gui_blink && E->mode == EM_NONE &&
+    if (win_is_focused(w) && gui_blink && E->cur == E->anchor && E->mode == EM_NONE && E->menu < 0 &&
         cvr >= E->scroll && cvr < E->scroll + E->rows) {
         int vcx = E->wrap ? cvc : cvc - E->xscroll;
         if (vcx >= 0 && vcx <= E->cols)
@@ -808,6 +920,25 @@ done:
         draw_text(bx + 12, by + 12, "Discard unsaved changes?", C_BLACK);
         draw_text(bx + 12, by + 34, "Y = discard    N = cancel", C_NAVY);
     }
+    if (E->menu >= 0 && active) {
+        UiRect r = ed_menu_rect(E->menu, cw);
+        int x = cx + r.x, y = cy + r.y;
+        panel(x, y, r.w, r.h, 0);
+        int hover = -1;
+        if (mx >= x + 2 && mx < x + r.w - 2 && my >= y + 2 && my < y + r.h - 2)
+            hover = (my - y - 2) / 20;
+        for (int i = 0; i < ed_menu_count[E->menu]; i++) {
+            const EdMenuItem *item = &ed_menus[E->menu][i];
+            int yy = y + 2 + i * 20;
+            int enabled = ed_enabled(item->key);
+            int on = enabled && i == (hover >= 0 ? hover : E->menu_row);
+            u8 color = !enabled ? C_SHAD : on ? C_WHITE : C_BLACK;
+            menu_shade(api, x + 2, yy, r.w - 4, 20, on);
+            if (item->key == 23 && E->wrap) draw_char(x + 6, yy + 2, '*', color);
+            draw_text(x + 22, yy + 2, item->label, color);
+            draw_text(x + r.w - 10 - (int)strlen(item->shortcut) * 8, yy + 2, item->shortcut, color);
+        }
+    }
     E=previous;
 }
 
@@ -839,7 +970,7 @@ int kext_entry(const Kapi *k)
     static const AppDesc d = {
         .title = "Editor", .max_inst = MAXINST, .resizable = 1, .in_menu = 1,
         .open = edit_new, .draw = edit_draw, .key = edit_key,
-        .mouse = edit_mouse, .client_size = edit_csize, .close = edit_close,
+        .mouse = edit_mouse, .wheel = edit_wheel, .client_size = edit_csize, .close = edit_close,
         .min_client = edit_min_client,
     };
     edit_type = api->register_app(&d);

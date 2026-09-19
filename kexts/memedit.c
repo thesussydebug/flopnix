@@ -31,6 +31,7 @@ static void build_presets(void)
                                api->mem_info(MI_ARENA_BASE),
                                api->mem_info(MI_HEAP_BASE),
                                api->mem_info(MI_POOL_BASE),
+                               api->mem_info(MI_HEAP_GROW_BASE),
                                presets, 8);
 }
 #define NPRESET npreset
@@ -183,7 +184,7 @@ static void me_draw(Win *w, int cx, int cy, int cw, int ch)
         api->kfmt(b, sizeof b, "@%08x = 0x%02x  %u  '%c'   [%s]%s",
                   cursor, cv, cv, cc, ascii_mode ? "ASCII" : "hex",
 
-                  WRITABLE(cursor) ? "" : "  write-protected");
+                  WRITABLE(cursor) ? "" : "  raw write");
     }
     api->draw_text_clip(cx + 6, fy + 3, b, C_BLACK, cw - 12);
 }

@@ -39,7 +39,8 @@ int kernel_update_data(const u8 *img, u32 size, char *err, int errcap)
     /* Suspend watchdog intervention while replacing the kernel on disk. */
     kupd_critical = 1;
     for (u32 i = 0; i < sect; i++) {
-        if (fdc_write(1 + i, img + i * 512))
+        if (fdc_write(1 + i, img + i * 512) || fdc_read(1 + i, sbuf) ||
+            memcmp(sbuf, img + i * 512, 512))
             FAILU("write error - REFLASH before reboot");
         if ((i & 7) == 0) upd_panel("installing - do not remove the disk",
                                     (int)(i * 256 / sect));
@@ -47,7 +48,9 @@ int kernel_update_data(const u8 *img, u32 size, char *err, int errcap)
     if (fdc_read(0, sbuf)) FAILU("boot sector error - REFLASH before reboot");
     sbuf[506] = (u8)(sect & 0xFF);
     sbuf[507] = (u8)(sect >> 8);
-    if (fdc_write(0, sbuf)) FAILU("boot sector error - REFLASH before reboot");
+    u8 check[512];
+    if (fdc_write(0, sbuf) || fdc_read(0, check) || memcmp(sbuf, check, 512))
+        FAILU("boot sector error - REFLASH before reboot");
 
     upd_panel("installed - rebooting", 256);
     if (timer_alive) {

@@ -649,6 +649,83 @@ static void t_heap_bounds(void)
     api->kfree(p);
 }
 
+static void t_heap_growth(void)
+{
+    u32 initial = api->mem_info(MI_HEAP_CAPACITY);
+    u32 limit = api->mem_info(MI_HEAP_LIMIT);
+    CHECK(limit >= initial);
+    if (limit < initial + 3u * 1024u * 1024u) return;
+    u32 n = initial + 65536u;
+    u8 *p = api->kmalloc(n);
+    CHECK(p != 0);
+    if (!p) return;
+    CHECK((u32)p >= api->mem_info(MI_POOL_END));
+    CHECK(api->mem_info(MI_HEAP_CAPACITY) > initial);
+    CHECK(api->mem_info(MI_HEAP_GROW_END) <= api->mem_total_kb() * 1024u);
+    CHECK(api->mem_mapped(api->mem_info(MI_HEAP_GROW_BASE)));
+    CHECK(api->mem_mapped((u32)p + n - 1));
+    CHECK(api->mem_poke((u32)p + n - 1, 0xA7));
+    CHECK(*(volatile u8 *)(p + n - 1) == 0xA7);
+    for (u32 i=0;i<n;i+=4096) p[i]=(u8)(i>>12);
+    p[n-1]=0x5A;
+    u8 *q=api->krealloc(p,n+65536u);
+    CHECK(q != 0);
+    if(q)p=q;
+    for(u32 i=0;i<n;i+=4096)CHECK(p[i]==(u8)(i>>12));
+    CHECK(p[n-1]==0x5A);
+    CHECK(api->krealloc(p,limit)==0);
+    CHECK(p[n-1]==0x5A);
+    api->kfree(p);
+    u32 capacity=api->mem_info(MI_HEAP_CAPACITY);
+    p=api->kmalloc(n+65536u);
+    CHECK(p!=0);
+    CHECK(api->mem_info(MI_HEAP_CAPACITY)==capacity);
+    api->kfree(p);
+}
+
+static void t_heap_resize(void)
+{
+    CHECK(api->krealloc(0, 0) == 0);
+    u8 *p = api->krealloc(0, 8192);
+    CHECK(p != 0);
+    if (!p) return;
+    for (int i = 0; i < 64; i++) p[i] = (u8)i;
+    api->mem_track("Resize test", p, 8192);
+    u32 before = api->heap_avail();
+    u8 *q = api->krealloc(p, 64);
+    CHECK(q == p);
+    CHECK(api->heap_avail() > before + 8000);
+    q = api->krealloc(p, 4096);
+    CHECK(q == p);
+    if (q) p = q;
+    for (int i = 0; i < 64; i++) CHECK(p[i] == (u8)i);
+    int tracked = 0;
+    MemBuffer info;
+    for (int i = 0; api->mem_buffer(i, &info); i++)
+        if (info.base == (u32)p) { CHECK(info.size == 4096); tracked++; }
+    CHECK(tracked == 1);
+    CHECK(api->krealloc(p, 0xFFFFFFFFu) == 0);
+    CHECK(api->krealloc(p, api->mem_info(MI_HEAP_LIMIT)) == 0);
+    for (int i = 0; i < 64; i++) CHECK(p[i] == (u8)i);
+    u8 *guard = api->kmalloc(256);
+    CHECK(guard != 0);
+    int adjacent = guard && (u32)guard == (u32)p + 4096 + 16;
+    q = api->krealloc(p, 16384);
+    CHECK(q != 0);
+    if (q) { if (adjacent) CHECK(q != p); p = q; }
+    for (int i = 0; i < 64; i++) CHECK(p[i] == (u8)i);
+    tracked = 0;
+    for (int i = 0; api->mem_buffer(i, &info); i++)
+        if (info.base == (u32)p) { CHECK(info.size == 16384); tracked++; }
+    CHECK(tracked == 1);
+    api->kfree(guard);
+    CHECK(api->krealloc(p, 0) == 0);
+    for (int i = 0; api->mem_buffer(i, &info); i++) CHECK(info.base != (u32)p);
+    p = api->kmalloc(20000);
+    CHECK(p != 0);
+    api->kfree(p);
+}
+
 static void t_ms_bounds(void)
 {
     u8 fixed[64], src[64];
@@ -1084,6 +1161,11 @@ static void t_desktop_folder(void)
 }
 static void t_memory_layout(void)
 {
+    CHECK(memory_heap_limit(32768,0)==0x2000000u);
+    CHECK(memory_heap_limit(32768,0xA0000u)==0x2000000u);
+    CHECK(memory_heap_limit(0xFFFFFFFFu,0)==0x40000000u);
+    CHECK(memory_heap_limit(32768,0x1200000u)==0x1000000u);
+    CHECK(memory_heap_limit(0,0)==0);
     MemoryLayout m = memory_layout(4032);
     CHECK(m.fb >= 0x190000u && m.fb_end - m.fb >= 640u * 480u);
     CHECK(m.pool >= 0x30000u && m.pool_end <= MEM_DMA_BASE);
@@ -1230,8 +1312,8 @@ static void t_mepreset_layout(void)
     MePreset p[12];
 
     int n = me_build_presets(0x100000, 0x300000, 0x400000, 0x600000,
-                             0x700000, 0x800000, p, 12);
-    CHECK(n == 7);
+                             0x700000, 0x800000, 0x900000, p, 12);
+    CHECK(n == 8);
 
     int rising = 1;
     for (int i = 1; i < n; i++) if (p[i].addr <= p[i - 1].addr) rising = 0;
@@ -1240,6 +1322,8 @@ static void t_mepreset_layout(void)
     CHECK(p[1].addr == 0x100000);
     CHECK(p[4].addr == 0x600000);
     CHECK(p[6].addr == 0x800000);
+    CHECK(p[7].addr == 0x900000);
+    CHECK(api->strcmp(p[7].label, "Grow") == 0);
 
     int named = 1;
     for (int i = 0; i < n; i++) if (!p[i].label || !p[i].label[0]) named = 0;
@@ -1251,7 +1335,7 @@ static void t_mepreset_absent_regions(void)
     MePreset p[12];
 
     int n = me_build_presets(0x100000, 0, 0x400000, 0x600000, 0x700000, 0,
-                             p, 12);
+                             0, p, 12);
     CHECK(n == 5);
     CHECK(p[0].addr == 0);
     for (int i = 1; i < n; i++) CHECK(p[i].addr != 0);
@@ -1262,13 +1346,13 @@ static void t_mepreset_collapse_and_cap(void)
     MePreset p[12];
 
     int n = me_build_presets(0x100000, 0x400000, 0x400000, 0x600000,
-                             0x700000, 0x800000, p, 12);
+                             0x700000, 0x800000, 0x700000, p, 12);
     CHECK(n == 6);
     for (int i = 1; i < n; i++) CHECK(p[i].addr != p[i - 1].addr);
 
     MePreset small[3];
     CHECK(me_build_presets(0x100000, 0x300000, 0x400000, 0x600000,
-                           0x700000, 0x800000, small, 3) == 3);
+                           0x700000, 0x800000, 0x900000, small, 3) == 3);
     CHECK(small[0].addr == 0 && small[1].addr == 0x100000);
 }
 
@@ -5051,6 +5135,8 @@ int kext_entry(const Kapi *k)
     run("fsd_wrfail", t_fsd_wrfail);
     run("fsd_torn", t_fsd_torn);
     run("heap_bounds", t_heap_bounds);
+    run("heap_resize", t_heap_resize);
+    run("heap_growth", t_heap_growth);
     run("ms_bounds", t_ms_bounds);
     run("hangwatch_prompts_once", t_hangwatch_prompts_once);
     run("hangwatch_progress_never_accused", t_hangwatch_progress_never_accused);

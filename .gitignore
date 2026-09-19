@@ -14,10 +14,14 @@ __pycache__/
 
 /tools/*test*.py
 !/tools/test_kapidoc.py
+!/tools/test_archive_usb.py
 /tools/*test*.c
 !/tools/appcoretests.c
+!/tools/browsertests.c
 !/tools/fatstabilitytests.c
 !/tools/fileopstests.c
+!/tools/archiveusbtest.c
+/tools/archiveusbtest.kx
 /tools/*gui.py
 /tools/release[0-9]*
 /tools/dhcp_fixture.py
@@ -26,3 +30,5 @@ __pycache__/
 !/kexts/selftest.c
 !/kexts/selftest_small.c
 /kexts/*fixture.c
+!/tools/textinputtests.c
+!/tools/archivelimittests.c

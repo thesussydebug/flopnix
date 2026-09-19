@@ -1,6 +1,7 @@
 'Compare release files with the build output and floppy contents.'
 from pathlib import Path
 import hashlib
+import json
 import re
 import shutil
 import struct
@@ -16,6 +17,9 @@ assert actual == expected, ('built/kexts', actual ^ expected)
 
 image = (root/'built/flopnix.img').read_bytes()
 kernel = (root/'built/flopnix.ku').read_bytes()
+meta = json.loads((root/'built/flopnix-update.json').read_text())
+assert meta['size'] == len(kernel) and meta['sha256'] == hashlib.sha256(kernel).hexdigest()
+assert meta['api'] == int(re.search(r'#define KAPI_VERSION\s+(\d+)', (root/'src/kapi.h').read_text()).group(1))
 assert len(image) == 1474560
 assert image[:512] == (root/'out/boot.bin').read_bytes()
 assert image[512:512+len(kernel)] == kernel

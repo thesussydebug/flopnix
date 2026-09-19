@@ -6,6 +6,12 @@ typedef struct {
 #define MEM_IO_END  0x3B4000u
 #define MEM_DMA_BASE 0x80000u
 #define MEM_STACK_TOP 0x9E000u
+static inline u32 memory_heap_limit(u32 kb, u32 lfb)
+{
+    u32 end = kb >= 0x100000u ? 0x40000000u : kb * 1024u;
+    if (lfb >= 0x400000u && lfb < end) end = lfb & ~0x3FFFFFu;
+    return end & ~4095u;
+}
 static inline MemoryLayout memory_layout(u32 kb)
 {
     MemoryLayout m = {0x400000u, 0x500000u, 0x600000u, 0x700000u,

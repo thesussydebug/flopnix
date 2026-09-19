@@ -162,11 +162,17 @@ static int fs_write_locked(const char *name, const u8 *buf, u32 size)
 
 static int fs_delete_locked(const char *name)
 {
-    if (!fs_ensure()) return -1;
+    if (!fs_ensure()) return FS_EIO;
     FsEnt *e = find(name);
     if (!e) return -1;
+    u32 sector = (u32)((u8 *)&e->used - (u8 *)table) / 512;
+    u8 used = e->used;
     e->used = 0;
-    return flush_table() ? 0 : -1;
+    if (fdc_write(FS_TABLE + sector, (u8 *)table + sector * 512)) {
+        e->used = used;
+        return FS_EIO;
+    }
+    return 0;
 }
 
 static int fs_mkdir_locked(const char *name)

@@ -766,13 +766,16 @@ static HttpReader hs_http;
 static int hs_raw,hs_abort;
 static u32 hs_got;
 static volatile u8 tcp_busy;
+static NetHttpDiag http_diag;
+static void http_diag_read(NetHttpDiag *out){out->stage=http_diag.stage;out->result=http_diag.result;}
+static const NetHttpDiagOps http_diag_ops={NET_HTTP_DIAG_ABI,http_diag_read};
 
-static u8 hs_queue[8192];
+static u8 *hs_queue;
 static void http_queue(const u8 *d,int n)
 {
     if(hs_abort)return;
     u32 w=hs_write;
-    if(n<0||(u32)n>sizeof hs_queue-(w-hs_read)){hs_abort=1;return;}
+    if(n<0||(u32)n>8192-(w-hs_read)){hs_abort=1;return;}
     for(int i=0;i<n;i++)hs_queue[(w+(u32)i)&8191]=d[i];
     __asm__ volatile("" ::: "memory");hs_write=w+(u32)n;
 }
@@ -809,6 +812,9 @@ static int net_transfer_locked(u32 ip, u16 port, const char *host,
     u8 held=1;__asm__ volatile("xchgb %0,%1" : "+q"(held), "+m"(tcp_busy) :: "memory");
     if(held)return -5;
     int result=-3;
+    http_diag.stage=NH_PREFLIGHT;http_diag.result=0;
+    hs_queue=api->kmalloc(8192);if(!hs_queue){http_diag.result=-4;tcp_busy=0;return -4;}
+    api->mem_track("HTTP receive queue",hs_queue,8192);
     static char req[560];
     if(strlen(path)>500 || (host&&strlen(host)>127)) {result=-1;goto finish;}
     if(host){
@@ -820,7 +826,9 @@ static int net_transfer_locked(u32 ip, u16 port, const char *host,
     net_cancel = 0;
     api->esc_arm();
     u32 hop = ((ip & net_mask) == (net_ip & net_mask)) ? ip : net_gw;
+    http_diag.stage=NH_ARP;
     if (!arp_resolve(hop, tcp_rmac, timeout)) goto finish;
+    http_diag.stage=NH_CONNECT;
     u32 critical=net_irq_save();
     tcp_rip = ip;
     tcp_rport = port;
@@ -840,6 +848,7 @@ static int net_transfer_locked(u32 ip, u16 port, const char *host,
         net_wait();
     }
     if (tcp_event & TA_ERROR) goto fail3;
+    http_diag.stage=NH_RESPONSE;
 
     critical=net_irq_save();
     txq = (const u8 *)req;
@@ -870,13 +879,15 @@ static int net_transfer_locked(u32 ip, u16 port, const char *host,
 fail3:
     result=-3;
 finish:
+    http_diag.result=result;if(result>=0)http_diag.stage=NH_COMPLETE;
     ;u32 finish_flags=net_irq_save();
     if(tcb.state!=TS_CLOSED&&tcb.state!=TS_TIME_WAIT)tcp_out(TCP_RST|TCP_ACK,tcb.snd_nxt,0,0);
     tcb.state=TS_CLOSED;
     tcp_deliver = 0;
     txq = 0;
-    hs_sink=0;hs_ctx=0;tcp_busy=0;
+    hs_sink=0;hs_ctx=0;
     net_irq_restore(finish_flags);
+    api->kfree(hs_queue);hs_queue=0;tcp_busy=0;
     return result;
 }
 static int net_transfer(u32 ip,u16 port,const char *host,const char *path,int (*sink)(const u8 *,int,void *),void *ctx,u32 timeout,NetHttpInfo *info){api->network_lock();int result=net_transfer_locked(ip,port,host,path,sink,ctx,timeout,info);api->network_unlock();return result;}
@@ -1449,6 +1460,7 @@ int kext_entry(const Kapi *k)
     api->register_net(&net_ops);
     api->register_service("net.text",&text_ops);
     api->register_service("net.http",&http_ops);
+    api->register_service("net.http.diag",&http_diag_ops);
     api->register_cmd("netdiag", "netdiag - report NIC, link and traffic state",
                       cmd_netdiag);
     return 0;

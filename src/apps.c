@@ -146,7 +146,7 @@ u32 used_kb(void)
     u32 bss = (u32)__bss_end - (u32)__bss_start;
     return (img + bss + IOBUF_SZ + (u32)(SW * SH) + 1023 +
             kapi.mem_info(MI_ARENA_RO) + kapi.mem_info(MI_ARENA_RW) +
-            kapi.mem_info(MI_POOL_USED) + heap_end() - heap_base() - heap_avail()) / 1024 + 120;
+            kapi.mem_info(MI_POOL_USED) + heap_capacity() - heap_avail()) / 1024 + 120;
 }
 
 void shell_print(const char *s) { if(!T)T=term_last;if(T)tprint(s); }

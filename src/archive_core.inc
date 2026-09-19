@@ -2,17 +2,7 @@
 #pragma once
 #include "lz.inc"
 #define AR_FILES 32
-#define AR_CAP 1048576u
-#define AR_FILE 131072u
-
-static inline u32 ar_buffer_limit(u32 memory_kb)
-{
-    u32 memory_mb=memory_kb/1024+(memory_kb%1024!=0);
-    if (memory_mb >= 32) return AR_CAP;
-    if (memory_mb >= 16) return 524288u;
-    if (memory_mb >= 8) return 262144u;
-    return 131072u;
-}
+#define AR_CAP 0x7ffffffeu
 typedef struct { char name[24]; u32 offset, packed, raw; } ArEntry;
 static int ar_name(const char *s)
 {
@@ -51,7 +41,7 @@ static int ar_index(const u8 *d, u32 n, ArEntry *e)
         u32 len=lz_get32(d+off+24); off+=28;
         if (len<LZ_HDR || len>n-off || d[off]!='P'||d[off+1]!='Z'||d[off+2]!='1'||d[off+3] || d[off+10]>1 || d[off+11]) return -1;
         u32 raw=lz_get32(d+off+4);
-        if (raw>AR_FILE || (d[off+10] && len != LZ_HDR+raw)) return -1;
+        if (raw>AR_CAP || (d[off+10] && raw != len-LZ_HDR)) return -1;
         e[i].offset=off; e[i].packed=len; e[i].raw=raw; off+=len;
     }
     return off==n ? d[4] : -1;

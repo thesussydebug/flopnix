@@ -5,6 +5,7 @@
 #include "gdi.h"
 #include "menushade.h"
 #include "button.h"
+#include "dynbuf.h"
 
 static const Kapi *api;
 static int paint_type = -1;
@@ -62,7 +63,8 @@ enum { T_PEN, T_LINE, T_RECT, T_BOX, T_OVAL, T_DISC, T_FILL, T_TEXT,
        T_PICK, T_ERASE };
 
 typedef struct {
-    u8   canvas[PCW_MAX * PCH_MAX];
+    u8 *canvas;
+    DynBuf storage;
     int  cw, ch;
     u8   col; int lx, ly;
     int  mode;
@@ -84,7 +86,8 @@ static u8 active[PAINT_INST];
 static u8 *icon_cache;
 static u8 icon_color;
 
-static u8  undo_buf[PCW_MAX * PCH_MAX];
+static DynBuf undo_storage;
+#define undo_buf ((u8 *)undo_storage.data)
 static int undo_inst = -1, undo_w, undo_h;
 
 static const struct { int w, h; } psizes[4] = {
@@ -123,8 +126,12 @@ static void paint_reset(int inst)
 {
     active[inst]=1;
     Paint *p = &paints[inst];
-    if(api->mem_track){api->mem_track("Paint canvas",p->canvas,sizeof p->canvas);api->mem_track("Paint undo",undo_buf,sizeof undo_buf);}
-    memset(p->canvas, C_WHITE, sizeof p->canvas);
+    if (!db_reserve(api, &p->storage, (u32)pdefw*pdefh, 1, 4096, PCW_MAX*PCH_MAX, "Paint canvas")) {
+        p->cw=p->ch=0; p->zoom=1;
+        strlcpy(p->msg,"Not enough memory. Close and reopen Paint.",sizeof p->msg); return;
+    }
+    p->canvas=p->storage.data;
+    memset(p->canvas, C_WHITE, (u32)pdefw*pdefh);
     p->cw = pdefw;
     p->ch = pdefh;
     p->col = C_RED;
@@ -141,12 +148,16 @@ static void paint_reset(int inst)
     p->text[0] = 0;
 }
 
-static void undo_snap(Paint *p)
+static int undo_snap(Paint *p)
 {
+    if (!db_reserve(api,&undo_storage,(u32)p->cw*p->ch,1,4096,PCW_MAX*PCH_MAX,"Paint undo")) {
+        strlcpy(p->msg,"Not enough memory for undo. Picture unchanged.",sizeof p->msg); return 0;
+    }
     memcpy(undo_buf, p->canvas, (u32)p->cw * p->ch);
     undo_inst = (int)(p - paints);
     undo_w = p->cw;
     undo_h = p->ch;
+    return 1;
 }
 
 static int undo_swap(Paint *p)
@@ -162,6 +173,11 @@ static int undo_swap(Paint *p)
 static void paint_set_size(Paint *p, int nw, int nh)
 {
     if (nw == p->cw && nh == p->ch) return;
+    if(nw<1||nh<1||nw>PCW_MAX||nh>PCH_MAX)return;
+    if (!db_reserve(api,&p->storage,(u32)nw*nh,1,4096,PCW_MAX*PCH_MAX,"Paint canvas")) {
+        strlcpy(p->msg,"Not enough memory to resize.",sizeof p->msg); return;
+    }
+    p->canvas=p->storage.data;
     int ow = p->cw, oh = p->ch;
     int kw=nw<ow?nw:ow,kh=nh<oh?nh:oh;
     for(int i=0;i<kh;i++){
@@ -172,6 +188,7 @@ static void paint_set_size(Paint *p, int nw, int nh)
     if(nh>kh)memset(p->canvas+kh*nw,C_WHITE,(nh-kh)*nw);
     p->cw = nw;
     p->ch = nh;
+    db_trim(api,&p->storage,(u32)nw*nh,1);p->canvas=p->storage.data;
     undo_inst = -1;
 }
 
@@ -292,7 +309,9 @@ static void ras_fill(Paint *p, int sx, int sy, u8 col)
     if (sx < 0 || sx >= p->cw || sy < 0 || sy >= p->ch) return;
     u8 target = p->canvas[sy * p->cw + sx];
     if (target == col) return;
-    static short stk[FILL_STACK][2];
+    short (*stk)[2]=api->kmalloc(FILL_STACK*sizeof *stk);
+    if(!stk){strlcpy(p->msg,"Not enough memory to fill.",sizeof p->msg);return;}
+    api->mem_track("Paint fill workspace",stk,FILL_STACK*sizeof *stk);
     int sp = 0;
     stk[sp][0] = (short)sx; stk[sp][1] = (short)sy; sp++;
     while (sp > 0) {
@@ -320,6 +339,7 @@ static void ras_fill(Paint *p, int sx, int sy, u8 col)
             }
         }
     }
+    api->kfree(stk);
 }
 
 static void ras_text(Paint *p, int x, int y, const char *s, u8 col)
@@ -425,9 +445,11 @@ static int paint_parse_bmp(Paint *p, const u8 *bm, int n)
             map[i] = palette_nearest(e[2], e[1], e[0]);
         }
     }
-    p->cw = w < 16 ? 16 : (w > PCW_MAX ? PCW_MAX : w);
-    p->ch = h < 16 ? 16 : (h > PCH_MAX ? PCH_MAX : h);
-    memset(p->canvas, C_WHITE, sizeof p->canvas);
+    int nw=w < 16 ? 16 : (w > PCW_MAX ? PCW_MAX : w);
+    int nh=h < 16 ? 16 : (h > PCH_MAX ? PCH_MAX : h);
+    if(!db_reserve(api,&p->storage,(u32)nw*nh,1,4096,PCW_MAX*PCH_MAX,"Paint canvas"))return -1;
+    p->canvas=p->storage.data;p->cw=nw;p->ch=nh;
+    memset(p->canvas, C_WHITE, (u32)p->cw*p->ch);
     for (int y = 0; y < p->ch && y < h; y++) {
         int src = topdown ? y : (h - 1 - y);
         if (off + (u32)(src + 1) * rowsz > (u32)n) continue;
@@ -496,7 +518,7 @@ static void paint_saved_as(const char *spec, void *ctx)
 static void text_commit(Paint *p, int keep)
 {
     if (p->tx >= 0 && p->text[0]) {
-        undo_snap(p);
+        if(!undo_snap(p))return;
         ras_text(p, p->tx, p->ty, p->text, p->col);
     }
     p->text[0] = 0;
@@ -509,8 +531,8 @@ static void paint_action(Paint *p, int action)
     p->dragging = 0; p->lx = -1; p->mode = PM_NORM; p->msg[0] = 0;
     switch (action) {
     case A_NEW:
-        undo_snap(p);
-        memset(p->canvas, C_WHITE, sizeof p->canvas);
+        if(!undo_snap(p))return;
+        memset(p->canvas, C_WHITE, (u32)p->cw*p->ch);
         p->has_file = 0; p->fpath[0] = 0; break;
     case A_OPEN:
         api->file_picker("Open picture", "bmp", 0, paint_opened, p); break;
@@ -523,10 +545,10 @@ static void paint_action(Paint *p, int action)
     case A_UNDO:
         strlcpy(p->msg, undo_swap(p) ? "Undo / redo" : "Nothing to undo", sizeof p->msg); break;
     case A_CLEAR:
-        undo_snap(p); memset(p->canvas, C_WHITE, sizeof p->canvas);
+        if(!undo_snap(p))return; memset(p->canvas, C_WHITE, (u32)p->cw*p->ch);
         strlcpy(p->msg, "Picture cleared. Ctrl+Z to undo.", sizeof p->msg); break;
     case A_FLIPH: case A_FLIPV:
-        undo_snap(p); pv_flip(p->canvas, p->cw, p->ch, action == A_FLIPV);
+        if(!undo_snap(p))return; pv_flip(p->canvas, p->cw, p->ch, action == A_FLIPV);
         strlcpy(p->msg, "Picture flipped. Ctrl+Z to undo.", sizeof p->msg); break;
     case A_ZOOM1: case A_ZOOM2: case A_ZOOM4:
         p->zoom = 1 << (action - A_ZOOM1); view_clamp(p);
@@ -539,6 +561,7 @@ static void paint_action(Paint *p, int action)
 static void paint_key(int inst, int k)
 {
     Paint *p = &paints[inst];
+    if(!p->canvas)return;
     if (p->mode != PM_NORM) { if (k == 27) p->mode = PM_NORM; return; }
     if (k == 19) { paint_action(p, A_SAVE); return; }
     if (k == 15) { paint_action(p, A_OPEN); return; }
@@ -570,6 +593,7 @@ static void paint_key(int inst, int k)
 static void paint_wheel(int inst, int dz)
 {
     Paint *p = &paints[inst];
+    if(!p->canvas)return;
     if (p->mode != PM_NORM || p->dragging || p->lx >= 0) return;
     if (api->kbd_mods() & 1) p->ox -= dz * 8;
     else p->oy -= dz * 8;
@@ -594,6 +618,7 @@ static void tool_select(Paint *p, int t)
 static void paint_mouse(int inst, int lx, int ly, int ev, int cw, int ch)
 {
     Paint *p = &paints[inst];
+    if(!p->canvas)return;
     p->vw = cw - LEFT_W - 4; p->vh = ch - TOP_H - SW_H - 8;
     view_clamp(p);
     int active = p->dragging || p->lx >= 0;
@@ -655,7 +680,7 @@ static void paint_mouse(int inst, int lx, int ly, int ev, int cw, int ch)
         }
         return;
     case T_FILL:
-        if (ev == EV_PRESS) { undo_snap(p); ras_fill(p, qx, qy, p->col); }
+        if (ev == EV_PRESS) { if(!undo_snap(p))return; ras_fill(p, qx, qy, p->col); }
         return;
     case T_TEXT:
         if (ev == EV_PRESS) {
@@ -670,7 +695,7 @@ static void paint_mouse(int inst, int lx, int ly, int ev, int cw, int ch)
     case T_ERASE: {
         u8 col = p->tool == T_ERASE ? C_WHITE : p->col;
         if (ev == EV_PRESS) {
-            undo_snap(p);
+            if(!undo_snap(p))return;
             p->lx = qx; p->ly = qy;
             dab(plot_canvas, p, qx, qy, col, p->brush);
         } else if (ev == EV_DRAG && p->lx >= 0) {
@@ -690,7 +715,8 @@ static void paint_mouse(int inst, int lx, int ly, int ev, int cw, int ch)
         p->bx = qx; p->by = qy;
         api->gui_dirty();
     } else if (ev == EV_RELEASE && p->dragging) {
-        undo_snap(p);
+        p->dragging=0;
+        if(!undo_snap(p))return;
         int x0 = p->ax, y0 = p->ay, x1 = qx, y1 = qy;
         switch (p->tool) {
         case T_LINE: ras_line(plot_canvas, p, x0, y0, x1, y1, p->col, p->brush); break;
@@ -790,15 +816,17 @@ static void tool_icon(int t,int x,int y,u8 col)
 static void paint_close(int inst)
 {
     active[inst]=0;
-    if(api->mem_track)api->mem_track("Paint canvas",paints[inst].canvas,0);
+    db_free(api,&paints[inst].storage);paints[inst].canvas=0;
+    if(undo_inst==inst){db_free(api,&undo_storage);undo_inst=-1;}
     for(int i=0;i<PAINT_INST;i++)if(active[i])return;
     if(icon_cache){api->kfree(icon_cache);icon_cache=0;}
-    if(api->mem_track)api->mem_track("Paint undo",undo_buf,0);
+    db_free(api,&undo_storage);undo_inst=-1;
 }
 
 static void paint_draw(Win *w, int cx, int cy, int cw, int ch)
 {
     Paint *p = &paints[w->inst];
+    if(!p->canvas){draw_text_clip(cx+8,cy+12,p->msg,C_RED,cw-16);return;}
     p->vw = cw - LEFT_W - 4; p->vh = ch - TOP_H - SW_H - 8;
     view_clamp(p);
     fill_rect(cx, cy, cw, ch, C_FACE);
@@ -958,7 +986,7 @@ int kext_entry(const Kapi *k)
         .open = paint_reset, .close = paint_close, .draw = paint_draw, .key = paint_key,
         .mouse = paint_mouse, .client_size = paint_csize,
         .min_client = paint_min, .wheel = paint_wheel,
-        .live_draw = APP_LIVE_DRAW | APP_INDEPENDENT,
+        .live_draw = APP_INDEPENDENT,
     };
     paint_type = api->register_app(&d);
     if (paint_type < 0) return 1;

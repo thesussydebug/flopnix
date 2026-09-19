@@ -1022,6 +1022,10 @@ static u32 mem_stat(int what)
     case MI_HEAP_FREE:    return heap_avail();
     case MI_HEAP_LARGEST: return heap_largest();
     case MI_HEAP_BLOCKS:  return heap_blocks();
+    case MI_HEAP_GROW_BASE: return heap_grow_base();
+    case MI_HEAP_GROW_END: return heap_grow_end();
+    case MI_HEAP_CAPACITY: return heap_capacity();
+    case MI_HEAP_LIMIT: return heap_limit();
     case MI_PAGING:       return (u32)paging_active();
     case MI_PAGES:        return paging_pages_mapped();
     }
@@ -1324,4 +1328,5 @@ Kapi kapi = {
     .control_state = control_state, .win_redraw = win_redraw,
     .buffer_lock = app_buffer_lock, .buffer_unlock = app_buffer_unlock,
     .network_lock = app_network_lock, .network_unlock = app_network_unlock,
+    .krealloc = krealloc,
 };

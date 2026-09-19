@@ -623,10 +623,8 @@ static int ms_grow(MemStream *s, u32 need)
     if (!s->owned) return 0;
     u32 nc = s->cap ? s->cap : 256;
     while (nc < want) nc *= 2;
-    u8 *nb = kmalloc(nc);
+    u8 *nb = krealloc(s->buf, nc);
     if (!nb) return 0;
-    if (s->len) memcpy(nb, s->buf, s->len);
-    kfree(s->buf);
     s->buf = nb; s->cap = nc;
     return 1;
 }

@@ -2,8 +2,8 @@
 # Writes release files to built/ and compiler intermediates to out/.
 
 set -e
-cd "$(dirname "$0")"
 export PATH="/c/msys64/clang64/bin:/c/msys64/usr/bin:$PATH"
+cd "$(dirname "$0")"
 
 CFLAGS="--target=i386-unknown-none-elf -ffreestanding -fno-builtin \
  -fno-stack-protector -fno-pic -fno-asynchronous-unwind-tables \
@@ -76,9 +76,9 @@ for sym in $(undefs out/emergency.o); do
         *) echo "emergency.o: unsafe recovery dependency: $sym" >&2; exit 1;;
     esac
 done
-for n in fat net dialogs notes diskhealth opl2 midi gdi g3d desktop edit files settings paint about calc clock calendar memmap memedit minesweeper reversi snake pong tetris shell crashsim taskmgr serialmon faultlog kextview clipview bench gfxdemo charmap game2048 baseconv archive textweb breakout; do
+for n in fat net dialogs notes diskhealth opl2 midi gdi g3d desktop edit files settings paint about calc clock calendar memmap memedit minesweeper reversi snake pong tetris shell crashsim taskmgr serialmon faultlog kextview clipview bench charmap game2048 baseconv archive textweb breakout update; do
     SZ=
-    case $n in charmap|game2048|baseconv|archive|textweb|breakout) SZ=-Os;; esac
+    case $n in charmap|game2048|baseconv|archive|textweb|breakout|update) SZ=-Os;; esac
     clang $CFLAGS $SZ -c "kexts/$n.c" -o "out/$n.kxo"
     llvm-objcopy --strip-debug "out/$n.kxo" "built/kexts/$n.kx"
 
@@ -122,6 +122,7 @@ if [ $SECT -gt 255 ]; then
     echo "kernel too big: $KSIZE bytes overlaps config sector at LBA 256"; exit 1
 fi
 echo "== kernel: $KSIZE bytes ($SECT sectors)"
+python tools/update_meta.py
 
 printf "$(printf '\\x%02x\\x%02x' $((SECT & 0xFF)) $((SECT >> 8)))" \
     | dd of=out/boot.bin bs=1 seek=506 conv=notrunc status=none
@@ -154,6 +155,7 @@ flopnix.img   whole-disk 1.44 MB image - write to a floppy for a fresh install
               (tools/write-floppy.ps1, or dd)
 flopnix.ku    kernel-only update - drop onto an already-installed FLOPNIX
               floppy and right-click -> Install kernel (or 'kupdate flopnix.ku')
+flopnix-update.json  matching metadata for the Update Host app
 kexts/*.kx    the individual extensions - copy any onto a floppy's FLOPFS with
               tools/fscp.py <floppy> kexts/NAME.kx to add just that app
 TXT

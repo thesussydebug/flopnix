@@ -7,15 +7,14 @@ static void sf_emit(SfOutput *o,const void *data,u32 n)
     if(n>FS_MAXFILE-o->size){o->error=1;return;}
     u32 need=o->size+n;
     if(need>o->cap){u32 cap=o->cap?o->cap:4096;while(cap<need)cap*=2;if(cap>FS_MAXFILE)cap=FS_MAXFILE;
-        u8 *p=api->kmalloc(cap);if(!p){o->error=1;return;}
-        if(o->size)memcpy(p,o->data,o->size);if(o->data)api->kfree(o->data);o->data=p;o->cap=cap;
+        u8 *p=api->krealloc(o->data,cap);if(!p){o->error=1;return;}o->data=p;o->cap=cap;
     }
     if(n)memcpy(o->data+o->size,data,n);o->size+=n;
 }
 static void sf_line(SfOutput *o,const u8 *p,u32 n){sf_emit(o,p,n);sf_emit(o,"\n",1);}
 static int sf_number(const char *p,u32 *n)
 {
-    if(!*p)return 0;u32 v=0;for(;*p;p++){if(*p<'0'||*p>'9'||v>(131072u-(*p-'0'))/10)return 0;v=v*10+*p-'0';}*n=v;return 1;
+    if(!*p)return 0;u32 v=0;for(;*p;p++){if(*p<'0'||*p>'9'||v>((u32)FS_MAXFILE-(*p-'0'))/10)return 0;v=v*10+*p-'0';}*n=v;return 1;
 }
 static int sf_exec(const char *cmd,const char *args)
 {
@@ -57,7 +56,7 @@ static int sf_exec(const char *cmd,const char *args)
     if(bad){const char *u=sh_usage(cmd);tprint(u?u:"Invalid arguments");tputc('\n');return 1;}
     if(redirect&&((dd==drive&&!(dd?strcasecmp(dest,path):strcmp(dest,path)))||(kind==9&&dd==sd&&!(dd?strcasecmp(dest,second):strcmp(dest,second))))){tprint("Choose an output path different from the input.\n");return 1;}
     int n=path_read(drive,path,iobuf,FS_MAXFILE);
-    if(n<0){kfmt(b,sizeof b,"%s: %s: %s\n",cmd,path,n==-4?"file exceeds 128 KB":n==-3?"is a folder":"could not read file");tprint(b);return 1;}
+    if(n<0){kfmt(b,sizeof b,"%s: %s: %s\n",cmd,path,n==-4?"file exceeds 512 KiB":n==-3?"is a folder":"could not read file");tprint(b);return 1;}
     SfOutput out={0};out.file=redirect;
     if(append){u32 old=0;int dir=0;if(path_info(dd,dest,&old,&dir)){
         if(dir||old>FS_MAXFILE){tprint("Cannot append to that destination.\n");return 1;}
@@ -92,7 +91,7 @@ static int sf_exec(const char *cmd,const char *args)
         if(kind==3&&count){kfmt(b,sizeof b,"%u\n",hits);sf_emit(&out,b,strlen(b));}
         if(kind==6&&repeats){if(count){kfmt(b,sizeof b,"%u ",repeats);sf_emit(&out,b,strlen(b));}sf_line(&out,iobuf+prev,prevlen);}
     }
-    if(out.error)tprint("Command stopped: not enough memory, output exceeds 128 KB, or cancelled. No output file was written.\n");
+    if(out.error)tprint("Command stopped: not enough memory, output exceeds 512 KiB, or cancelled. No output file was written.\n");
     else if(redirect){int r=dd?fat_write(dest,out.data?out.data:(const u8 *)"",out.size):fs_write(dest,out.data?out.data:(const u8 *)"",out.size);
         if(r)tprint("Could not write the output file.\n");else api->broadcast("fs.changed","");}
     if(out.data)api->kfree(out.data);return 1;

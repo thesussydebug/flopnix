@@ -4,12 +4,12 @@
 #include "ui.inc"
 static const Kapi *api;
 #include "appfield.h"
-static char input[36],result[4][33];static TextField field;
+static char input[36],result[4][33];static AppField field;
 static int active=2,valid=1;static u32 value;
 static const int bases[]={16,10,2,8};
 static const char *const labels[]={"Hex","Decimal","Binary","Octal"};
 static void convert(void){valid=bc_parse(input,bases[active],&value);if(valid==1)for(int i=0;i<4;i++)bc_format(value,bases[i],result[i]);}
-static void opened(int i){(void)i;active=1;af_set(&field,input,sizeof input,"0");field.all=1;convert();}
+static void opened(int i){(void)i;active=1;af_set(&field,input,sizeof input,"0");field.anchor=0;field.caret=field.len;convert();}
 static void size(int *w,int *h){*w=440;*h=280;}
 static void initial(int i,int *w,int *h){(void)i;size(w,h);}
 static void draw(Win *w,int x,int y,int cw,int ch)
@@ -35,15 +35,17 @@ static void draw(Win *w,int x,int y,int cw,int ch)
 static void choose(int n)
 {
     if(n==active)return;if(valid!=1){af_set(&field,input,sizeof input,"");}else af_set(&field,input,sizeof input,result[n]);
-    active=n;field.all=1;convert();
+    active=n;field.anchor=0;field.caret=field.len;convert();
 }
 static void key(int i,int k){(void)i;if(k=='\t'){choose((active+1)%4);return;}af_key(&field,k);convert();}
 static void mouse(int i,int x,int y,int ev,int cw,int ch)
 {
-    (void)i;(void)ch;if(ev!=EV_PRESS)return;
+    (void)i;(void)ch;
+    if(af_mouse(&field,78,36+active*38,cw-150,x,y,ev))return;
+    if(ev!=EV_PRESS)return;
     for(int n=0;n<4;n++)if(y>=36+n*38&&y<60+n*38){
         if(x>=cw-66&&x<cw-12){if(valid==1)api->clip_set_text(result[n]);}
-        else if(x>=12&&x<cw-72)choose(n);return;
+        else if(x>=12&&x<cw-72){choose(n);af_mouse(&field,78,36+active*38,cw-150,x,y,ev);}return;
     }
 }
 const KextHeader kext_header={KEXT_MAGIC,KAPI_VERSION,KEXT_KIND_APP,0,"Base Converter"};

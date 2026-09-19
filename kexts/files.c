@@ -700,19 +700,33 @@ static void del_confirmed(int result, void *ctx)
 
     if (ctx) F = (Fm *)ctx;
     if (result != MBR_YES) return;
-    int done = 0, busy = 0, failed = 0;
-
+    Fm *target = F;
+    int done = 0, busy = 0, failed = 0, loaded = 0, io_error = 0, protected = 0;
+    u32 error_lba = 0;
     int total = F->nsel;
     for (int i = 0; i < F->nsel; i++) {
         const char *nm = F->sel[i];
         if (!strcmp(nm, "..")) continue;
+        int resident = 0;
+        if (!F->cur_drive) for (int j = 0; j < api->kext_count(); j++) {
+            const KextInfo *module = api->kext_get(j);
+            if (module && !module->status && !strcmp(module->name, nm)) resident = 1;
+        }
+        u32 before = api->disk_stat(DS_FAILED);
         api->busy_set("Deleting", nm, total ? i * 256 / total : 0);
+        F = target;
         int r = del_one(nm, row_is_dir(nm));
-        if (r == 0) done++;
+        F = target;
+        if (r == 0) { done++; loaded += resident; }
+        else if (!F->cur_drive && r == FS_EIO) {
+            failed++; io_error = 1; error_lba = api->disk_stat(DS_LAST_LBA);
+            if (api->disk_stat(DS_FAILED) != before && (api->disk_stat(DS_ST1) & 2)) protected = 1;
+        }
         else if (r == -3) busy++;
         else failed++;
     }
     api->busy_end();
+    F = target;
 
     if (F->cur_drive == 0 && F->a_dir[0] &&
         api->fs_dir_count(F->a_dir) == 0 && !api->fs_is_dir(F->a_dir))
@@ -720,7 +734,10 @@ static void del_confirmed(int result, void *ctx)
     sel_clear();
     F->need_refresh = 1;
     if (busy)        strlcpy(F->fm_msg, "folder not empty", sizeof F->fm_msg);
-    else if (failed) strlcpy(F->fm_msg, "delete failed", sizeof F->fm_msg);
+    else if (protected) strlcpy(F->fm_msg, "Floppy is write-protected.", sizeof F->fm_msg);
+    else if (io_error) kfmt(F->fm_msg, sizeof F->fm_msg, "Disk error at sector %u. Check Disk Health.", error_lba);
+    else if (failed) strlcpy(F->fm_msg, "Delete failed: file missing or device unavailable.", sizeof F->fm_msg);
+    else if (loaded) strlcpy(F->fm_msg, "Deleted. Loaded extensions stay active until restart.", sizeof F->fm_msg);
     else if (done)   kfmt(F->fm_msg, sizeof F->fm_msg, "deleted %d item%s",
                           done, done == 1 ? "" : "s");
 }
