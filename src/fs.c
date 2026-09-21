@@ -31,6 +31,19 @@ static int flush_table(void)
     return 1;
 }
 
+static void reload_table(void)
+{
+    FdcResult result;fdc_result_get(&result);
+    fs_cache_clear();mounted=0;fs_ensure();
+    fdc_result_restore(&result);
+}
+
+static int commit_table(void)
+{
+    if(flush_table())return 1;
+    reload_table();return 0;
+}
+
 int fs_ensure(void)
 {
     if (mounted) return mounted > 0;
@@ -153,11 +166,11 @@ static int fs_write_locked(const char *name, const u8 *buf, u32 size)
 
             if (existed) *e = saved;
             else e->used = 0;
-            flush_table();
+            commit_table();
             return -1;
         }
     }
-    return flush_table() ? 0 : -1;
+    return commit_table() ? 0 : -1;
 }
 
 static int fs_delete_locked(const char *name)
@@ -166,10 +179,9 @@ static int fs_delete_locked(const char *name)
     FsEnt *e = find(name);
     if (!e) return -1;
     u32 sector = (u32)((u8 *)&e->used - (u8 *)table) / 512;
-    u8 used = e->used;
     e->used = 0;
     if (fdc_write(FS_TABLE + sector, (u8 *)table + sector * 512)) {
-        e->used = used;
+        reload_table();
         return FS_EIO;
     }
     return 0;
@@ -192,7 +204,7 @@ static int fs_mkdir_locked(const char *name)
     e->nsect = 0;
     e->start = 0;
     e->mtime = rtc_now_dos();
-    return flush_table() ? 0 : -1;
+    return commit_table() ? 0 : -1;
 }
 
 int fs_is_dir(const char *name)
@@ -208,7 +220,7 @@ static int fs_touch_locked(const char *name)
     FsEnt *e = find(name);
     if (!e) return -1;
     e->mtime = rtc_now_dos();
-    return flush_table() ? 0 : FS_EIO;
+    return commit_table() ? 0 : FS_EIO;
 }
 
 static int fs_rename_locked(const char *oldname, const char *newname)
@@ -223,7 +235,7 @@ static int fs_rename_locked(const char *oldname, const char *newname)
     while (newname[l]) l++;
     if (l >= FS_NAMELEN) return -1;
     strlcpy(e->name, newname, FS_NAMELEN);
-    return flush_table() ? 0 : -1;
+    return commit_table() ? 0 : -1;
 }
 
 static int fs_rename_dir_locked(const char *olddir, const char *newdir)
@@ -258,7 +270,7 @@ static int fs_rename_dir_locked(const char *olddir, const char *newdir)
         if (fs_rejoin(table[i].name, olddir, newdir, nn, FS_NAMELEN))
             strlcpy(table[i].name, nn, FS_NAMELEN);
     }
-    return flush_table() ? 0 : -1;
+    return commit_table() ? 0 : -1;
 }
 
 int fs_dir_count(const char *dir)

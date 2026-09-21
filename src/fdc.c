@@ -1,6 +1,7 @@
 /* Reads and writes floppy sectors through DMA channel 2. */
 #include "os.h"
 #include "ioguard.inc"
+#include "floppy.h"
 
 #define DOR  0x3F2
 #define MSR  0x3F4
@@ -172,6 +173,18 @@ static u32 fh_ops, fh_retried, fh_failed;
 static u32 fh_last_ms, fh_worst_ms, fh_last_tries, fh_last_lba;
 static u8  fh_st[3];
 
+void fdc_result_get(FdcResult *r)
+{
+    r->lba=fh_last_lba;r->ms=fh_last_ms;r->tries=fh_last_tries;
+    memcpy(r->st,fh_st,sizeof fh_st);
+}
+
+void fdc_result_restore(const FdcResult *r)
+{
+    fh_last_lba=r->lba;fh_last_ms=r->ms;fh_last_tries=r->tries;
+    memcpy(fh_st,r->st,sizeof fh_st);
+}
+
 u32 fdc_stat(int what)
 {
     switch (what) {
@@ -200,9 +213,9 @@ static void fh_record(u32 lba, int tries, u32 t0, int rc)
     if (rc != 0) fh_failed++;
 }
 
-static int fdc_rw(u32 lba, u8 *buf, int write)
+static int fdc_rw(u32 lba, u8 *buf, int write, u32 count)
 {
-    if (lba >= 2880) return -1;
+    if (lba >= 2880 || !count || count > FLOPPY_TRACK_SECTORS-lba%FLOPPY_TRACK_SECTORS) return -1;
     int c = lba / 36, h = (lba / 18) % 2, s = lba % 18 + 1;
     u8 res[7];
     fh_st[0] = fh_st[1] = fh_st[2] = 0;
@@ -214,8 +227,8 @@ static int fdc_rw(u32 lba, u8 *buf, int write)
         tries = attempt + 1;
         if (attempt) { recalibrate(); }
         if (!seek(c, h)) continue;
-        if (write) memcpy(DMABUF, buf, 512);
-        dma_setup(!write, 512);
+        if (write) memcpy(DMABUF, buf, count*512);
+        dma_setup(!write, count*512);
         fdc_irq_fl = 0;
         fdc_out(write ? 0x45 : 0x46);
         fdc_out((h << 2) | 0);
@@ -233,7 +246,7 @@ static int fdc_rw(u32 lba, u8 *buf, int write)
         if (!ok) { fdc_init(); continue; }
         fh_st[0] = res[0]; fh_st[1] = res[1]; fh_st[2] = res[2];
         if ((res[0] & 0xC0) == 0) {
-            if (!write) memcpy(buf, DMABUF, 512);
+            if (!write) memcpy(buf, DMABUF, count*512);
             last_use = ticks;
             fh_record(lba, tries, t0, 0);
             app_note_io();
@@ -246,15 +259,23 @@ static int fdc_rw(u32 lba, u8 *buf, int write)
 
 static Mutex fdc_mutex=MUTEX_INIT;
 
-static int fdc_guarded(u32 lba, u8 *buf, int write)
+static int fdc_guarded(u32 lba, u8 *buf, int write, u32 count)
 {
+    if(!buf||lba>=2880||!count||count>2880-lba)return -1;
     if(fdc_mutex.held&&fdc_mutex.owner==thr_self)return -1;
     mtx_lock(&fdc_mutex);
-    if(write)fs_cache_invalidate(lba);
-    int rc = fdc_rw(lba, buf, write);
+    int rc=0;
+    while(count){
+        u32 n=FLOPPY_TRACK_SECTORS-lba%FLOPPY_TRACK_SECTORS;if(n>count)n=count;
+        if(write)for(u32 i=0;i<n;i++)fs_cache_invalidate(lba+i);
+        rc=fdc_rw(lba,buf,write,n);if(rc)break;
+        lba+=n;buf+=n*512;count-=n;
+    }
     mtx_unlock(&fdc_mutex);
     return rc;
 }
 
-int fdc_read(u32 lba, u8 *buf)        { return fdc_guarded(lba, buf, 0); }
-int fdc_write(u32 lba, const u8 *buf) { return fdc_guarded(lba, (u8 *)buf, 1); }
+int fdc_read(u32 lba, u8 *buf)        { return fdc_guarded(lba, buf, 0, 1); }
+int fdc_write(u32 lba, const u8 *buf) { return fdc_guarded(lba, (u8 *)buf, 1, 1); }
+int fdc_read_many(u32 lba,u8 *buf,u32 count){return fdc_guarded(lba,buf,0,count);}
+int fdc_write_many(u32 lba,const u8 *buf,u32 count){return fdc_guarded(lba,(u8 *)buf,1,count);}

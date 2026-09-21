@@ -2,6 +2,7 @@
 #include "os.h"
 #include "kextspace.inc"
 #include "gfxfault.inc"
+#include "floppy.h"
 
 #define MAX_SECT 32
 
@@ -133,13 +134,21 @@ static int sym_find(const Ehdr *eh, const Shdr *sh, const u8 *img, u32 len,
     for (int i = 0; i < eh->shnum; i++)
         if (sh[i].type == SHT_SYMTAB) { symi = i; break; }
     if (symi < 0 || sh[symi].entsize != sizeof(Sym) ||
-        sh[symi].offset + sh[symi].size > len)
+        sh[symi].size % sizeof(Sym) || sh[symi].offset > len ||
+        sh[symi].size > len-sh[symi].offset)
         return -1;
     const Sym *syms = (const Sym *)(img + sh[symi].offset);
     u32 nsyms = sh[symi].size / sizeof(Sym);
     u32 stri = sh[symi].link;
-    if (stri >= eh->shnum || sh[stri].offset + sh[stri].size > len) return -1;
+    if (nsyms > 512 || stri >= eh->shnum || sh[stri].type != 3 ||
+        sh[stri].offset > len || sh[stri].size > len-sh[stri].offset) return -1;
     const char *strs = (const char *)(img + sh[stri].offset);
+    for(u32 i=0;i<nsyms;i++){
+        u32 at=syms[i].name;
+        if(at>=sh[stri].size)return -1;
+        while(at<sh[stri].size&&strs[at])at++;
+        if(at==sh[stri].size)return -1;
+    }
     if (out_syms) { *out_syms = syms; *out_n = nsyms; *out_strs = strs; }
     for (u32 i = 0; i < nsyms; i++)
         if (syms[i].shndx != SHN_UNDEF && !strcmp(strs + syms[i].name, want))
@@ -158,8 +167,11 @@ static int elf_sanity(const u8 *img, u32 len, const Ehdr **out_eh,
         return 40;
     if (eh->shnum == 0 || eh->shnum > MAX_SECT ||
         eh->shentsize != sizeof(Shdr) ||
-        eh->shoff + (u32)eh->shnum * sizeof(Shdr) > len)
+        eh->shoff > len || (u32)eh->shnum > (len-eh->shoff)/sizeof(Shdr))
         return 40;
+    const Shdr *sh=(const Shdr *)(img+eh->shoff);
+    for(u32 i=0;i<eh->shnum;i++)if(sh[i].type!=SHT_NOBITS&&
+        (sh[i].offset>len||sh[i].size>len-sh[i].offset))return 40;
     *out_eh = eh;
     *out_sh = (const Shdr *)(img + eh->shoff);
     return 0;
@@ -176,11 +188,13 @@ static int peek_header(const u8 *img, u32 len, KextHeader *out)
     const Sym *s = &syms[i];
     if (s->shndx >= eh->shnum) return 40;
     const Shdr *sec = &sh[s->shndx];
-    if (sec->type == SHT_NOBITS ||
-        sec->offset + s->value + sizeof(KextHeader) > len)
+    if (sec->type == SHT_NOBITS || s->value>sec->size ||
+        sizeof(KextHeader)>sec->size-s->value)
         return 40;
     memcpy(out, img + sec->offset + s->value, sizeof *out);
     if (out->magic != KEXT_MAGIC) return 40;
+    int named=0;for(u32 j=0;j<sizeof out->name;j++)if(!out->name[j]){named=1;break;}
+    if(!named)return 40;
     if (out->api_version > KAPI_VERSION) return 43;
     if (out->kind != KEXT_KIND_KERNEL && out->kind != KEXT_KIND_APP) return 40;
     return 0;
@@ -273,7 +287,7 @@ static int elf_load(const u8 *img, u32 len, u32 *out_base, u32 *out_size,
         if (sh[i].type == SHT_NOBITS)
             memset((void *)dst, 0, sh[i].size);
         else {
-            if (sh[i].offset + sh[i].size > len) return 40;
+            if (sh[i].offset > len || sh[i].size > len-sh[i].offset) return 40;
             memcpy((void *)dst, img + sh[i].offset, sh[i].size);
         }
     }
@@ -290,7 +304,10 @@ static int elf_load(const u8 *img, u32 len, u32 *out_base, u32 *out_size,
             if (i && strs[s->name])
                 return 41;
             symaddr[i] = 0;
-        } else if (s->shndx < eh->shnum) symaddr[i] = shaddr[s->shndx] + s->value;
+        } else if (s->shndx < eh->shnum) {
+            if(s->value>sh[s->shndx].size||s->size>sh[s->shndx].size-s->value)return 40;
+            symaddr[i] = shaddr[s->shndx] + s->value;
+        }
         else return 41;
     }
 
@@ -298,16 +315,15 @@ static int elf_load(const u8 *img, u32 len, u32 *out_base, u32 *out_size,
         if (sh[i].type != SHT_REL) continue;
         u32 target = sh[i].info;
         if (target >= eh->shnum || !shaddr[target]) continue;
-        if (sh[i].offset + sh[i].size > len || sh[i].entsize != sizeof(Rel))
+        if (sh[i].offset > len || sh[i].size > len-sh[i].offset ||
+            sh[i].entsize != sizeof(Rel) || sh[i].size % sizeof(Rel))
             return 40;
         const Rel *r2 = (const Rel *)(img + sh[i].offset);
         for (u32 n = sh[i].size / sizeof(Rel); n; n--, r2++) {
             u32 sym = r2->info >> 8, type = r2->info & 0xFF;
             if (sym >= nsyms) return 40;
+            if(r2->offset>sh[target].size||sh[target].size-r2->offset<4)return 40;
             u32 *where = (u32 *)(shaddr[target] + r2->offset);
-            if ((u32)where < shaddr[target] ||
-                (u32)where + 4 > shaddr[target] + sh[target].size)
-                return 40;
             if (type == R_386_32)        *where += symaddr[sym];
             else if (type == R_386_PC32) *where += symaddr[sym] - (u32)where;
             else return 41;
@@ -317,6 +333,8 @@ static int elf_load(const u8 *img, u32 len, u32 *out_base, u32 *out_size,
     for (u32 i = 0; i < nsyms; i++)
         if (syms[i].shndx != SHN_UNDEF &&
             !strcmp(strs + syms[i].name, "kext_entry")) {
+            if(syms[i].shndx>=eh->shnum||!shaddr[syms[i].shndx]||
+               !(sh[syms[i].shndx].flags&4)||syms[i].value>=sh[syms[i].shndx].size)return 40;
             *out_entry = (int (*)(const Kapi *))symaddr[i];
             *out_base = base;
             *out_size = p - base;
@@ -838,6 +856,8 @@ int register_service(const char *name, const void *ops)
 const void *service_get(const char *name)
 {
     if (!name || (graphics_bit(name) & gfx_disabled)) return 0;
+    static const FloppyOps floppy={FLOPPY_ABI,fdc_read_many};
+    if(!strcmp(name,"disk.floppy"))return &floppy;
     for (int i = 0; i < NSERV; i++)
         if (servs[i].ops && !strcmp(servs[i].name, name)) return servs[i].ops;
     return 0;

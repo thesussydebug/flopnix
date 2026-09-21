@@ -14,7 +14,7 @@ CFLAGS="$CFLAGS -DOS_BUILD_DATE=\"$(date +%Y-%m-%d)\""
 mkdir -p out built/kexts
 
 osver=$(sed -n 's/.*#define OS_VER  *"\([^"]*\)".*/\1/p' src/os.h)
-if ! [[ "$osver" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+if ! [[ "$osver" =~ ^[0-9]+\.[0-9]+\.[0-9]+(_[0-9]+)?$ ]]; then
     echo "src/os.h must define a valid OS_VER" >&2
     exit 1
 fi
@@ -50,7 +50,7 @@ echo "== compiling"
 
 for f in emergency util hw cpu mtrr paging ring3 fdc fs uhci services uisvc config gfx gui apps kext heap kupdate fault thread cpuacct kernel; do
     SZ=
-    case $f in emergency|cpu|mtrr|ring3|config|kupdate|fault|kext|uisvc|services) SZ=-Oz;; fs|uhci|heap|apps|kernel|thread|gui) SZ=-Os;; esac
+    case $f in emergency|cpu|mtrr|ring3|config|kupdate|fault|kext|uisvc|services) SZ=-Oz;; fdc|fs|uhci|heap|apps|kernel|thread|gui) SZ=-Os;; esac
     clang $CFLAGS $SZ -c src/$f.c -o out/$f.o
 done
 

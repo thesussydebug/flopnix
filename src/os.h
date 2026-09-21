@@ -9,7 +9,7 @@ typedef __builtin_va_list va_list;
 #define va_arg(v, t)   __builtin_va_arg(v, t)
 
 #define OS_NAME    "FLOPNIX"
-#define OS_VER     "0.8.5"
+#define OS_VER     "0.8.5_1"
 #ifndef OS_BUILD_DATE
 #define OS_BUILD_DATE "unknown"
 #endif
@@ -205,6 +205,9 @@ void paging_map_kext(u32 phys, u32 len);
 
 void paging_arena_protect(u32 lo, u32 hi, int writable);
 u32  fdc_stat(int what);
+typedef struct {u32 lba,ms,tries;u8 st[3];} FdcResult;
+void fdc_result_get(FdcResult *result);
+void fdc_result_restore(const FdcResult *result);
 const char *shell_cwd_get(void);
 int  shell_cwd_set(const char *dir);
 void paging_unmap_kext(void);
@@ -376,6 +379,8 @@ extern int fdc_ok;
 void fdc_init(void);
 int  fdc_read(u32 lba, u8 *buf);
 int  fdc_write(u32 lba, const u8 *buf);
+int  fdc_read_many(u32 lba, u8 *buf, u32 count);
+int  fdc_write_many(u32 lba, const u8 *buf, u32 count);
 void fdc_tick(void);
 
 int   fs_ensure(void);

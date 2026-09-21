@@ -33,8 +33,3 @@ __pycache__/
 !/tools/textinputtests.c
 !/tools/archivelimittests.c
 tools/textinputtests.c
-!/tools/test_updatehost.py
-!/tools/update_diag_tests.c
-!/tools/update_guest_test.py
-!/tools/dynamic_tests.c
-!/kexts/updatetest.c

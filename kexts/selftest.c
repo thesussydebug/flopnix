@@ -1,5 +1,6 @@
 /* Runs the shared code tests inside the guest OS. */
 #include "kapi.h"
+#include "update_core.inc"
 #include "fbspan.inc"
 #include "emergency_core.inc"
 #include "fhlayout.inc"
@@ -138,6 +139,35 @@ static void run(const char *name, void (*fn)(void))
     fn();
     ser_puts(g_tfail ? "not ok " : "ok   ");
     ser_puts(name); ser_puts("\n");
+}
+
+static void t_update(void)
+{
+    const u8 *text=(const u8 *)"123456789";
+    CHECK(ku_crc_feed(0,text,9)==0xcbf43926u);
+    CHECK(ku_crc_feed(0,text,0)==0);
+    for(u32 i=0;i<=9;i++)CHECK(ku_crc_feed(ku_crc_feed(0,text,i),text+i,9-i)==0xcbf43926u);
+    u8 key[16],other[16];char code[33];
+    CHECK(ku_pair_key("AAAQEAYE",key));ku_pair_text(key,code);CHECK(STREQ(code,"AAAQEAYE"));
+    CHECK(ku_pair_key("aaaq-eaye",other)&&ku_equal(key,other,16));
+    CHECK(!ku_pair_key("AAAQEAY0",other)&&!ku_pair_key("AAAQEAY",other));
+    u32 words[6]={0x32555846,9,4096,KAPI_VERSION,0xcbf43926,0};
+    u8 *manifest=(u8 *)words;words[5]=ku_pair_check(key,manifest);KuRelease r;
+    CHECK(ku_manifest(manifest,sizeof words,key,0,0,KAPI_VERSION,&r));
+    CHECK(r.sequence==9&&r.size==4096&&r.crc==0xcbf43926u);
+    CHECK(!ku_manifest(manifest,sizeof words-1,key,0,0,KAPI_VERSION,&r));
+    CHECK(!ku_manifest(manifest,sizeof words,key,10,0,KAPI_VERSION,&r));
+    CHECK(!ku_manifest(manifest,sizeof words,key,9,1,KAPI_VERSION,&r));
+    CHECK(ku_manifest(manifest,sizeof words,key,9,words[4],KAPI_VERSION,&r));
+    CHECK(!ku_manifest(manifest,sizeof words,key,0,0,KAPI_VERSION+1,&r));
+    for(u32 i=0;i<sizeof words;i++){manifest[i]^=1;CHECK(!ku_manifest(manifest,sizeof words,key,0,0,KAPI_VERSION,&r));manifest[i]^=1;}
+    key[0]^=1;CHECK(!ku_manifest(manifest,sizeof words,key,0,0,KAPI_VERSION,&r));key[0]^=1;
+    u8 image[4096];api->memset(image,0,sizeof image);image[0]=0xeb;image[6]=8;u16 sum=0;
+    for(u32 i=0;i<sizeof image;i+=2)sum=(u16)(((sum<<1)|(sum>>15))+(image[i]|image[i+1]<<8));
+    image[4]=(u8)sum;image[5]=(u8)(sum>>8);r.size=sizeof image;r.crc=ku_crc_feed(0,image,sizeof image);
+    CHECK(ku_image(image,sizeof image,&r));CHECK(r.crc==api->crc32(image,sizeof image));
+    CHECK(!ku_image(image,sizeof image-1,&r));image[100]^=1;CHECK(!ku_image(image,sizeof image,&r));image[100]^=1;
+    r.crc^=1;CHECK(!ku_image(image,sizeof image,&r));
 }
 
 static void t_crc32(void)
@@ -5104,6 +5134,7 @@ int kext_entry(const Kapi *k)
 #endif
 
     run("crc32", t_crc32);
+    run("update", t_update);
     run("b64_encode", t_b64);
     run("b64_roundtrip", t_b64_roundtrip);
     run("path_base/ext", t_path);

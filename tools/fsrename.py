@@ -1,22 +1,21 @@
 'Rename a FLOPFS directory entry in an image.'
 
-import struct, sys
-
-SUPER, TABLE, TSECT, DATA, END = 288, 289, 10, 299, 2880
-ENTSZ, NFILES = 40, 128
+import sys
+from fscp import TABLE, ENTSZ, load, ensure_fs, entries, encode_name
 
 img, old, new = sys.argv[1], sys.argv[2], sys.argv[3]
-d = bytearray(open(img, "rb").read())
-if len(new.encode()) > 23:
-    sys.exit("new name too long (max 23 chars)")
-
-for i in range(NFILES):
-    off = TABLE * 512 + i * ENTSZ
-    name = bytes(d[off:off + 24]).split(b"\0")[0].decode("latin1")
-    used = d[off + 36]
-    if used and name == old:
-        d[off:off + 24] = new.encode().ljust(24, b"\0")
-        open(img, "wb").write(d)
+encoded = encode_name(new)
+d = load(img)
+ensure_fs(d)
+live = [e for e in entries(d) if e['used']]
+if old != new and any(e['name'] == new for e in live):
+    sys.exit("destination already exists: %s" % new)
+for e in live:
+    if e['name'] == old:
+        off = TABLE * 512 + e['i'] * ENTSZ
+        d[off:off + 24] = encoded.ljust(24, b"\0")
+        with open(img, "wb") as target:
+            target.write(d)
         print("renamed %s -> %s" % (old, new))
         break
 else:

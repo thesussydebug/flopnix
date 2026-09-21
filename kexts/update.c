@@ -1,6 +1,7 @@
 #include "kapi.h"
 #include "gdi.h"
 #include "nethttp.h"
+#include "floppy.h"
 #pragma clang diagnostic push
 #pragma clang diagnostic ignored "-Wunused-function"
 #include "textweb_core.inc"
@@ -10,7 +11,7 @@
 #include "ui.inc"
 static const Kapi *api;
 #include "appfield.h"
-typedef struct {u32 magic;char address[160],code[33];u8 pad[3];u32 floor;u8 digest[32];u32 crc;} UpdatePrefs;
+typedef struct {u32 magic;char address[160],code[33];u8 pad[3];u32 floor,checksum;u8 reserved[28];u32 crc;} UpdatePrefs;
 static UpdatePrefs prefs;
 static char address[160],code[65],status[100];
 static AppField fields[2];
@@ -53,16 +54,16 @@ static void save_report(void)
 }
 static int save_prefs(void)
 {
-    prefs.magic=0x31505546;prefs.crc=api->crc32(&prefs,sizeof prefs-4);
+    prefs.magic=0x32505546;prefs.crc=api->crc32(&prefs,sizeof prefs-4);
     if(api->fs_write("sys/update.cfg",(const u8 *)&prefs,sizeof prefs)){say("Could not save update settings to A:.");return 0;}return 1;
 }
 static int settings(void)
 {
     TwUrl u;u8 key[16];char canonical[33];
     if(!tw_url(address,&u)||!u.http||api->strcmp(u.path,"/")){say("Use http://host:port/ without a path.");return 0;}
-    if(!ku_pair_key(code,key)){say("Enter the grouped pairing code or original 32-digit key.");return 0;}
+    if(!ku_pair_key(code,key)){say("Enter the 8-character pairing code shown by Update Host.");return 0;}
     ku_hex(key,16,canonical);
-    if(api->strcmp(prefs.code,canonical)){prefs.floor=0;api->memset(prefs.digest,0,32);}
+    if(api->strcmp(prefs.code,canonical)){prefs.floor=0;prefs.checksum=0;}
     api->strlcpy(prefs.address,address,sizeof prefs.address);api->strlcpy(prefs.code,canonical,sizeof prefs.code);
     return save_prefs();
 }
@@ -126,20 +127,28 @@ static void diagnose(void)
     say("Testing host access without a pairing key. Esc cancels.");
     Download d={0};d.limit=KU_MANIFEST;
     if(fetch("/manifest.bin",&d)){
-        if(d.len==KU_MANIFEST&&ku_equal(d.buf.data,(const u8 *)"FXU1",4))say("Host reachable. Use Check to authenticate before installing.");
+        if(d.len==KU_MANIFEST&&ku_equal(d.buf.data,(const u8 *)"FXU2",4))say("Host reachable. Use Check to verify before installing.");
         else say("HTTP works, but this is not a FLOPNIX update manifest.");
     }
     db_free(api,&d.buf);busy=0;api->gui_dirty();
 }
 static int current_matches(void)
 {
-    u8 sector[512],hash[32];KuSha sha;ku_sha_init(&sha);
-    for(u32 i=0;i<release.size/512;i++){
-        if(closing||api->esc_pending()||api->disk_read(i+1,sector))return -1;
-        if(!i&&(u32)(sector[6]|sector[7]<<8)!=release.size/512)return 0;
-        ku_sha_feed(&sha,sector,512);
+    u8 sector[512];u32 crc=0;
+    const FloppyOps *disk=api->service_get("disk.floppy");
+    u8 *batch=disk&&disk->abi==FLOPPY_ABI?api->kmalloc(FLOPPY_TRACK_SECTORS*512):0;
+    u8 *buf=batch?batch:sector;u32 count=batch?FLOPPY_TRACK_SECTORS:1;int match=-1;
+    if(batch)api->mem_track("Kernel comparison",batch,FLOPPY_TRACK_SECTORS*512);
+    for(u32 i=0;i<release.size/512;){
+        u32 n=release.size/512-i,track=FLOPPY_TRACK_SECTORS-(i+1)%FLOPPY_TRACK_SECTORS;
+        if(n>count)n=count;if(n>track)n=track;
+        if(closing||api->esc_pending()||(batch?disk->read(i+1,buf,n):api->disk_read(i+1,buf)))goto done;
+        if(!i&&(u32)(buf[6]|buf[7]<<8)!=release.size/512){match=0;goto done;}
+        crc=ku_crc_feed(crc,buf,n*512);i+=n;
     }
-    ku_sha_done(&sha,hash);return ku_equal(hash,release.digest,32);
+    match=crc==release.crc;
+done:
+    if(batch)api->kfree(batch);return match;
 }
 static void check(void)
 {
@@ -148,16 +157,15 @@ static void check(void)
     Download d={0};d.limit=KU_MANIFEST;
     if(fetch("/manifest.bin",&d)){
         u8 key[16];ku_pair_key(code,key);
-        if(!ku_manifest(d.buf.data,d.len,key,prefs.floor,prefs.digest,api->version,&release)){
-            if(d.len!=KU_MANIFEST||!ku_equal(d.buf.data,(const u8 *)"FXU1",4))say("Invalid manifest format or size. Check the selected host.");
-            else {u8 mac[32];ku_hmac(key,16,d.buf.data,48,mac);
-                if(!ku_equal(mac,(u8 *)d.buf.data+48,32))say("Pairing code mismatch or altered manifest. Recheck the code.");
-                else say("Authenticated manifest rejected: older or incompatible release.");}
+        if(!ku_manifest(d.buf.data,d.len,key,prefs.floor,prefs.checksum,api->version,&release)){
+            if(d.len!=KU_MANIFEST||!ku_equal(d.buf.data,(const u8 *)"FXU2",4))say("Invalid manifest format or size. Update the selected host.");
+            else {if(ku_pair_check(key,d.buf.data)!=ku_u32((u8 *)d.buf.data+20))say("Pairing code mismatch or damaged manifest. Recheck the code.");
+                else say("Manifest rejected: older or incompatible release.");}
         }
         else {int match=current_matches();installed=match==1;ready=match==0&&!closing&&!api->esc_pending();
             if(match<0)say("Could not read the installed kernel, or check cancelled.");
             else if(installed)say("This kernel is already installed.");
-            else if(ready)api->kfmt(status,sizeof status,"Authenticated release %u (%u KiB). Ready to install.",release.sequence,release.size/1024);
+            else if(ready)api->kfmt(status,sizeof status,"Release %u (%u KiB). Ready to install.",release.sequence,release.size/1024);
             else say("Update cancelled.");}
     }
     db_free(api,&d.buf);busy=0;api->gui_dirty();
@@ -167,13 +175,13 @@ static void install_reply(int result,void *ctx)
     (void)ctx;if(result!=MBR_YES||busy||closing)return;
     if(!ready)check();if(!ready||closing)return;
     busy=1;say("Downloading the kernel... Esc cancels.");
-    char path[72],hex[65];ku_hex(release.digest,32,hex);api->kfmt(path,sizeof path,"/%s.ku",hex);
+    char path[16];api->kfmt(path,sizeof path,"/%08x.ku",release.crc);
     Download d={0};d.limit=release.size;
     if(!db_reserve(api,&d.buf,release.size,1,release.size,KU_MAX,"Kernel download")){say("Not enough memory for this kernel. Close apps and retry.");busy=0;return;}
     if(fetch(path,&d)){
         if(!ku_image(d.buf.data,d.len,&release))say("Kernel verification failed. Nothing was installed.");
         else {
-            prefs.floor=release.sequence;api->memcpy(prefs.digest,release.digest,32);
+            prefs.floor=release.sequence;prefs.checksum=release.crc;
             if(save_prefs()&&!closing&&!api->esc_pending()){
                 char err[100];say("Installing. Keep the floppy inserted and power on.");
                 api->buffer_lock();int r=api->kernel_update_data(d.buf.data,d.len,err,sizeof err);api->buffer_unlock();
@@ -191,9 +199,10 @@ static void opened(int inst)
 {
     (void)inst;closing=ready=installed=0;report_count=report_top=0;api->memset(&prefs,0,sizeof prefs);
     int n=api->fs_read("sys/update.cfg",(u8 *)&prefs,sizeof prefs);
-    if(n!=sizeof prefs||prefs.magic!=0x31505546||prefs.crc!=api->crc32(&prefs,sizeof prefs-4)||prefs.address[159]||prefs.code[32]){
+    if(n!=sizeof prefs||(prefs.magic!=0x31505546&&prefs.magic!=0x32505546)||prefs.crc!=api->crc32(&prefs,sizeof prefs-4)||prefs.address[159]||prefs.code[32]){
         api->memset(&prefs,0,sizeof prefs);api->strlcpy(prefs.address,"http://10.0.2.2:8080/",sizeof prefs.address);
     }
+    if(prefs.magic==0x31505546){prefs.floor=0;prefs.checksum=0;api->memset(prefs.reserved,0,sizeof prefs.reserved);}
     char display[33];u8 key[16];
     if(ku_pair_key(prefs.code,key))ku_pair_text(key,display);else display[0]=0;
     af_set(&fields[0],address,sizeof address,prefs.address);af_set(&fields[1],code,sizeof code,display);

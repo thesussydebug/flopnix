@@ -7,6 +7,7 @@ import shutil
 import struct
 import subprocess
 import tempfile
+import zlib
 from fscp import entries
 
 root = Path(__file__).resolve().parents[1]
@@ -18,7 +19,7 @@ assert actual == expected, ('built/kexts', actual ^ expected)
 image = (root/'built/flopnix.img').read_bytes()
 kernel = (root/'built/flopnix.ku').read_bytes()
 meta = json.loads((root/'built/flopnix-update.json').read_text())
-assert meta['size'] == len(kernel) and meta['sha256'] == hashlib.sha256(kernel).hexdigest()
+assert meta['format'] == 2 and meta['size'] == len(kernel) and meta['crc32'] == f'{zlib.crc32(kernel):08x}'
 assert meta['api'] == int(re.search(r'#define KAPI_VERSION\s+(\d+)', (root/'src/kapi.h').read_text()).group(1))
 assert len(image) == 1474560
 assert image[:512] == (root/'out/boot.bin').read_bytes()

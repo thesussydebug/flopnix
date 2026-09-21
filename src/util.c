@@ -85,6 +85,7 @@ void klog(const char *s)
     int n = (int)strlen(s);
 
     if (n > (int)sizeof klog_buf / 2 - 1) n = sizeof klog_buf / 2 - 1;
+    u32 flags=irq_save();
     if (klog_len + n + 1 > (int)sizeof klog_buf) {
         int keep = sizeof klog_buf / 2;
         memmove(klog_buf, klog_buf + klog_len - keep, keep);
@@ -93,14 +94,17 @@ void klog(const char *s)
     memcpy(klog_buf + klog_len, s, n);
     klog_len += n;
     klog_buf[klog_len] = 0;
+    irq_restore(flags);
 }
 
 int klog_read(char *dst, int cap)
 {
+    if(!dst||cap<=0)return 0;
+    u32 flags=irq_save();
     int n = klog_len < cap - 1 ? klog_len : cap - 1;
-    if (n < 0) return 0;
     memcpy(dst, klog_buf, n);
     dst[n] = 0;
+    irq_restore(flags);
     return n;
 }
 
@@ -115,9 +119,12 @@ u32 trace_held(void)    { return (u32)trace_len; }
 
 int trace_slice_read(u32 off, char *dst, u32 count)
 {
-    if (off >= (u32)trace_len) return 0;
-    if (off + count > (u32)trace_len) count = (u32)trace_len - off;
+    if(!dst)return 0;
+    u32 flags=irq_save();
+    if (off >= (u32)trace_len) {irq_restore(flags);return 0;}
+    if (count > (u32)trace_len-off) count = (u32)trace_len - off;
     memcpy(dst, trace_buf + off, count);
+    irq_restore(flags);
     return (int)count;
 }
 
@@ -127,6 +134,7 @@ void ktrace(const char *msg)
     kfmt(line, sizeof line, "%us %s\n", ticks / 100, msg);
     int n = (int)strlen(line);
     if (n > (int)sizeof trace_buf / 2) n = sizeof trace_buf / 2;
+    u32 flags=irq_save();
     if (trace_len + n + 1 > (int)sizeof trace_buf) {
         int keep = sizeof trace_buf / 2;
         memmove(trace_buf, trace_buf + trace_len - keep, keep);
@@ -137,14 +145,17 @@ void ktrace(const char *msg)
     trace_seq += (u32)n;
     trace_buf[trace_len] = 0;
     trace_dirty = 1;
+    irq_restore(flags);
 }
 
 int trace_read(char *dst, int cap)
 {
+    if(!dst||cap<=0)return 0;
+    u32 flags=irq_save();
     int n = trace_len < cap - 1 ? trace_len : cap - 1;
-    if (n < 0) return 0;
     memcpy(dst, trace_buf, n);
     dst[n] = 0;
+    irq_restore(flags);
     return n;
 }
 
