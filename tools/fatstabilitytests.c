@@ -26,21 +26,22 @@ static void copy_string(char *d,const char *s,int n){if(n)snprintf(d,n,"%s",s);}
 static u8 disk[SECTORS*512], payload[1024], result[1024];
 static u32 generation=1, fail_read=~0u, fail_write=~0u;
 static int checks, failures, outside, writes, commit_error;
+static u32 largest_read, largest_write;
 static u32 volume_sectors=8192;
 #define CHECK(x) do{checks++;if(!(x)){failures++;printf("FAIL %d: %s\n",__LINE__,#x);}}while(0)
 static int present(void){return 1;}
 static u32 gen(void){return generation;}
 static u32 capacity(void){return volume_sectors;}
 static u32 date(void){return 0;}
-static int read_disk(u32 l,u32 n,u8 *b){if(l>=volume_sectors||n>volume_sectors-l){outside++;return -1;}if(l<=fail_read&&fail_read-l<n)return -1;memcpy(b,disk+l*512,n*512);return 0;}
-static int write_disk(u32 l,u32 n,const u8 *b){if(l>=volume_sectors||n>volume_sectors-l){outside++;return -1;}int bad=l<=fail_write&&fail_write-l<n;if(bad&&!commit_error)return -1;writes++;memcpy(disk+l*512,b,n*512);return bad?-1:0;}
+static int read_disk(u32 l,u32 n,u8 *b){if(n>largest_read)largest_read=n;if(l>=volume_sectors||n>volume_sectors-l){outside++;return -1;}if(l<=fail_read&&fail_read-l<n)return -1;memcpy(b,disk+l*512,n*512);return 0;}
+static int write_disk(u32 l,u32 n,const u8 *b){if(n>largest_write)largest_write=n;if(l>=volume_sectors||n>volume_sectors-l){outside++;return -1;}int bad=l<=fail_write&&fail_write-l<n;if(bad&&!commit_error)return -1;writes++;memcpy(disk+l*512,b,n*512);return bad?-1:0;}
 static Kapi mock={.strlen=length,.strlcpy=copy_string,.strcmp=strcmp,.strcasecmp=_stricmp,
     .memcpy=copy_bytes,.memset=fill_bytes,.rtc_now_dos=date,.usb_present=present,
     .usb_gen=gen,.usb_read=read_disk,.usb_write=write_disk,.usb_capacity_sectors=capacity};
 static void put16(u8 *p,u32 v){p[0]=v;p[1]=v>>8;}
 static void put32(u8 *p,u32 v){put16(p,v);put16(p+2,v>>16);}
 static void reset(void){
-    memset(disk,0,sizeof disk);generation++;fail_read=fail_write=~0u;outside=writes=commit_error=0;volume_sectors=8192;
+    memset(disk,0,sizeof disk);generation++;fail_read=fail_write=~0u;outside=writes=commit_error=0;largest_read=largest_write=0;volume_sectors=8192;
     disk[0]=0xeb;put16(disk+11,512);disk[13]=1;put16(disk+14,1);disk[16]=2;
     put16(disk+17,128);put16(disk+19,volume_sectors);put16(disk+22,32);disk[510]=0x55;disk[511]=0xaa;
     for(int f=0;f<2;f++){put16(disk+(1+f*32)*512,0xfff8);put16(disk+(1+f*32)*512+2,0xffff);}
@@ -118,5 +119,77 @@ int main(int argc,char **argv){
         CHECK(fat_rename("/keep.txt",bad_names[i])<0&&writes==saved_writes);
         CHECK(fat_read("/keep.txt",result,512)==512&&!memcmp(payload,result,512));
     }
+    reset();CHECK(fat_write("/NET0001.PCAP",payload,512)==0);
+    CHECK(entry()[11]==15&&entry()[0]==0x41&&entry()[13]==lfn_checksum(entry()+32));
+    CHECK(fat_read("/NET0001.PCAP",result,512)==512&&!memcmp(payload,result,512));
+    CHECK(fat_append("/NET0001.PCAP",payload+512,512)==0);
+    CHECK(fat_read("/NET0001.PCAP",result,1024)==1024&&!memcmp(payload,result,1024));
+    CHECK(fat_delete("/NET0001.PCAP")==0&&fat_exists("/NET0001.PCAP")==0);
+    reset();CHECK(fat_write("/NET0001.PCA",payload,512)==0);prior=writes;
+    CHECK(fat_write("/NET0001.PCAP",payload+512,512)<0&&writes==prior);
+    CHECK(fat_read("/NET0001.PCA",result,512)==512&&!memcmp(payload,result,512));
+    for(int entries=14;entries<=15;entries++){
+        reset();char name[16];
+        for(int i=0;i<entries;i++){snprintf(name,sizeof name,"/F%02d.TXT",i);CHECK(fat_write(name,payload,1)==0);}
+        memset(entry()+(entries+2)*32,0x77,32);invalidate();
+        CHECK(fat_write("/NET0001.PCAP",payload,512)==0);
+        CHECK(fat_read("/NET0001.PCAP",result,512)==512&&!memcmp(payload,result,512));
+        CHECK(entry()[(entries+2)*32]==0);
+        CHECK(fat_write("/AFTER.TXT",payload,1)==0);
+        CHECK(fat_read("/NET0001.PCAP",result,512)==512);
+    }
+    reset();fail_write=65;CHECK(fat_write("/NET0001.PCAP",payload,512)<0);
+    fail_write=~0u;invalidate();CHECK(fat_exists("/NET0001.PCAP")==0);
+    reset();fail_read=65;CHECK(fat_write("/NET0001.PCAP",payload,512)<0&&writes==0);
+    reset();volume_sectors=32768;put16(disk+19,volume_sectors);disk[13]=4;
+    CHECK(fat_write("/BATCH.BIN",payload,1024)==0);
+    largest_read=0;CHECK(fat_read("/BATCH.BIN",result,1024)==1024&&!memcmp(payload,result,1024));
+    CHECK(largest_read==2);
+    memset(result,0xcc,sizeof result);CHECK(fat_read("/BATCH.BIN",result,513)==513&&!memcmp(payload,result,513));CHECK(result[513]==0xcc);
+    fail_read=clus_lba(rd16(entry()+26))+1;invalidate();CHECK(fat_read("/BATCH.BIN",result,1024)<0);
+    static u8 bulk[12289], got[12290];
+    for(u32 i=0;i<sizeof bulk;i++)bulk[i]=(u8)(i*29+7);
+    static const u32 prefixes[]={0,1,511,512,513,2047,2048,2049};
+    for(u32 i=0;i<sizeof prefixes/sizeof prefixes[0];i++){
+        reset();volume_sectors=32768;put16(disk+19,volume_sectors);disk[13]=4;
+        u32 prefix=prefixes[i],extra=8193;
+        CHECK(fat_write("/APPEND.BIN",bulk,prefix)==0);
+        largest_write=0;CHECK(fat_append("/APPEND.BIN",bulk+prefix,extra)==0);
+        CHECK(largest_write==4&&!outside);
+        memset(got,0xcc,sizeof got);
+        CHECK(fat_read("/APPEND.BIN",got,prefix+extra)==(int)(prefix+extra));
+        CHECK(!memcmp(got,bulk,prefix+extra)&&got[prefix+extra]==0xcc);
+    }
+    reset();volume_sectors=32768;put16(disk+19,volume_sectors);disk[13]=4;
+    CHECK(fat_write("/APPEND.BIN",bulk,513)==0);
+    CHECK(fat_write("/KEEP.BIN",bulk+4096,4096)==0);
+    largest_write=0;CHECK(fat_append("/APPEND.BIN",bulk+513,8193)==0);
+    CHECK(largest_write==4&&!outside);
+    CHECK(fat_read("/APPEND.BIN",got,8706)==8706&&!memcmp(got,bulk,8706));
+    CHECK(fat_read("/KEEP.BIN",got,4096)==4096&&!memcmp(got,bulk+4096,4096));
+    for(int commit=0;commit<2;commit++){
+        reset();volume_sectors=32768;put16(disk+19,volume_sectors);disk[13]=4;
+        CHECK(fat_write("/APPEND.BIN",bulk,513)==0);
+        c=entry_cluster(entry());fail_write=clus_lba(c)+3;commit_error=commit;
+        CHECK(fat_append("/APPEND.BIN",bulk+513,8193)<0);
+        CHECK(cache_lba==~0u&&!outside);
+        fail_write=~0u;CHECK(fat_read("/APPEND.BIN",got,sizeof got)==513&&!memcmp(got,bulk,513));
+    }
+    static u8 burst[524312],burst_read[524313];
+    for(u32 i=0;i<sizeof burst;i++)burst[i]=(u8)(i*31+9);
+    reset();volume_sectors=32768;put16(disk+19,volume_sectors);disk[13]=4;
+    CHECK(fat_write("/NET0001.PCAP",burst,24)==0);
+    largest_write=0;CHECK(fat_append("/NET0001.PCAP",burst+24,524288)==0);
+    CHECK(largest_write==4&&!outside);memset(burst_read,0xcc,sizeof burst_read);
+    CHECK(fat_read("/NET0001.PCAP",burst_read,sizeof burst_read)==sizeof burst);
+    CHECK(!memcmp(burst_read,burst,sizeof burst)&&burst_read[sizeof burst]==0xcc);
+    reset();volume_sectors=SECTORS;put16(disk+19,0);put32(disk+32,SECTORS);put16(disk+14,32);
+    put16(disk+17,0);put16(disk+22,0);put32(disk+36,1024);put32(disk+44,2);
+    for(int f=0;f<2;f++){put32(disk+(32+f*1024)*512,0x0ffffff8);put32(disk+(32+f*1024)*512+4,0x0fffffff);put32(disk+(32+f*1024)*512+8,0x0fffffff);}
+    CHECK(fat_mount()&&fattype==32&&fat_writable());
+    CHECK(fat_write("/NET0001.PCAP",payload,512)==0);
+    CHECK(fat_read("/NET0001.PCAP",result,512)==512&&!memcmp(payload,result,512));
+    CHECK(fat_append("/NET0001.PCAP",payload+512,512)==0);
+    CHECK(fat_read("/NET0001.PCAP",result,1024)==1024&&!memcmp(payload,result,1024));
     printf("FAT stability: %d checks, %d failures\n",checks,failures);return failures?1:0;
 }

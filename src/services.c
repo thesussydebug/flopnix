@@ -1,5 +1,6 @@
 /* Connects kernel calls to loaded extension services. */
 #include "os.h"
+#include "debug.h"
 
 static const FatOps *fops;
 static const NetOps *nops;
@@ -17,6 +18,13 @@ static Mutex fat_mx = MUTEX_INIT;
 #define FATLOCK(call, dflt)      FATLOCKV(int, use_fat(), call, dflt)
 #define FATLOCKT(call, dflt)     FATLOCKV(int, fat_tail_ok(), call, dflt)
 #define FATLOCKV(T, ok, call, dflt)     T _r = (T)(dflt); mtx_lock(&fat_mx); if (ok) _r = (call);     mtx_unlock(&fat_mx); return _r;
+
+#define FATFILE(ok,call,write) FATFILEV(ok,call,write,-1)
+#define FATFILEV(ok,call,write,dflt) \
+    int r=(dflt);mtx_lock(&fat_mx);const char *old=debug_path(1,path); \
+    if(ok)r=(call); \
+    debug_done(1|((write)?2:0),old,r); \
+    mtx_unlock(&fat_mx);return r;
 
 static int use_fat(void)  { return fops != 0; }
 static int use_net(void)  { return nops != 0; }
@@ -188,45 +196,44 @@ u32 fat_free_kb(void)      { FATLOCKV(u32, use_fat(), fops->free_kb(), 0) }
 
 int fat_list(const char *path, FatEnt *out, int max)
 {
-    FATLOCK(fops->list(path, out, max), -1)
+    FATFILE(use_fat(),fops->list(path,out,max),0)
 }
 int fat_read(const char *path, u8 *buf, u32 max)
 {
-    FATLOCK(fops->read(path, buf, max), -1)
+    FATFILE(use_fat(),fops->read(path,buf,max),0)
 }
 int fat_write(const char *path, const u8 *buf, u32 size)
 {
-    FATLOCK(fops->write(path, buf, size), -1)
+    FATFILE(use_fat(),fops->write(path,buf,size),1)
 }
 int fat_delete(const char *path)
 {
-    FATLOCK(fops->del(path), -1)
+    FATFILE(use_fat(),fops->del(path),1)
 }
 
 int fat_append(const char *path, const u8 *buf, u32 size)
 {
-    FATLOCKV(int, use_fat() && fops->abi == FAT_ABI,
-             fops->append(path, buf, size), -1)
+    FATFILE(use_fat()&&fops->abi==FAT_ABI,fops->append(path,buf,size),1)
 }
 
 static int fat_tail_ok(void) { return use_fat() && fops->abi == FAT_ABI; }
 int fat_mkdir(const char *path)
 {
-    FATLOCKT(fops->mkdir(path), -1)
+    FATFILE(fat_tail_ok(),fops->mkdir(path),1)
 }
 int fat_rename(const char *path, const char *newname)
 {
-    FATLOCKT(fops->rename(path, newname), -1)
+    FATFILE(fat_tail_ok(),fops->rename(path,newname),1)
 }
 int fat_can_mkdir(void) { return fat_tail_ok(); }
 int fat_rmdir(const char *path)
 {
-    FATLOCKT(fops->rmdir(path), -1)
+    FATFILE(fat_tail_ok(),fops->rmdir(path),1)
 }
 
 int fat_exists(const char *path)
 {
-    FATLOCKT(fops->exists(path), 0)
+    FATFILEV(fat_tail_ok(),fops->exists(path),0,0)
 }
 
 void net_poll(void)              { if (use_net()) nops->poll(); }

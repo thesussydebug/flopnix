@@ -9,7 +9,7 @@ typedef __builtin_va_list va_list;
 #define va_arg(v, t)   __builtin_va_arg(v, t)
 
 #define OS_NAME    "FLOPNIX"
-#define OS_VER     "0.8.5_1"
+#define OS_VER     "0.8.5_2"
 #ifndef OS_BUILD_DATE
 #define OS_BUILD_DATE "unknown"
 #endif
@@ -186,6 +186,13 @@ void loop_prof_reset(void);
 void busy_set(const char *title, const char *msg, int frac256);
 void busy_end(void);
 #define THR_MAX 8
+u32 thread_guard_mask(void);
+void debug_event(u32 kind,const char *name,u32 a,u32 b,int result);
+const char *debug_path(int usb,const char *path);
+void debug_disk(int usb,int write,u32 lba,u32 count,int result);
+void debug_draw(void);
+void debug_unwind(void);
+int debug_done(int mode,const char *old,int result);
 #include "sched.inc"
 typedef struct { u32 ebx, esi, edi, ebp, esp, eip; } JmpBuf;
 int  fj_set(JmpBuf *b) __attribute__((returns_twice));

@@ -350,6 +350,12 @@ int fat_read(const char *path, u8 *buf, u32 max)
     while (got < want) {
         if (!valid_cluster(clus) || ++visited > total_clus-1) return -1;
         for (u32 s = 0; s < spc && got < want; s++) {
+            u32 full=(want-got)/512;
+            if(full){
+                if(full>spc-s)full=spc-s;
+                if(usb_read(clus_lba(clus)+s,full,buf+got))return -1;
+                got+=full*512;s+=full-1;continue;
+            }
             if (rd(clus_lba(clus) + s) != 0) return -1;
             u32 n = want - got < 512 ? want - got : 512;
             memcpy(buf + got, secbuf, n);
@@ -580,6 +586,58 @@ static int dir_slot(u32 dir_clus, int is_root16, const u8 raw[11],
     return 0;
 }
 
+static int dir_pair(u32 dir_clus, int is_root16, const u8 raw[11],
+                    u32 *o_lba, int *o_off, u32 *long_lba, int *long_off,u32 *end_lba)
+{
+    (void)raw;int ended=0;*end_lba=0;
+    u32 clus = dir_clus, sector = is_root16 ? root_lba : 0;
+    u32 secs_left = is_root16 ? ((rootents * 32) + 511) / 512 : 0;
+    u32 clus_secs = 0;
+    u32 free_lba = 0; int free_off = -1;
+    u32 anchor=clus, span=1, walked=0;
+
+    for (int guard = 0; guard < 100000; guard++) {
+        u32 lba;
+        if (is_root16) {
+            if (secs_left == 0) break;
+            lba = sector++; secs_left--;
+        } else {
+            if (clus_secs == 0) {
+                if (clus == 0x0FFFFFFF) break;
+                if (!valid_cluster(clus)) return 0;
+                sector = clus_lba(clus); clus_secs = spc;
+            }
+            lba = sector++; clus_secs--;
+        }
+        if (rd(lba) != 0) return 0;
+        u8 dirsec[512];
+        memcpy(dirsec, secbuf, 512);
+        for (int e = 0; e < 512; e += 32) {
+            u8 *de = dirsec + e;
+            if(de[0]==0)ended=1;
+            if(ended||de[0]==0xE5){
+                if(free_off>=0){
+                    if(ended){
+                        if(e<480)*end_lba=lba;
+                        else if(is_root16){if(secs_left)*end_lba=sector;}
+                        else if(clus_secs)*end_lba=sector;
+                        else{u32 next=fat_next(clus);if(valid_cluster(next))*end_lba=clus_lba(next);else if(next!=0x0fffffffu)return 0;}
+                    }
+                    *long_lba=free_lba;*long_off=free_off;*o_lba=lba;*o_off=e;return 2;
+                }
+                free_lba=lba;free_off=e;
+            }else free_off=-1;
+
+        }
+        if (!is_root16 && clus_secs == 0) {
+            clus = fat_next(clus);
+            if (clus == anchor) return 0;
+            if (++walked == span) { anchor=clus; span*=2; walked=0; }
+        }
+    }
+    return 0;
+}
+
 static void split_path(const char *path, char *dir, int dcap, const char **fname)
 {
     int slash = -1;
@@ -615,6 +673,15 @@ int fat_write(const char *path, const u8 *buf, u32 size)
     if (found == 0) return -2;
 
     if (found == 1 && wasdir) return -3;
+    int longname=0;u32 long_lba=0,end_lba=0;int long_off=0;
+    if(!lookup&&strlen(fname)<=13){
+        const char *dot=0;for(const char *p=fname;*p;p++)if(*p=='.')dot=p;
+        longname=dot?dot-fname>8||strlen(dot+1)>3:strlen(fname)>8;
+        if(longname){
+            if(found==1)return -1;
+            if(dir_pair(dclus,r16,raw,&slot_lba,&slot_off,&long_lba,&long_off,&end_lba)!=2)return -2;
+        }
+    }
     fat_dbg_step = 1;
 
     u32 bytespc = (u32)spc * 512;
@@ -655,6 +722,19 @@ int fat_write(const char *path, const u8 *buf, u32 size)
     de[20] = (first >> 16) & 0xFF; de[21] = (first >> 24) & 0xFF;
     de[28] = size; de[29] = size >> 8; de[30] = size >> 16; de[31] = size >> 24;
 
+    if(longname){
+        if(end_lba==slot_lba)dsec[slot_off+32]=0;
+        else if(end_lba){u8 tail[512];if(rd(end_lba))goto fail;memcpy(tail,secbuf,512);tail[0]=0;if(wr(end_lba,tail))goto fail;}
+        u8 entry[32]={0};static const u8 pos[]={1,3,5,7,9,14,16,18,20,22,24,28,30};
+        entry[0]=0x41;entry[11]=15;entry[13]=lfn_checksum(raw);
+        u32 len=strlen(fname);
+        for(u32 i=0;i<13;i++){u16 ch=i<len?(u8)fname[i]:i==len?0:0xffff;entry[pos[i]]=ch;entry[pos[i]+1]=ch>>8;}
+        if(long_lba==slot_lba)memcpy(dsec+long_off,entry,32);
+        else{
+            u8 lsec[512];if(rd(long_lba))goto fail;memcpy(lsec,secbuf,512);memcpy(lsec+long_off,entry,32);
+            if(wr(long_lba,lsec))goto fail;
+        }
+    }
     if (wr(slot_lba, dsec) != 0) return -1;
 
     if (found == 1 && oldc >= 2) free_chain(oldc);
@@ -738,6 +818,13 @@ int fat_append(const char *path, const u8 *buf, u32 size)
         u32 s = inclus / 512, soff = inclus % 512;
         for (; s < spc && done < size; s++) {
             u32 lba = clus_lba(c) + s;
+            u32 full=soff?0:(size-done)/512;
+            if(full){
+                if(full>spc-s)full=spc-s;
+                cache_lba=0xFFFFFFFF;
+                if(usb_write(lba,full,buf+done))return -1;
+                done+=full*512;pos+=full*512;s+=full-1;continue;
+            }
             u8 sec[512];
             memset(sec, 0, 512);
             if (soff) {

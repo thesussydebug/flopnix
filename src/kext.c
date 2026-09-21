@@ -3,6 +3,8 @@
 #include "kextspace.inc"
 #include "gfxfault.inc"
 #include "floppy.h"
+#include "debug.h"
+extern const DebugCore debug_core;
 
 #define MAX_SECT 32
 
@@ -418,6 +420,7 @@ static int kext_load_locked(const char *name)
         space=-1;
     }
     if (image != iobuf) kfree(image);
+    if(r==42)debug_event(DBG_ALLOC,name,cap,0,-1);
     if (r) {
         arena = arena_save; arena_rw = rw_save; kext_pool_used = pool_save;
         next_space = ns_save;
@@ -858,6 +861,7 @@ const void *service_get(const char *name)
     if (!name || (graphics_bit(name) & gfx_disabled)) return 0;
     static const FloppyOps floppy={FLOPPY_ABI,fdc_read_many};
     if(!strcmp(name,"disk.floppy"))return &floppy;
+    if(!strcmp(name,"debug.core"))return &debug_core;
     for (int i = 0; i < NSERV; i++)
         if (servs[i].ops && !strcmp(servs[i].name, name)) return servs[i].ops;
     return 0;

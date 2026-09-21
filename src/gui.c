@@ -626,6 +626,7 @@ static volatile int pump_thr = -1;
 void worker_unwind(int preempt_snap)
 {
     keyboard_unwind();
+    debug_unwind();
     u32 f = irq_save();
     if (pump_thr == thr_self)    { pump_inside = 0; pump_thr = -1; }
     if (present_thr == thr_self) { presenting = 0; present_thr = -1; }
@@ -1110,12 +1111,13 @@ void gui_compose(void)
     clear_clip();
     if (partial) {
         draw_win(redraw_window,focused()==redraw_window);
+        debug_draw();
         draw_cursor(mx,my);
         return;
     }
     if (ss_active) {
         FAULT_GUARD(ss_draw(), { ss_active = 0; });
-        if (ss_active) return;
+        if (ss_active) {debug_draw();return;}
     }
     fill_rect(0, 0, SW, SH, C_DESK);
     draw_text(8, 6, OS_NAME " " OS_VER, C_G0 + 6);
@@ -1211,6 +1213,7 @@ void gui_compose(void)
                            p == k ? C_WHITE : C_BLACK, w - 20);
         }
     }
+    debug_draw();
     draw_cursor(mx, my);
 }
 

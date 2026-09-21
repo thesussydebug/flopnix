@@ -1,5 +1,6 @@
 /* Runs the network adapters and IPv4 services. */
 #include "kapi.h"
+#include "debug.h"
 #include "nettext.h"
 #include "http_core.inc"
 
@@ -504,6 +505,13 @@ void net_init(void)
 
 int net_up(void) { return nic_kind != NIC_NONE; }
 
+static void capture_frame(const u8 *frame,u32 size)
+{
+    static const DebugOps *d;
+    if(!d)d=api->service_get("debug");
+    if(d&&d->abi==DEBUG_ABI&&(d->flags&DBG_NET))d->packet(frame,size);
+}
+
 static void eth_send(const u8 *dst, u16 type, const u8 *payload, u16 plen)
 {
     u8 fr[1536];
@@ -518,6 +526,7 @@ static void eth_send(const u8 *dst, u16 type, const u8 *payload, u16 plen)
     while (len < 60) fr[len++] = 0;
 
     u32 f=net_irq_save();
+    capture_frame(fr,len);
     if (nic_kind == NIC_RTL8139) rtl_tx(fr, len);
     else if (nic_kind == NIC_TULIP) tul_tx(fr, len);
     else if (nic_kind == NIC_PCNET) pc_tx(fr, len);
@@ -1055,6 +1064,7 @@ static void dhcp_pump(void)
 
 static void handle_frame(u8 *fr, u16 len)
 {
+    capture_frame(fr,len);
     diag_rx++;
     if (len < 14) return;
     u16 type = ((u16)fr[12] << 8) | fr[13];

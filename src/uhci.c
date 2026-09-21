@@ -496,7 +496,7 @@ const char *usb_model(void) { return dev_ok ? dev_model : "none"; }
 u32 usb_capacity_kb(void) { return dev_ok ? dev_blocks / 2 : 0; }
 u32 usb_capacity_sectors(void) { return dev_ok ? dev_blocks : 0; }
 
-int usb_read(u32 lba, u32 count, u8 *buf)
+static int usb_read_inner(u32 lba, u32 count, u8 *buf)
 {
     if (!dev_ok) return -1;
     if (!io_acquire(&usb_guard)) return -1;
@@ -520,7 +520,7 @@ int usb_read(u32 lba, u32 count, u8 *buf)
     return rc;
 }
 
-int usb_write(u32 lba, u32 count, const u8 *buf)
+static int usb_write_inner(u32 lba, u32 count, const u8 *buf)
 {
     if (!dev_ok) return -1;
     if (!io_acquire(&usb_guard)) return -1;
@@ -542,4 +542,13 @@ int usb_write(u32 lba, u32 count, const u8 *buf)
     }
     io_release(&usb_guard);
     return rc;
+}
+
+int usb_read(u32 lba,u32 count,u8 *buf)
+{
+    int r=usb_read_inner(lba,count,buf);debug_disk(1,0,lba,count,r);return r;
+}
+int usb_write(u32 lba,u32 count,const u8 *buf)
+{
+    int r=usb_write_inner(lba,count,buf);debug_disk(1,1,lba,count,r);return r;
 }

@@ -1,5 +1,6 @@
 /* Stores FLOPFS files on the boot floppy. */
 #include "os.h"
+#include "debug.h"
 #include "fsplan.inc"
 #include "fsdefrag.inc"
 #include "fspath.inc"
@@ -52,7 +53,7 @@ int fs_ensure(void)
     int ok = *(u32 *)sec == FS_MAGIC &&
              *(u32 *)(sec + 4) == FS_VER &&
              *(u32 *)(sec + 8) == sizeof(FsEnt);
-    if(ok)for(int i=0;i<FS_TSECT;i++)if(fdc_read(FS_TABLE+i,(u8 *)table+i*512)!=0){ok=0;break;}
+    if(ok&&fdc_read_many(FS_TABLE,(u8 *)table,FS_TSECT))ok=0;
     if(!ok||!fs_table_valid(table,FS_NFILES,FS_DATA,FS_END)){
         memset(table,0,sizeof table);mounted=-1;
         klog("FLOPFS: metadata unreadable or invalid; disk left unchanged.\n");
@@ -108,8 +109,13 @@ static int fs_read_locked(const char *name, u8 *buf, u32 max)
     FsEnt saved=*e;e=&saved;u32 epoch=fc_epoch;
     u8 sec[512];
     u32 got = 0;
-    for (u16 s = 0; got < size; s++) {
-        if (fdc_read(e->start + s, sec) != 0) return FS_EIO;
+    while (size-got >= 512) {
+        u32 n=(size-got)/512;
+        if(fdc_read_many(e->start+got/512,buf+got,n))return FS_EIO;
+        got+=n*512;
+    }
+    if (got < size) {
+        if (fdc_read(e->start + got/512, sec) != 0) return FS_EIO;
         u32 n = size - got < 512 ? size - got : 512;
         memcpy(buf + got, sec, n);
         got += n;
@@ -321,6 +327,7 @@ static int fs_defrag_locked(void (*prog)(int done, int total))
             klog("defrag: refused a plan below the data area\n");
             return -1;
         }
+        debug_path(0,table[e[i].idx].name);
         int r = fsd_move(dfg_rd, dfg_wr,
                          e[i].start, e[i].nstart, e[i].sects, sec);
         if (r != FSD_MOVED) {
@@ -379,18 +386,18 @@ const char *ext_type(const char *name)
     return "File";
 }
 
-int fs_read(const char *name,u8 *buf,u32 max){mtx_lock(&fs_mutex);int r=fs_read_locked(name,buf,max);mtx_unlock(&fs_mutex);return r;}
+int fs_read(const char *name,u8 *buf,u32 max){mtx_lock(&fs_mutex);const char *old=debug_path(0,name);int r=fs_read_locked(name,buf,max);debug_done(0,old,r);mtx_unlock(&fs_mutex);return r;}
 
-int fs_write(const char *name,const u8 *buf,u32 size){mtx_lock(&fs_mutex);int r=fs_write_locked(name,buf,size);mtx_unlock(&fs_mutex);return r;}
+int fs_write(const char *name,const u8 *buf,u32 size){mtx_lock(&fs_mutex);const char *old=debug_path(0,name);int r=fs_write_locked(name,buf,size);debug_done(2,old,r);mtx_unlock(&fs_mutex);return r;}
 
-int fs_delete(const char *name){mtx_lock(&fs_mutex);int r=fs_delete_locked(name);mtx_unlock(&fs_mutex);return r;}
+int fs_delete(const char *name){mtx_lock(&fs_mutex);const char *old=debug_path(0,name);int r=fs_delete_locked(name);debug_done(2,old,r);mtx_unlock(&fs_mutex);return r;}
 
-int fs_mkdir(const char *name){mtx_lock(&fs_mutex);int r=fs_mkdir_locked(name);mtx_unlock(&fs_mutex);return r;}
+int fs_mkdir(const char *name){mtx_lock(&fs_mutex);const char *old=debug_path(0,name);int r=fs_mkdir_locked(name);debug_done(2,old,r);mtx_unlock(&fs_mutex);return r;}
 
-int fs_touch(const char *name){mtx_lock(&fs_mutex);int r=fs_touch_locked(name);mtx_unlock(&fs_mutex);return r;}
+int fs_touch(const char *name){mtx_lock(&fs_mutex);const char *old=debug_path(0,name);int r=fs_touch_locked(name);debug_done(2,old,r);mtx_unlock(&fs_mutex);return r;}
 
-int fs_rename(const char *oldname,const char *newname){mtx_lock(&fs_mutex);int r=fs_rename_locked(oldname,newname);mtx_unlock(&fs_mutex);return r;}
+int fs_rename(const char *oldname,const char *newname){mtx_lock(&fs_mutex);const char *old=debug_path(0,oldname);int r=fs_rename_locked(oldname,newname);debug_done(2,old,r);mtx_unlock(&fs_mutex);return r;}
 
-int fs_rename_dir(const char *olddir,const char *newdir){mtx_lock(&fs_mutex);int r=fs_rename_dir_locked(olddir,newdir);mtx_unlock(&fs_mutex);return r;}
+int fs_rename_dir(const char *olddir,const char *newdir){mtx_lock(&fs_mutex);const char *old=debug_path(0,olddir);int r=fs_rename_dir_locked(olddir,newdir);debug_done(2,old,r);mtx_unlock(&fs_mutex);return r;}
 
-int fs_defrag(void (*prog)(int,int)){mtx_lock(&fs_mutex);int r=fs_defrag_locked(prog);mtx_unlock(&fs_mutex);return r;}
+int fs_defrag(void (*prog)(int,int)){mtx_lock(&fs_mutex);const char *old=debug_path(0,"defrag");int r=fs_defrag_locked(prog);debug_done(2,old,r);mtx_unlock(&fs_mutex);return r;}

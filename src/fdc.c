@@ -268,7 +268,7 @@ static int fdc_guarded(u32 lba, u8 *buf, int write, u32 count)
     while(count){
         u32 n=FLOPPY_TRACK_SECTORS-lba%FLOPPY_TRACK_SECTORS;if(n>count)n=count;
         if(write)for(u32 i=0;i<n;i++)fs_cache_invalidate(lba+i);
-        rc=fdc_rw(lba,buf,write,n);if(rc)break;
+        rc=fdc_rw(lba,buf,write,n);debug_disk(0,write,lba,n,rc);if(rc)break;
         lba+=n;buf+=n*512;count-=n;
     }
     mtx_unlock(&fdc_mutex);

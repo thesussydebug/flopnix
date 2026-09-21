@@ -1,5 +1,11 @@
 /* Allocates and releases temporary memory. */
 #include "os.h"
+#include "debug.h"
+
+static void *alloc_failed(u32 n,u32 caller)
+{
+    debug_event(DBG_ALLOC,"heap",n,caller,thr_self);return 0;
+}
 
 #define HEAP_BASE (memory.heap)
 #define HMAGIC    0x48454150u
@@ -105,9 +111,10 @@ static int heap_contains(u32 p)
 
 void *kmalloc(u32 n)
 {
-    if (!heap_on || !n) return 0;
+    if (!n) return 0;
+    if (!heap_on) return alloc_failed(n,(u32)__builtin_return_address(0));
 
-    if (n > heap_top - HEAP_BASE + grow_limit - grow_base) return 0;
+    if (n > heap_top - HEAP_BASE + grow_limit - grow_base) return alloc_failed(n,(u32)__builtin_return_address(0));
     n = (n + 7) & ~7u;
     u32 flags=irq_save();
     for(int pass=0;pass<3;pass++){
@@ -121,18 +128,18 @@ void *kmalloc(u32 n)
     if(pass<2){fs_cache_clear();win_image_trim();}
     }
     irq_restore(flags);
-    return 0;
+    return alloc_failed(n,(u32)__builtin_return_address(0));
 }
 
 void *krealloc(void *p, u32 n)
 {
     if (!p) return kmalloc(n);
     if (!n) { kfree(p); return 0; }
-    if (!heap_on || n > heap_top - HEAP_BASE + grow_limit - grow_base) return 0;
+    if (!heap_on || n > heap_top - HEAP_BASE + grow_limit - grow_base) return alloc_failed(n,(u32)__builtin_return_address(0));
     u32 size = (n + 7) & ~7u, flags = irq_save();
     Blk *b = (Blk *)p - 1;
     if (!heap_contains((u32)b) ||
-        b->magic != HMAGIC || b->free) { irq_restore(flags); return 0; }
+        b->magic != HMAGIC || b->free) { irq_restore(flags); return alloc_failed(n,(u32)__builtin_return_address(0)); }
     if (b->size < size && b->next && b->next->free &&
         (u8 *)(b + 1) + b->size == (u8 *)b->next &&
         b->size + sizeof(Blk) + b->next->size >= size) {

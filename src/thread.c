@@ -40,6 +40,13 @@ static int stack_ok(int s)
 
 int thread_overflowed(void) { return thr_overflow; }
 
+u32 thread_guard_mask(void)
+{
+    u32 bad=0,f=irq_save();
+    for(int i=1;i<THR_MAX;i++)if(thr[i].state!=THR_FREE&&!stack_ok(i))bad|=1u<<i;
+    irq_restore(f);return bad;
+}
+
 void thr_switch(u32 *save_esp, u32 load_esp);
 void thr_bootstrap(void);
 

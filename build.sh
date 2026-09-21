@@ -48,9 +48,9 @@ clang --target=i386-unknown-none-elf -c src/emergency.S -o out/emergency_entry.o
 
 echo "== compiling"
 
-for f in emergency util hw cpu mtrr paging ring3 fdc fs uhci services uisvc config gfx gui apps kext heap kupdate fault thread cpuacct kernel; do
+for f in emergency util hw cpu mtrr paging ring3 fdc fs uhci services uisvc config gfx gui apps kext heap kupdate debug fault thread cpuacct kernel; do
     SZ=
-    case $f in emergency|cpu|mtrr|ring3|config|kupdate|fault|kext|uisvc|services) SZ=-Oz;; fdc|fs|uhci|heap|apps|kernel|thread|gui) SZ=-Os;; esac
+    case $f in apps|debug|emergency|cpu|mtrr|ring3|config|kupdate|fault|kext|uisvc|services) SZ=-Oz;; fdc|fs|uhci|heap|kernel|thread|gui) SZ=-Os;; esac
     clang $CFLAGS $SZ -c src/$f.c -o out/$f.o
 done
 
@@ -76,9 +76,9 @@ for sym in $(undefs out/emergency.o); do
         *) echo "emergency.o: unsafe recovery dependency: $sym" >&2; exit 1;;
     esac
 done
-for n in fat net dialogs notes diskhealth opl2 midi gdi g3d desktop edit files settings paint about calc clock calendar memmap memedit minesweeper reversi snake pong tetris shell crashsim taskmgr serialmon faultlog kextview clipview bench charmap game2048 baseconv archive textweb breakout update; do
+for n in debug fat net dialogs notes diskhealth opl2 midi gdi g3d desktop edit files settings paint about calc clock calendar memmap memedit minesweeper reversi snake pong tetris shell crashsim taskmgr serialmon faultlog kextview clipview bench charmap game2048 baseconv archive textweb breakout update; do
     SZ=
-    case $n in charmap|game2048|baseconv|archive|textweb|breakout|update) SZ=-Os;; esac
+    case $n in debug|charmap|game2048|baseconv|archive|textweb|breakout|update) SZ=-Os;; esac
     clang $CFLAGS $SZ -c "kexts/$n.c" -o "out/$n.kxo"
     llvm-objcopy --strip-debug "out/$n.kxo" "built/kexts/$n.kx"
 
@@ -95,7 +95,7 @@ echo "== linking"
 ld.lld -m elf_i386 -T linker.ld -nostdlib -o out/kernel.elf \
     out/stub.o out/emergency.o out/emergency_entry.o out/util.o out/hw.o out/cpu.o out/mtrr.o out/paging.o out/ring3.o out/fdc.o out/fs.o out/uhci.o \
     out/services.o out/uisvc.o out/config.o out/gfx.o out/gui.o out/apps.o \
-    out/kext.o out/heap.o out/kupdate.o out/fault.o out/setjmp.o out/switch.o \
+    out/kext.o out/heap.o out/kupdate.o out/debug.o out/fault.o out/setjmp.o out/switch.o \
     out/thread.o out/cpuacct.o out/kernel.o
 llvm-objcopy -O binary -j .stub -j .text -j .rodata -j .data out/kernel.elf built/flopnix.ku
 

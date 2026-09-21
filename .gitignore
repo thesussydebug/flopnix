@@ -33,3 +33,7 @@ __pycache__/
 !/tools/textinputtests.c
 !/tools/archivelimittests.c
 tools/textinputtests.c
+
+!/tools/debugtest.c
+!/tools/test_debug.py
+/tools/debugtest.kx
