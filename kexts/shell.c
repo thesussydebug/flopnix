@@ -718,19 +718,24 @@ static void sh_exec(char *cmd)
     if (!strcmp(cmd, "help")) {
         tprint("files: ls map cat rm cp mv touch hexdump wc head tail\n");
         tprint("       grep find sort uniq strings crc32 cmp stat edit open\n");
+        tprint("       echo pack unpack\n");
         tprint("filters: -h for options; > file writes, >> file appends\n");
         tprint("dirs:  cd pwd tree mkdir rmdir du\n");
         tprint("disk:  disk [scan|seek|map]  defrag fscan bootsec\n");
-        tprint("usb:   uls ucat ucp urm\n");
-        tprint("net:   ifconfig [ip]  ping <ip>  dns <host>  wget <url>\n");
-        tprint("       netdiag  lspci\n");
+        tprint("usb:   uls ucat ucp urm usb\n");
+        tprint("net:   ifconfig [ip]  ping <ip|host>  dns <host>\n");
+        tprint("       wget <url>  ntp [+/-H:MM]  netdiag lspci\n");
+        tprint("       debugnet panicnet faultnet - remote diagnostics\n");
         tprint("fun:   matrix rainbow beep\n");
-        tprint("cfg:   set [video|mouse|net ...]  confsec\n");
-        tprint("sys:   uname free df uptime date cal fetch clear ver\n");
-        tprint("       whoami pwd dmesg usb ps kill calc history\n");
+        tprint("cfg:   set [video|mouse|net ...]  confsec [raw]\n");
+        tprint("sys:   uname free df uptime date cal fetch clear cls ver\n");
+        tprint("       whoami dmesg ps kill calc history threads\n");
         tprint("       kext kupdate settings about reboot shutdown\n");
         tprint("       bios testram bench\n");
-        tprint("any command accepts /help; PgUp/PgDn or wheel to scroll\n");
+        tprint("debug: peek - read memory; poke - write memory\n");
+        tprint("       ring3 - user-mode test; crash - panic test (halts!)\n");
+        tprint("help:  help; <command> /help, -h or --help for usage\n");
+        tprint("PgUp/PgDn or wheel to scroll\n");
     } else if (!strcmp(cmd, "set") || !strncmp(cmd, "set ", 4)) {
         static const char *vnames[5] = { "?", "640x480", "800x600", "1024x768", "vga" };
         const char *a = cmd[3] ? cmd + 4 : "";

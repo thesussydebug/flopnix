@@ -622,7 +622,7 @@ static void confsec(const char *args)
     int raw=!strcmp(args,"raw");
     if(*args&&!raw){api->shell_print("Usage: confsec [raw]\n");return;}
     if(api->config_read(sector,sizeof snapshot)!=512){api->shell_print("Settings sector is unavailable.\n");return;}
-    api->shell_print("Settings sector 256 / 512 bytes / RAM snapshot\n");
+    api->shell_print("Settings sector (LBA 256) - 512 bytes - RAM snapshot\n");
     if(!raw){
         const FCfg *c=&snapshot.cfg;char path[65];memcpy(path,c->wp_path,64);path[64]=0;
         kfmt(line,sizeof line,"04  Display mode: %u     06  Mouse speed: %u\n",c->video,c->mouse_speed);api->shell_print(line);
@@ -637,12 +637,13 @@ static void confsec(const char *args)
         api->shell_print("Offsets are hexadecimal. Remaining bytes hold network\nand app preferences; unused bytes normally stay zero.\n");
         api->shell_print("Use Save changes in Settings to write to disk.\nWallpaper uses Apply; network fields must be applied.\nRun confsec again to refresh; confsec raw shows all bytes.\n");return;
     }
-    for(int row=0;row<512;row+=16){
+    for(int row=0;row<(int)sizeof snapshot;row+=16){
         kfmt(line,sizeof line,"%03x ",row);int at=4;
         for(int i=0;i<16;i++){kfmt(line+at,sizeof line-at,"%02x ",sector[row+i]);at+=3;}
         line[at++]=' ';for(int i=0;i<16;i++){u8 c=sector[row+i];line[at++]=c>=32&&c<127?c:'.';}
         line[at++]='\n';line[at]=0;api->shell_print(line);
     }
+    api->shell_print("512 bytes printed (hex 000-1ff). PgUp or wheel to scroll up.\n");
 }
 
 int kext_entry(const Kapi *k)
