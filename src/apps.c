@@ -351,7 +351,7 @@ static void term_reset(int inst)
     T->cols = tdcols;
     T->rows = tdrows;
     T->hist_pos = 0;
-    tprint(OS_NAME " " OS_VER " - a floppy-sized OS\n");
+    tprint(OS_NAME " " OS_VER "\n");
     tprint("type 'help' for commands\n");
     if (BOOTINFO->diag & BD_ANY_HANG)
         tprint("boot: recovered from a BIOS hang - see 'dmesg'\n");
