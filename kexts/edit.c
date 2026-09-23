@@ -80,7 +80,7 @@ static char name_scratch[64][64];
 static FatEnt fe_scratch[64];
 
 enum { EM_NONE, EM_OPEN, EM_FIND, EM_GUARD };
-enum { PA_NONE, PA_NEW, PA_OPEN };
+enum { PA_NONE, PA_NEW, PA_OPEN, PA_CLOSE, PA_FILE };
 
 typedef struct {
     char *buf;
@@ -97,6 +97,8 @@ typedef struct {
     int  menu, menu_row;
     u8   src;
     char fullpath[96];
+    char open_path[96];
+    int open_src;
     char fbuf[32];
     int  flen;
     int  pick_scroll;
@@ -145,6 +147,7 @@ static void ed_reset(void)
     E->fullpath[0] = 0;
     E->mod = E->ro = 0;
     E->mode = EM_NONE;
+    E->pending = PA_NONE;
     E->menu = E->menu_row = -1;
     E->msg[0] = 0;
     if (E->buf) E->buf[0] = 0;
@@ -386,6 +389,7 @@ static void move_vert(int delta)
     E->cur = E->len;
 }
 
+static void run_pending(void);
 static void save_write(void)
 {
     if (!E->buf) { strlcpy(E->msg, "Not enough memory to save", sizeof E->msg); return; }
@@ -398,18 +402,20 @@ static void save_write(void)
     else if (r == -2) strlcpy(E->msg, "disk full", sizeof E->msg);
     else if (r == -3) strlcpy(E->msg, "that name is a folder", sizeof E->msg);
     else              strlcpy(E->msg, "write error", sizeof E->msg);
+    if(r==0)run_pending();else E->pending=PA_NONE;
 }
 
 static void save_picked(const char *path, void *ctx)
 {
     E = (Ed *)ctx;
-    if (!path) return;
+    if (!path) { E->pending=PA_NONE;return; }
     int drive;
     char bare[sizeof E->fullpath];
     sh_spec_split(path, &drive, bare, sizeof bare);
     if (E->ro && drive == E->src &&
         (drive ? !strcasecmp(bare, E->fullpath) : !strcmp(bare, E->name))) {
         strlcpy(E->msg, "Choose a different file name", sizeof E->msg);
+        E->pending=PA_NONE;
         return;
     }
     if (drive == 0) {
@@ -444,11 +450,21 @@ static void run_pending(void)
         E->mode = EM_OPEN; E->pick_scroll = 0;
         if (E->pick_drive == 1) pick_usb_refresh();
     }
+    else if(p==PA_CLOSE)api->win_close_self(edit_type,(int)(E-eds));
+    else if(p==PA_FILE){if(E->open_src)ed_load_usb(E->open_path);else edit_load((int)(E-eds),E->open_path);}
+}
+static void guard_answer(int result,void *ctx)
+{
+    E=(Ed *)ctx;E->mode=EM_NONE;
+    if(result==MBR_YES)do_save();
+    else if(result==MBR_NO)run_pending();
+    else E->pending=PA_NONE;
 }
 static void guarded(int action)
 {
+    if(E->pending)return;
     E->pending = action;
-    if (E->mod) E->mode = EM_GUARD;
+    if (E->mod) { E->mode=EM_GUARD;api->msgbox("Unsaved changes","Save changes to this document?",MB_SAVEDISCARD,guard_answer,E); }
     else run_pending();
 }
 
@@ -525,6 +541,7 @@ static UiRect ed_toolbar_rect(int button)
 static void edit_key(int inst, int k)
 {
     E = &eds[inst];
+    if(k==K_CLOSE_REQUEST){guarded(PA_CLOSE);return;}
     if (E->menu >= 0) {
         if (k == 27) { E->menu = E->menu_row = -1; return; }
         if (k == K_LEFT || k == K_RIGHT) {
@@ -551,8 +568,6 @@ static void edit_key(int inst, int k)
         E->menu = E->menu_row = -1;
     }
     if (E->mode == EM_GUARD) {
-        if (k == 'y' || k == 'Y') run_pending();
-        else if (k == 'n' || k == 'N' || k == 27) { E->pending = PA_NONE; E->mode = EM_NONE; }
         return;
     }
     if (E->mode == EM_FIND) {
@@ -914,12 +929,6 @@ done:
     draw_text(cx + 4, sy + 1, st, C_G0 + 1);
 
     if (E->mode == EM_OPEN) draw_picker(cx, cy);
-    if (E->mode == EM_GUARD) {
-        int bw = 260, bh = 60, bx = cx + (cw - bw) / 2, by = cy + TB_H + 20;
-        panel(bx, by, bw, bh, 0);
-        draw_text(bx + 12, by + 12, "Discard unsaved changes?", C_BLACK);
-        draw_text(bx + 12, by + 34, "Y = discard    N = cancel", C_NAVY);
-    }
     if (E->menu >= 0 && active) {
         UiRect r = ed_menu_rect(E->menu, cw);
         int x = cx + r.x, y = cy + r.y;
@@ -949,6 +958,12 @@ static int edit_opener(const char *name, const char *fullpath,
 {
     int inst = win_open(edit_type);
     if (inst < 0) return -1;
+    E=&eds[inst];
+    if(E->pending){api->notify("Finish the current Editor dialog first.");return 0;}
+    if(E->mod){
+        E->open_src=fullpath!=0;strlcpy(E->open_path,fullpath?fullpath:name,sizeof E->open_path);
+        guarded(PA_FILE);return 0;
+    }
     if (fullpath)
         edit_open_usb(inst, name, fullpath, data, n);
     else
@@ -971,6 +986,7 @@ int kext_entry(const Kapi *k)
         .title = "Editor", .max_inst = MAXINST, .resizable = 1, .in_menu = 1,
         .open = edit_new, .draw = edit_draw, .key = edit_key,
         .mouse = edit_mouse, .wheel = edit_wheel, .client_size = edit_csize, .close = edit_close,
+        .live_draw = APP_CLOSE_REQUEST,
         .min_client = edit_min_client,
     };
     edit_type = api->register_app(&d);

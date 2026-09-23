@@ -471,32 +471,36 @@ void palette_set(int idx, u8 r, u8 g, u8 b)
 
 static u32 bmp_u32(const u8 *d) { return d[0] | (d[1] << 8) | (d[2] << 16) | ((u32)d[3] << 24); }
 
-int bmp_load(const u8 *bm, u32 n, u8 *out, int outcap, int *w, int *h)
+__attribute__((minsize)) int bmp_load(const u8 *bm, u32 n, u8 *out, int outcap, int *w, int *h)
 {
     if (n < 54 || bm[0] != 'B' || bm[1] != 'M') return -1;
+    u32 dib = bmp_u32(bm + 14);
+    if (dib < 40 || dib > n - 14 || bm[26] != 1 || bm[27]) return -1;
     u32 off = bmp_u32(bm + 10);
     int iw = (int)bmp_u32(bm + 18);
     int ih = (int)bmp_u32(bm + 22);
     u16 bpp = bm[28] | (bm[29] << 8);
     if (bmp_u32(bm + 30) != 0) return -1;
+    if (ih == (-2147483647 - 1)) return -1;
     int topdown = ih < 0; if (topdown) ih = -ih;
     if (iw <= 0 || ih <= 0 || (bpp != 8 && bpp != 24)) return -1;
-    if (iw * ih > outcap) return -1;
+    if (outcap <= 0 || iw > outcap / ih || (u32)iw > 0xfffffffcu / (bpp / 8)) return -1;
 
     u8 map[256];
     if (bpp == 8) {
-        u32 paloff = 14 + bmp_u32(bm + 14);
+        u32 paloff = 14 + dib;
         for (int i = 0; i < 256; i++) {
-            const u8 *e = bm + paloff + i * 4;
-            map[i] = (paloff + (u32)(i + 1) * 4 <= n)
-                     ? palette_nearest(e[2], e[1], e[0]) : (u8)i;
+            if ((u32)(i + 1) * 4 <= n - paloff) {
+                const u8 *e = bm + paloff + i * 4;
+                map[i] = palette_nearest(e[2], e[1], e[0]);
+            } else map[i] = (u8)i;
         }
     }
-    int rowsz = bpp == 8 ? ((iw + 3) & ~3) : ((iw * 3 + 3) & ~3);
+    u32 rowsz = ((u32)iw * (bpp / 8) + 3) & ~3u;
     for (int y = 0; y < ih; y++) {
         int src = topdown ? y : (ih - 1 - y);
         u8 *drow = out + (u32)y * iw;
-        if (off + (u32)(src + 1) * rowsz > n) { memset(drow, C_WHITE, iw); continue; }
+        if (off > n || (u32)src >= (n - off) / rowsz) { memset(drow, C_WHITE, iw); continue; }
         const u8 *row = bm + off + (u32)src * rowsz;
         for (int x = 0; x < iw; x++)
             drow[x] = bpp == 8 ? map[row[x]]
@@ -596,6 +600,9 @@ void flip(void)
     if (flip_shadow) shadow_valid = 1;
 }
 
+#include "panicnet.h"
+extern const PanicMonitor *panic_monitor;
+
 static const char *exc_name[] = {
     "divide error", "debug", "NMI", "breakpoint", "overflow", "bound range",
     "invalid opcode", "no FPU", "double fault", "FPU segment", "bad TSS",
@@ -603,28 +610,29 @@ static const char *exc_name[] = {
     "reserved", "FPU error", "alignment", "machine check", "SIMD"
 };
 
-static __attribute__((minsize)) const char *panic_write_report(u32 vec, u32 err, u32 eip)
+static __attribute__((noinline,minsize)) const char *panic_write_report(u32 vec, u32 err, u32 eip)
 {
-    if (!usb_present())            return "no USB device - report not saved";
-    if (!fat_mount())              return "USB not mounted - report not saved";
-    if (!fat_writable())           return "USB read-only - report not saved";
+    if (!usb_present())            return "No USB - report not saved";
+    if (!fat_mount())              return "USB unmounted - report not saved";
+    if (!fat_writable())           return "USB read-only; report not saved";
 
     static char rep[5200];
     static char log[2048], evt[4096];
     int ln = klog_read(log, sizeof log);   if (ln < 0) ln = 0; log[ln] = 0;
     int en = trace_read(evt, sizeof evt);  if (en < 0) en = 0; evt[en] = 0;
     const char *owner = kext_at(eip);
+    char location[96];fault_symbol(eip,location,sizeof location);
     const char *nm = vec < 20 ? exc_name[vec] : "exception";
     int n = panic_report_fmt(rep, sizeof rep, OS_RELEASE, vec, nm, err, eip,
-                             owner, vec == 14, fault_cr2, fault_recoveries,
+                             owner, location, vec == 14, fault_cr2, fault_recoveries,
                              evt, log);
 
-    const char *result = "report write faulted - not saved";
+    const char *result = "Report write faulted; not saved";
     usb_quiet = 1;
     FAULT_GUARD(
         result = (fat_write("PANIC.TXT", (const u8 *)rep, (u32)n) == 0)
                  ? "saved to USB:PANIC.TXT" : "USB write failed",
-        result = "report write faulted - not saved");
+        result = "Report write faulted; not saved");
     usb_quiet = 0;
     return result;
 }
@@ -636,7 +644,7 @@ __attribute__((minsize)) void panic(u32 vec, u32 err, u32 eip)
     surface_unlock();
     clear_clip();
     fill_rect(0, 0, SW, SH, C_NAVY);
-    char buf[80];
+    char buf[128];
     int x = SW > 640 ? (SW - 608) / 2 : 16;
     int width = SW - 2*x;
     int y = SH > 220 ? (SH - 190) / 2 : 8;
@@ -645,10 +653,10 @@ __attribute__((minsize)) void panic(u32 vec, u32 err, u32 eip)
     const char *nm = vec < 20 ? exc_name[vec] : "exception";
     kfmt(buf, sizeof buf, "P%u: %s", vec, nm);
     draw_text_clip(x, y + 28, buf, C_WHITE, width);
-    kfmt(buf, sizeof buf, "Instruction: %08x", eip);
+    kfmt(buf, sizeof buf, "Instruction address: %08x", eip);
     draw_text(x, y + 44, buf, C_WHITE);
-    const char *kx = kext_at(eip);
-    kfmt(buf, sizeof buf, "Code owner: %s", kx ? kx : "kernel / unknown");
+    char location[96];fault_symbol(eip,location,sizeof location);
+    kfmt(buf, sizeof buf, "Location: %s", location);
     draw_text_clip(x, y + 58, buf, C_WHITE, width);
     const KextInfo *active = kext_get(kext_current());
     kfmt(buf, sizeof buf, "Active context: %s", active ? active->name : "kernel");
@@ -662,8 +670,11 @@ __attribute__((minsize)) void panic(u32 vec, u32 err, u32 eip)
     }
     draw_text_clip(x, y + 138, "Restart to continue. Save this screen", C_SILVER, width);
     draw_text(x, y + 152, "when reporting the problem.", C_SILVER);
+    if(panic_monitor)
+        draw_text_clip(x, y + 176, "Starting LAN crash debugger...", C_G0 + 5, width);
     flip();
     cli();
+    if(panic_monitor)panic_monitor->enter(fault_snapshot);
     const char *rep = panic_write_report(vec, err, eip);
     draw_text_clip(x, y + 176, rep, C_G0 + 5, width);
     flip();

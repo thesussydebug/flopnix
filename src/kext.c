@@ -4,6 +4,8 @@
 #include "gfxfault.inc"
 #include "floppy.h"
 #include "debug.h"
+#include "panicnet.h"
+#include "kexterror.inc"
 extern const DebugCore debug_core;
 
 #define MAX_SECT 32
@@ -38,6 +40,11 @@ static u32 arena;
 static u32 arena_rw;
 
 static KextInfo kexts[FS_NFILES];
+typedef struct { u32 address, size, name; } KextSymbol;
+typedef struct { u32 count; KextSymbol symbols[]; } KextSymbols;
+static KextSymbols *kext_symbols[FS_NFILES];
+static u32 kext_ids[FS_NFILES];
+static u16 kext_api[FS_NFILES];
 static int nkexts;
 
 u32 kext_pool_used;
@@ -202,9 +209,35 @@ static int peek_header(const u8 *img, u32 len, KextHeader *out)
     return 0;
 }
 
+static KextSymbols *save_symbols(const Shdr *sh, u32 nsh, const Sym *syms,
+                                u32 nsyms, const char *strs, const u32 *addr)
+{
+    u16 indices[512];u32 count=0,names=0;
+    for(u32 i=0;i<nsyms;i++){
+        const Sym *s=&syms[i];
+        if((s->info&15)!=2 || s->shndx>=nsh || !addr[s->shndx] ||
+           (sh[s->shndx].flags&6)!=6 || s->value>=sh[s->shndx].size || !strs[s->name])continue;
+        u32 end=s->name+strlen(strs+s->name)+1;
+        if(end>names)names=end;
+        indices[count++]=(u16)i;
+    }
+    u32 at=sizeof(KextSymbols)+count*sizeof(KextSymbol);
+    if(!count || names>32768-at)return 0;
+    KextSymbols *out=kmalloc(at+names);
+    if(!out)return 0;
+    out->count=count;
+    memcpy((char *)out+at,strs,names);
+    for(u32 j=0;j<count;j++){
+        const Sym *s=&syms[indices[j]];
+        out->symbols[j]=(KextSymbol){addr[s->shndx]+s->value,s->size,at+s->name};
+    }
+    return out;
+}
+
 static int elf_load(const u8 *img, u32 len, u32 *out_base, u32 *out_size,
                     int (**out_entry)(const Kapi *),
-                    u32 *out_pphys, u32 *out_plen, void **out_alloc, int *out_space, int hdr_kind)
+                    u32 *out_pphys, u32 *out_plen, void **out_alloc, int *out_space,
+                    int hdr_kind, KextSymbols **out_symbols)
 {
     const Ehdr *eh; const Shdr *sh;
     int r = elf_sanity(img, len, &eh, &sh);
@@ -342,6 +375,7 @@ static int elf_load(const u8 *img, u32 len, u32 *out_base, u32 *out_size,
             *out_size = p - base;
             if(p>arena)arena=p;
             arena_rw = rw;
+            *out_symbols=save_symbols(sh,eh->shnum,syms,nsyms,strs,shaddr);
             return 0;
         }
     return 41;
@@ -354,6 +388,15 @@ static int kext_load_locked(const char *name);
 static void drop_load_hooks(int owner);
 static Mutex load_mutex;
 extern u8 gui_up;
+static void kext_report(const char *name,int status)
+{
+    if(!status)return;
+    unsigned required=0;
+    for(int i=0;i<nkexts;i++)if(!strcmp(kexts[i].name,name)){required=kext_api[i];break;}
+    char text[128];kext_error_text(text,sizeof text,name,status,required,KAPI_VERSION);
+    klog(text);klog("\n");
+    if(gui_up)fault_show_banner(text);
+}
 
 int kext_load(const char *name)
 {
@@ -369,9 +412,11 @@ int kext_load(const char *name)
     for (int i = 0; i < nkexts; i++)
         if (!strcmp(kexts[i].name, path) && (!kexts[i].status || kexts[i].status == 44 || kexts[i].status == 45)) {
             int r = kexts[i].status;
+            kext_report(path,r);
             mtx_unlock(&load_mutex); return r;
         }
     int r = kext_load_locked(path);
+    kext_report(path,r);
     mtx_unlock(&load_mutex);
     return r;
 }
@@ -400,6 +445,7 @@ static int kext_load_locked(const char *name)
     int n = fs_read(name, image, cap);
     KextHeader hdr;
     int r = n < (int)sizeof(Ehdr) ? 40 : peek_header(image, (u32)n, &hdr);
+    kext_api[slot]=!r||r==43?hdr.api_version:0;
     u32 base = 0, size = 0, pphys = 0, plen = 0;
     void *priv_alloc=0;
     int (*entry)(const Kapi *) = 0;
@@ -410,7 +456,7 @@ static int kext_load_locked(const char *name)
     paging_arena_protect(ARENA_BASE, ARENA_END, 1);
     if (!r) for(;;){
         arena_save=arena;rw_save=arena_rw;pool_save=kext_pool_used;ns_save=next_space;
-        r=elf_load(image,(u32)n,&base,&size,&entry,&pphys,&plen,&priv_alloc,&space,hdr.kind);
+        r=elf_load(image,(u32)n,&base,&size,&entry,&pphys,&plen,&priv_alloc,&space,hdr.kind,&kext_symbols[slot]);
         if(!r)break;
         arena=arena_save;arena_rw=rw_save;kext_pool_used=pool_save;next_space=ns_save;
         if(space>=0)paging_space_drop(space);
@@ -419,6 +465,7 @@ static int kext_load_locked(const char *name)
         if(r!=42||!reclaim_one(0))break;
         space=-1;
     }
+    if(!r)kext_ids[slot]=crc32(image,(u32)n);
     if (image != iobuf) kfree(image);
     if(r==42)debug_event(DBG_ALLOC,name,cap,0,-1);
     if (r) {
@@ -492,6 +539,10 @@ static void boot_pass(int kind, const char *kindname)
             char c[8];
             kfmt(c, sizeof c, "E%d", r);
             boot_fail(c);
+            char detail[128];unsigned required=0;
+            for(int j=0;j<nkexts;j++)if(!strcmp(kexts[j].name,e->name)){required=kext_api[j];break;}
+            kext_error_text(detail,sizeof detail,e->name,r,required,KAPI_VERSION);
+            boot_print(detail);boot_print("\n");
         }
     }
 }
@@ -537,13 +588,60 @@ void kext_boot(void)
 int kext_count(void) { return nkexts; }
 const KextInfo *kext_get(int i) { return (i >= 0 && i < nkexts) ? &kexts[i] : 0; }
 
-const char *kext_at(u32 eip)
+static int kext_index_at(u32 eip)
 {
     for (int i = 0; i < nkexts; i++)
-        if ((!kexts[i].status || kexts[i].status == 45 || kexts[i].status == 46) && eip >= kexts[i].base &&
-            eip < kexts[i].base + kexts[i].size)
-            return kexts[i].name;
-    return 0;
+        if (eip >= kexts[i].base && eip-kexts[i].base < kexts[i].size)
+            return i;
+    return -1;
+}
+
+const char *kext_at(u32 eip)
+{
+    int i=kext_index_at(eip);
+    return i<0 ? 0 : kexts[i].name;
+}
+
+void fault_symbol(u32 address, char *out, int cap)
+{
+    if(!out || cap<=0)return;
+    u32 flags=irq_save();
+    int i=kext_index_at(address);
+    if(i>=0){
+        KextSymbols *syms=kext_symbols[i];
+        const KextSymbol *best=0;
+        if(syms)for(u32 j=0;j<syms->count;j++){
+            const KextSymbol *s=&syms->symbols[j];
+            if(address>=s->address && (address-s->address<s->size || address==s->address) &&
+               (!best || s->address>best->address))best=s;
+        }
+        if(best){
+            char name[60];const char *s=(const char *)syms+best->name;
+            strlcpy(name,s,sizeof name);
+            if(strlen(s)>=sizeof name)name[sizeof name-2]='~';
+            kfmt(out,cap,"%s!%s+0x%x",kexts[i].name,name,address-best->address);
+        }else kfmt(out,cap,"%s+0x%x",kexts[i].name,address-kexts[i].base);
+    }else{
+        extern char __load_end[];
+        if(address>=0x8000 && address<(u32)__load_end)kfmt(out,cap,"kernel+0x%x",address-0x8000);
+        else kfmt(out,cap,"unknown@0x%08x",address);
+    }
+    irq_restore(flags);
+}
+
+void fault_snapshot(FaultRec *r)
+{
+    extern char __load_end[];
+    fault_symbol(r->eip,r->location,sizeof r->location);
+    int i=kext_index_at(r->eip);
+    if(i>=0){
+        strlcpy(r->module,kexts[i].name,sizeof r->module);
+        r->module_base=kexts[i].base;r->module_id=kext_ids[i];
+    }else if(r->eip>=0x8000 && r->eip<(u32)__load_end){
+        strlcpy(r->module,"kernel",sizeof r->module);
+        r->module_base=0x8000;r->module_id=*(const u32 *)0x8004;
+    }
+    strlcpy(r->owner,r->module[0]?path_base(r->module):"unknown",sizeof r->owner);
 }
 
 #define MAX_CMDS 16
@@ -731,10 +829,10 @@ void timers_poll(void)
         int cpu_prev = cpu_context(app_type_owned(timers[i].owner));
         kext_enter(timers[i].owner);
         FAULT_GUARD(fn(timers[i].ctx), ({
-            char msg[72];
-            const char *who = kext_at(fault_eip);
-            kfmt(msg, sizeof msg, "%s timer crashed - stopped",
-                 who ? who : "an extension");
+            char msg[128];
+            const FaultRec *fault = fault_get(0);
+            kfmt(msg, sizeof msg, "P%u %s - timer stopped",
+                 fault_vec, fault ? fault->location : "unknown");
             klog(msg);
             if (!fault_fallback[thr_self]) fault_show_banner(msg);
             timers[i].fn = 0;
@@ -862,6 +960,17 @@ const void *service_get(const char *name)
     static const FloppyOps floppy={FLOPPY_ABI,fdc_read_many};
     if(!strcmp(name,"disk.floppy"))return &floppy;
     if(!strcmp(name,"debug.core"))return &debug_core;
+    extern const PanicMonitor *panic_monitor;
+    extern const u32 *panic_frame;
+    extern u32 panic_controls[],panic_tss[],heap_top,grow_base,grow_top;
+    extern char klog_buf[],trace_buf[],__bss_end[];
+    extern FaultRec fault_hist[];
+    extern u8 panic_threads[],panic_buffers[];
+    static const PanicCore pc={PANIC_MONITOR_ABI,&panic_monitor,&panic_frame,
+        panic_controls,panic_tss,kexts,&nkexts,kext_ids,kext_priv_phys,kext_priv_len,&arena_rw,
+        klog_buf,trace_buf,(const u32 *)&memory,&heap_top,&grow_base,&grow_top,
+        fault_hist,&fault_recoveries,(u32)__bss_end,panic_threads,panic_buffers,THR_MAX*32};
+    if(!strcmp(name,"panic.core"))return &pc;
     for (int i = 0; i < NSERV; i++)
         if (servs[i].ops && !strcmp(servs[i].name, name)) return servs[i].ops;
     return 0;
@@ -886,7 +995,7 @@ void off_event(void (*fn)(const char *, const char *))
 void broadcast(const char *event, const char *data)
 {
 
-    static char ev[32], dt[64];
+    char ev[32], dt[64];
     strlcpy(ev, event ? event : "", sizeof ev);
     strlcpy(dt, data ? data : "", sizeof dt);
     event = ev;
@@ -941,6 +1050,7 @@ static int evict(int owner)
     else kext_pool_used-=(kext_priv_len[owner]+4095)&~4095u;
     paging_space_drop(space_of(owner));kext_space[owner]=0;
     kext_priv_len[owner]=kext_priv_phys[owner]=0;kext_fixed_logged[owner]=0;
+    kfree(kext_symbols[owner]);kext_symbols[owner]=0;
     kexts[owner].size=kexts[owner].base=0;kexts[owner].status=47;
     gui_dirty=1;return 1;
 }
@@ -1353,4 +1463,5 @@ Kapi kapi = {
     .buffer_lock = app_buffer_lock, .buffer_unlock = app_buffer_unlock,
     .network_lock = app_network_lock, .network_unlock = app_network_unlock,
     .krealloc = krealloc,
+    .fault_symbol = fault_symbol,
 };

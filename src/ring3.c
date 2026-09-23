@@ -17,14 +17,15 @@ typedef struct __attribute__((packed)) {
     u16 trap, iomap;
 } Tss;
 
-static Tss tss, df_tss;
+Tss panic_tss;
+static Tss df_tss;
 extern u8 emergency_stack[8192];
 extern u32 emergency_pd[1024];
 extern void emergency_df_entry(void);
 __attribute__((noreturn)) void emergency_double_fault(void)
 {
     u32 cr2; __asm__ volatile("mov %%cr2,%0" : "=r"(cr2));
-    emergency_enter(8,0,tss.eip,cr2,EM_DOUBLE);
+    emergency_enter(8,0,panic_tss.eip,cr2,EM_DOUBLE);
 }
 
 static u8 r0_stack[8192] __attribute__((aligned(16)));
@@ -43,7 +44,7 @@ void ring3_init(void)
     gdt[SEL_KDATA / 8] = r3_desc(0, 0xFFFFF, ACC_KDATA, GRAN_4G);
     gdt[SEL_UCODE / 8] = r3_desc(0, 0xFFFFF, ACC_UCODE, GRAN_4G);
     gdt[SEL_UDATA / 8] = r3_desc(0, 0xFFFFF, ACC_UDATA, GRAN_4G);
-    gdt[SEL_TSS / 8]   = r3_desc((u32)&tss, sizeof tss - 1, ACC_TSS, GRAN_BYTE);
+    gdt[SEL_TSS / 8]   = r3_desc((u32)&panic_tss, sizeof panic_tss - 1, ACC_TSS, GRAN_BYTE);
 
     memset(&df_tss,0,sizeof df_tss);
     df_tss.cr3=(u32)emergency_pd; df_tss.eip=(u32)emergency_df_entry;
@@ -55,10 +56,11 @@ void ring3_init(void)
     gdtr.base  = (u32)gdt;
     gdt_load(&gdtr);
 
-    memset(&tss, 0, sizeof tss);
-    tss.ss0   = SEL_KDATA;
-    tss.esp0  = (u32)r0_stack + sizeof r0_stack;
-    tss.iomap = sizeof tss;
+    memset(&panic_tss, 0, sizeof panic_tss);
+    __asm__ volatile("mov %%cr3,%0":"=r"(panic_tss.cr3));
+    panic_tss.ss0   = SEL_KDATA;
+    panic_tss.esp0  = (u32)r0_stack + sizeof r0_stack;
+    panic_tss.iomap = sizeof panic_tss;
     tss_load(SEL_TSS);
     idt_set_task_gate(8,SEL_DFTSS);
 

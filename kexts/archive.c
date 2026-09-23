@@ -11,7 +11,9 @@ static ArEntry entries[AR_FILES];
 static u32 length=8;
 static u32 allocated;
 static int count,selected,scroll,dirty,type=-1,alive,extract_all,focus;
-static int working,close_timer=-1,close_question;
+static int working,pending;
+static char pending_path[202];
+static void run_pending(void);
 static char filename[28],message[100];static AppField field;
 static void say(const char *s){api->strlcpy(message,s,sizeof message);api->gui_dirty();}
 static int reserve(void)
@@ -48,28 +50,16 @@ static int validate(void)
     int ok=1;for(int i=0;i<count;i++)if(lz_unpack(data+entries[i].offset,entries[i].packed,raw,needed)!=(int)entries[i].raw){ok=0;break;}
     api->kfree(raw);return ok;
 }
-static void close_answer(int answer,void *ctx)
-{
-    (void)ctx;close_question=0;if(alive||working)return;
-    if(answer==MBR_YES)clear();
-    else api->win_open(type);
-}
-static void close_prompt(void *ctx)
-{
-    (void)ctx;api->timer_del(close_timer);close_timer=-1;
-    if(alive||working||!dirty)return;
-    close_question=1;api->msgbox("Unsaved archive","Discard the unsaved archive and close?\nChoose No to return and save your changes.",MB_YESNO,close_answer,0);
-}
 static void opened(int i)
 {
-    (void)i;alive=1;if(close_timer>=0){api->timer_del(close_timer);close_timer=-1;}
+    (void)i;alive=1;pending=0;
     if(!data)clear();else say(dirty?"Your unsaved archive is still here. Save it to keep it.":"Select a file to extract, or add more files.");
 }
 static void closed(int i)
 {
     (void)i;alive=0;if(working)return;
     if(!dirty){clear();return;}
-    if(close_timer<0&&!close_question){close_timer=api->timer_add(1,close_prompt,0);if(close_timer<0)api->notify("Unsaved archive retained. Reopen Archive Manager to save it.");}
+    pending=0;
 }
 static void work_end(void){working=0;if(!alive)closed(0);}
 static const char *leaf(const char *s){const char *b=s;for(;*s;s++)if(*s=='/'||*s==':')b=s+1;return b;}
@@ -217,10 +207,11 @@ static void save_file(int answer,void *ctx)
 static void save_now(int answer,void *ctx)
 {
     if(working)return;working=1;save_file(answer,ctx);work_end();
+    if(answer==MBR_YES&&!dirty)run_pending();else pending=0;
 }
 static void save(void)
 {
-    char name[24];if(!save_name(name)){say("Use an A: name ending in .fpa (23 characters including folder).");return;}
+    char name[24];if(!save_name(name)){pending=0;say("Use an A: name ending in .fpa (23 characters including folder).");return;}
     if(api->fs_exists(name))api->msgbox("Replace archive?","A file with this name already exists. Replace it?",MB_YESNO,save_now,0);
     else save_now(MBR_YES,0);
 }
@@ -281,15 +272,29 @@ static void remove_selected(void)
     api->memmove(data+begin,data+end,length-end);length-=end-begin;data[4]=(u8)--count;ar_index(data,length,entries);
     if(selected>=count)selected=count?count-1:0;dirty=1;say("File removed from this archive. Save to keep the change.");
 }
+static void run_pending(void)
+{
+    int next=pending;pending=0;
+    if(next==1)clear();
+    else if(next==2)api->file_picker("Open archive (.fpa or .pz)",0,0,picked_open,0);
+    else if(next==3){dirty=0;api->win_close_self(type,0);}
+    else if(next==4)load_path(pending_path);
+}
 static void confirmed(int result,void *ctx)
 {
-    if(result!=MBR_YES||!alive||working)return;
-    int action=(int)(u32)ctx;if(action==0)clear();else api->file_picker("Open archive (.fpa or .pz)",0,0,picked_open,0);
+    (void)ctx;if(!alive||working)return;
+    if(result==MBR_YES)save();else if(result==MBR_NO)run_pending();else pending=0;
+}
+static void request_action(int next)
+{
+    if(working||pending)return;pending=next;
+    if(dirty)api->msgbox("Unsaved changes","Save changes to this archive?",MB_SAVEDISCARD,confirmed,0);
+    else run_pending();
 }
 static void action(int n)
 {
     if(working)return;
-    if(n<2){if(dirty)api->msgbox("Discard changes?","This archive has unsaved changes. Discard them?",MB_YESNO,confirmed,(void *)(u32)n);else confirmed(MBR_YES,(void *)(u32)n);}
+    if(n<2)request_action(n+1);
     else if(n==2)api->file_picker("Add a file",0,0,add_path,0);
     else if(n==3)remove_selected();else if(n==4)save();
     else if(count){extract_all=n==6;api->file_picker("Extract to a folder on A: or U:",0,1,extract_to,0);}
@@ -320,7 +325,7 @@ static void draw(Win *w,int x,int y,int cw,int ch)
 }
 static void key(int i,int k)
 {
-    (void)i;if(working)return;if(k==19){save();return;}if(k=='\t'){focus=!focus;return;}
+    (void)i;if(working||pending)return;if(k==K_CLOSE_REQUEST){request_action(3);return;}if(k==14){action(0);return;}if(k==15){action(1);return;}if(k==19){save();return;}if(k=='\t'){focus=!focus;return;}
     if(focus){af_key(&field,k);return;}
     if(k==K_UP&&selected)selected--;else if(k==K_DOWN&&selected+1<count)selected++;
     else if(k==K_DEL)remove_selected();else if(k=='\n')action(5);
@@ -338,19 +343,20 @@ static void mouse(int i,int x,int y,int ev,int cw,int ch)
 static void wheel(int i,int dz){(void)i;if(working)return;selected+=dz*3;if(selected<0)selected=0;if(selected>=count)selected=count?count-1:0;}
 static int open_file(const char *name,const char *full,const u8 *bytes,int n)
 {
-    (void)bytes;(void)n;if(working){api->notify("Archive Manager is busy. Wait for it to finish.");return 0;}if(dirty){api->notify("Save or discard the current archive before opening another.");return 0;}
+    (void)bytes;(void)n;if(working||pending){api->notify("Archive Manager is busy. Wait for it to finish.");return 0;}
     char path[202];const char *p=name;
     if(full){
         if(api->strlen(full)>=sizeof path-2){api->notify("Archive path is too long.");return -1;}
         if(full[0]&&full[1]==':')p=full;
         else {api->kfmt(path,sizeof path,"u:%s",full);p=path;}
     }
-    if(api->win_open(type)<0)return -1;load_path(p);return 0;
+    if(api->win_open(type)<0)return -1;
+    api->strlcpy(pending_path,p,sizeof pending_path);request_action(4);return 0;
 }
 const KextHeader kext_header={KEXT_MAGIC,KAPI_VERSION,KEXT_KIND_APP,0,"Archive Manager"};
 int kext_entry(const Kapi *k)
 {
-    api=k;ui_init(k,0);static const AppDesc d={.live_draw=APP_INDEPENDENT,.title="Archive Manager",.max_inst=1,.in_menu=1,.resizable=1,.category=APP_CAT_PROGRAMS,
+    api=k;ui_init(k,0);static const AppDesc d={.live_draw=APP_INDEPENDENT|APP_CLOSE_REQUEST,.title="Archive Manager",.max_inst=1,.in_menu=1,.resizable=1,.category=APP_CAT_PROGRAMS,
         .open=opened,.close=closed,.draw=draw,.key=key,.mouse=mouse,.wheel=wheel,.drop=dropped,.client_size=initial,.min_client=size};
     type=k->register_app(&d);if(type<0)return 1;
     k->register_opener("fpa",open_file);k->register_opener("pz",open_file);return 0;

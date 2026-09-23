@@ -8,6 +8,7 @@
 #include "dynbuf.h"
 
 static const Kapi *api;
+#include "appfield.h"
 static int paint_type = -1;
 
 #define SW              (*api->screen_w)
@@ -46,8 +47,8 @@ static int paint_type = -1;
 
 static int    pdefw, pdefh;
 
-#define PCW_MAX 320
-#define PCH_MAX 200
+#define PCW_MAX 4096
+#define PCH_MAX 4096
 #define PAINT_INST 2
 #define TOP_H 24
 #define LEFT_W 80
@@ -57,7 +58,7 @@ static int    pdefw, pdefh;
 #define BMPHDR (54 + 1024)
 enum { PM_NORM, PM_FILE, PM_EDIT, PM_VIEW, PM_SIZE };
 enum { A_NEW, A_OPEN, A_SAVE, A_SAVEAS, A_UNDO, A_CLEAR, A_FLIPH, A_FLIPV,
-       A_ZOOM1, A_ZOOM2, A_ZOOM4, A_SIZE };
+       A_ZOOM1, A_ZOOM2, A_ZOOM4, A_SIZE, A_CLOSE, A_OPEN_PATH, A_CUSTOM };
 
 enum { T_PEN, T_LINE, T_RECT, T_BOX, T_OVAL, T_DISC, T_FILL, T_TEXT,
        T_PICK, T_ERASE };
@@ -80,6 +81,8 @@ typedef struct {
     char text[40];
     u8   fsrc;
     char fpath[96];
+    char open_path[132];
+    int modified, pending;
 } Paint;
 static Paint paints[PAINT_INST];
 static u8 active[PAINT_INST];
@@ -103,9 +106,9 @@ static const char *const tool_help[NTOOL] = {
     "Click to fill an area", "Click, type, then press Enter",
     "Click to pick a colour", "Drag to erase"
 };
-static const char *const menus[3][4] = {
+static const char *const menus[3][5] = {
     {"New          Ctrl+N", "Open...      Ctrl+O", "Save         Ctrl+S", "Save as..."},
-    {"Undo / redo  Ctrl+Z", "Clear picture", "Flip horizontally", "Flip vertically"},
+    {"Undo / redo  Ctrl+Z", "Clear picture", "Flip horizontally", "Flip vertically", "Custom"},
     {"Actual size   100%", "Zoom in       200%", "Zoom in       400%", "Canvas size..."}
 };
 static void view_clamp(Paint *p)
@@ -126,6 +129,7 @@ static void paint_reset(int inst)
 {
     active[inst]=1;
     Paint *p = &paints[inst];
+    p->modified=p->pending=0;
     if (!db_reserve(api, &p->storage, (u32)pdefw*pdefh, 1, 4096, PCW_MAX*PCH_MAX, "Paint canvas")) {
         p->cw=p->ch=0; p->zoom=1;
         strlcpy(p->msg,"Not enough memory. Close and reopen Paint.",sizeof p->msg); return;
@@ -157,6 +161,7 @@ static int undo_snap(Paint *p)
     undo_inst = (int)(p - paints);
     undo_w = p->cw;
     undo_h = p->ch;
+    p->modified=1;
     return 1;
 }
 
@@ -167,15 +172,16 @@ static int undo_swap(Paint *p)
 
     u32 n = (u32)p->cw * p->ch;
     for(u32 i=0;i<n;i++){u8 c=p->canvas[i];p->canvas[i]=undo_buf[i];undo_buf[i]=c;}
+    p->modified=1;
     return 1;
 }
 
-static void paint_set_size(Paint *p, int nw, int nh)
+static int paint_set_size(Paint *p, int nw, int nh)
 {
-    if (nw == p->cw && nh == p->ch) return;
-    if(nw<1||nh<1||nw>PCW_MAX||nh>PCH_MAX)return;
+    if (nw == p->cw && nh == p->ch) return 1;
+    if(nw<1||nh<1||nw>PCW_MAX||nh>PCH_MAX)return 0;
     if (!db_reserve(api,&p->storage,(u32)nw*nh,1,4096,PCW_MAX*PCH_MAX,"Paint canvas")) {
-        strlcpy(p->msg,"Not enough memory to resize.",sizeof p->msg); return;
+        strlcpy(p->msg,"Not enough memory to resize.",sizeof p->msg); return 0;
     }
     p->canvas=p->storage.data;
     int ow = p->cw, oh = p->ch;
@@ -188,8 +194,10 @@ static void paint_set_size(Paint *p, int nw, int nh)
     if(nh>kh)memset(p->canvas+kh*nw,C_WHITE,(nh-kh)*nw);
     p->cw = nw;
     p->ch = nh;
+    p->modified=1;
     db_trim(api,&p->storage,(u32)nw*nh,1);p->canvas=p->storage.data;
     undo_inst = -1;
+    return 1;
 }
 
 typedef void (*PlotFn)(void *ctx, int x, int y, u8 col);
@@ -266,7 +274,7 @@ static int ell_halfw(int rx, int ry, int dy)
     if (!ry) return rx;
     int t = ry * ry - dy * dy;
     if (t <= 0) return 0;
-    return (int)isqrt((u32)(rx * rx * t / (ry * ry)));
+    return (int)isqrt((u32)((double)rx * rx * t / (ry * ry)));
 }
 
 static void ras_oval(PlotFn plot, void *ctx, int x0, int y0, int x1, int y1,
@@ -360,31 +368,31 @@ static void put16(u8 *d, u16 v) { d[0]=v; d[1]=v>>8; }
 static u32  get32(const u8 *d) { return d[0]|(d[1]<<8)|(d[2]<<16)|((u32)d[3]<<24); }
 static u16  get16(const u8 *d) { return d[0]|(d[1]<<8); }
 
-static u32 paint_build_bmp(Paint *p)
+static u32 paint_build_bmp(Paint *p, u8 *data)
 {
     int rowsz = (p->cw + 3) & ~3;
     u32 imgsz = (u32)rowsz * p->ch;
     u32 fsz = BMPHDR + imgsz;
-    memset(iobuf, 0, fsz);
-    iobuf[0] = 'B'; iobuf[1] = 'M';
-    put32(iobuf + 2, fsz);
-    put32(iobuf + 10, BMPHDR);
-    put32(iobuf + 14, 40);
-    put32(iobuf + 18, p->cw);
-    put32(iobuf + 22, p->ch);
-    put16(iobuf + 26, 1);
-    put16(iobuf + 28, 8);
-    put32(iobuf + 34, imgsz);
-    put32(iobuf + 38, 2835); put32(iobuf + 42, 2835);
-    put32(iobuf + 46, 256);
+    memset(data, 0, fsz);
+    data[0] = 'B'; data[1] = 'M';
+    put32(data + 2, fsz);
+    put32(data + 10, BMPHDR);
+    put32(data + 14, 40);
+    put32(data + 18, p->cw);
+    put32(data + 22, p->ch);
+    put16(data + 26, 1);
+    put16(data + 28, 8);
+    put32(data + 34, imgsz);
+    put32(data + 38, 2835); put32(data + 42, 2835);
+    put32(data + 46, 256);
     for (int i = 0; i < 256; i++) {
         u8 r, gg, b;
         palette_rgb(i, &r, &gg, &b);
-        iobuf[54 + i * 4] = b; iobuf[54 + i * 4 + 1] = gg;
-        iobuf[54 + i * 4 + 2] = r; iobuf[54 + i * 4 + 3] = 0;
+        data[54 + i * 4] = b; data[54 + i * 4 + 1] = gg;
+        data[54 + i * 4 + 2] = r; data[54 + i * 4 + 3] = 0;
     }
     for (int f = 0; f < p->ch; f++) {
-        u8 *dst = iobuf + BMPHDR + (u32)f * rowsz;
+        u8 *dst = data + BMPHDR + (u32)f * rowsz;
         int img = p->ch - 1 - f;
         memcpy(dst, p->canvas + img * p->cw, p->cw);
     }
@@ -393,8 +401,14 @@ static u32 paint_build_bmp(Paint *p)
 
 static int paint_write_to_locked(Paint *p, int src, const char *path)
 {
-    u32 fsz = paint_build_bmp(p);
-    return src == 1 ? fat_write(path, iobuf, fsz) : fs_write(path, iobuf, fsz);
+    u32 size = BMPHDR + (u32)((p->cw + 3) & ~3) * p->ch;
+    u8 *data = size <= IOBUF_SZ ? iobuf : api->kmalloc(size);
+    if (!data) return -4;
+    if (data != iobuf) api->mem_track("Paint save buffer", data, size);
+    u32 fsz = paint_build_bmp(p, data);
+    int result = src == 1 ? fat_write(path, data, fsz) : fs_write(path, data, fsz);
+    if (data != iobuf) api->kfree(data);
+    return result;
 }
 static int paint_write_to(Paint *p,int src,const char *path){api->buffer_lock();int result=paint_write_to_locked(p,src,path);api->buffer_unlock();return result;}
 
@@ -406,20 +420,16 @@ static int paint_save_to(Paint *p, int drive, const char *path)
         return -1;
     }
     int r = paint_write_to(p, drive, path);
-    if (r == 0) kfmt(p->msg, sizeof p->msg, "saved %s", pbase(path));
+    if (r == 0) { p->modified=0;kfmt(p->msg, sizeof p->msg, "saved %s", pbase(path)); }
     else if (r == -2) strlcpy(p->msg, "disk full", sizeof p->msg);
     else if (r == -3) strlcpy(p->msg, "that name is a folder", sizeof p->msg);
+    else if (r == -4) strlcpy(p->msg, "Not enough memory to save.", sizeof p->msg);
     else strlcpy(p->msg, "save failed", sizeof p->msg);
     return r;
 }
-static void paint_save_current(Paint *p)
-{
-    paint_save_to(p, p->fsrc, p->fpath);
-}
-
 static int paint_parse_bmp(Paint *p, const u8 *bm, int n)
 {
-    if (n < 54 || bm[0] != 'B' || bm[1] != 'M') return -1;
+    if (!bm || n < 54 || bm[0] != 'B' || bm[1] != 'M') return -1;
     u32 off = get32(bm + 10);
     int w = (int)get32(bm + 18);
     int h = (int)get32(bm + 22);
@@ -428,7 +438,7 @@ static int paint_parse_bmp(Paint *p, const u8 *bm, int n)
     if(dib<40||dib>(u32)n-14||get16(bm+26)!=1||off<14+dib||off>(u32)n)return -1;
     if (get32(bm + 30) != 0 || h == (-2147483647-1)) return -1;
     int topdown = h < 0; if (topdown) h = -h;
-    if (w <= 0 || h <= 0 || (bpp != 8 && bpp != 24)) return -1;
+    if (w <= 0 || h <= 0 || w > PCW_MAX || h > PCH_MAX || (bpp != 8 && bpp != 24)) return -1;
     u32 pixel_bytes=bpp/8;
     if((u32)w>(u32)n/pixel_bytes)return -1;
     u32 rowsz=((u32)w*pixel_bytes+3)&~3u;
@@ -445,8 +455,7 @@ static int paint_parse_bmp(Paint *p, const u8 *bm, int n)
             map[i] = palette_nearest(e[2], e[1], e[0]);
         }
     }
-    int nw=w < 16 ? 16 : (w > PCW_MAX ? PCW_MAX : w);
-    int nh=h < 16 ? 16 : (h > PCH_MAX ? PCH_MAX : h);
+    int nw=w, nh=h;
     if(!db_reserve(api,&p->storage,(u32)nw*nh,1,4096,PCW_MAX*PCH_MAX,"Paint canvas"))return -1;
     p->canvas=p->storage.data;p->cw=nw;p->ch=nh;
     memset(p->canvas, C_WHITE, (u32)p->cw*p->ch);
@@ -460,6 +469,7 @@ static int paint_parse_bmp(Paint *p, const u8 *bm, int n)
         }
     }
     undo_inst = -1;
+    p->ox=p->oy=0;p->dragging=0;p->lx=p->tx=-1;p->text[0]=0;
     return 0;
 }
 
@@ -481,9 +491,25 @@ static int paint_load_spec_locked(Paint *p, const char *spec)
     int drive;
     char path[96];
     sh_spec_split(spec, &drive, path, sizeof path);
-    int n = drive == 1 ? fat_read(path, iobuf, IOBUF_SZ)
-                       : api->fs_read(path, iobuf, IOBUF_SZ);
-    if (paint_parse_bmp(p, iobuf, n) != 0) return -1;
+    u8 head[54];
+    int n = drive == 1 ? fat_read(path, head, sizeof head)
+                       : api->fs_read(path, head, sizeof head);
+    if (n != sizeof head || head[0] != 'B' || head[1] != 'M') return -1;
+    int w=(int)get32(head+18), h=(int)get32(head+22);
+    u32 bpp=get16(head+28), off=get32(head+10);
+    if (h == (-2147483647-1)) return -1;
+    if (h < 0) h=-h;
+    if(w<1||h<1||w>PCW_MAX||h>PCH_MAX||(bpp!=8&&bpp!=24))return -1;
+    u32 bytes=(((u32)w*(bpp/8)+3)&~3u)*(u32)h;
+    if(off>0x7FFFFFFFu-bytes)return -1;
+    u32 size=off+bytes;
+    u8 *data=size<=IOBUF_SZ?iobuf:api->kmalloc(size);
+    if(!data)return -1;
+    if(data!=iobuf)api->mem_track("Paint open buffer",data,size);
+    n=drive==1?fat_read(path,data,size):api->fs_read(path,data,size);
+    int result=n==(int)size?paint_parse_bmp(p,data,n):-1;
+    if(data!=iobuf)api->kfree(data);
+    if(result)return -1;
     paint_bind(p, spec);
     return 0;
 }
@@ -494,24 +520,28 @@ static void paint_opened(const char *spec, void *ctx)
 {
     Paint *p = (Paint *)ctx;
     if (!spec) return;
-    if (paint_load_spec(p, spec) == 0)
-        kfmt(p->msg, sizeof p->msg, "opened %dx%d", p->cw, p->ch);
-    else strlcpy(p->msg, "open failed", sizeof p->msg);
+    if (paint_load_spec(p, spec) == 0) {
+        p->modified=0;kfmt(p->msg, sizeof p->msg, "opened %dx%d", p->cw, p->ch);
+    }
+    else strlcpy(p->msg, "Open failed: invalid BMP, over 4096px, or low memory.", sizeof p->msg);
     win_fit_client(WT_PAINT, (int)(p - paints), paint_fit_w(p), paint_fit_h(p));
     api->gui_dirty();
 }
 
+static void paint_continue(Paint *p);
 static void paint_saved_as(const char *spec, void *ctx)
 {
     Paint *p = (Paint *)ctx;
-    if (!spec) return;
+    if (!spec) {p->pending=0;return;}
     int drive;
     char path[132];
     sh_spec_split(spec, &drive, path, sizeof path);
     if (strlen(path) >= sizeof p->fpath)
         strlcpy(p->msg, "save path too long", sizeof p->msg);
-    else if (paint_save_to(p, drive, path) == 0)
-        paint_bind(p, spec);
+    else if (paint_save_to(p, drive, path) == 0) {
+        paint_bind(p, spec);paint_continue(p);
+    }
+    p->pending=0;
     api->gui_dirty();
 }
 
@@ -525,19 +555,20 @@ static void text_commit(Paint *p, int keep)
     if (!keep) p->tx = -1;
 }
 
-static void paint_action(Paint *p, int action)
+#include "paintsize.inc"
+
+static void paint_perform(Paint *p, int action)
 {
-    text_commit(p, 0);
     p->dragging = 0; p->lx = -1; p->mode = PM_NORM; p->msg[0] = 0;
     switch (action) {
     case A_NEW:
         if(!undo_snap(p))return;
         memset(p->canvas, C_WHITE, (u32)p->cw*p->ch);
-        p->has_file = 0; p->fpath[0] = 0; break;
+        p->has_file = 0; p->fpath[0] = 0;p->modified=0; break;
     case A_OPEN:
         api->file_picker("Open picture", "bmp", 0, paint_opened, p); break;
     case A_SAVE:
-        if (p->has_file) { paint_save_current(p); break; }
+        if (p->has_file) { if(!paint_save_to(p,p->fsrc,p->fpath))paint_continue(p);else p->pending=0;break; }
 
     case A_SAVEAS:
         api->file_save("Save picture as", "bmp", p->has_file ? pbase(p->fpath) : "untitled",
@@ -554,14 +585,39 @@ static void paint_action(Paint *p, int action)
         p->zoom = 1 << (action - A_ZOOM1); view_clamp(p);
         strlcpy(p->msg, "Arrows or mouse wheel to pan", sizeof p->msg); break;
     case A_SIZE: p->mode = PM_SIZE; break;
+    case A_CUSTOM: paint_custom(p); break;
+    case A_CLOSE: api->win_close_self(WT_PAINT,(int)(p-paints));break;
+    case A_OPEN_PATH: paint_opened(p->open_path,p);break;
     }
     api->gui_dirty();
+}
+static void paint_continue(Paint *p)
+{
+    int pending=p->pending;p->pending=0;
+    if(pending)paint_perform(p,pending-1);
+}
+static void paint_answer(int result,void *ctx)
+{
+    Paint *p=ctx;
+    if(result==MBR_YES)paint_perform(p,A_SAVE);
+    else if(result==MBR_NO)paint_continue(p);
+    else p->pending=0;
+}
+static void paint_action(Paint *p,int action)
+{
+    if(p->pending)return;
+    text_commit(p,0);if(p->text[0])return;
+    if(p->modified&&(action==A_NEW||action==A_OPEN||action==A_CLOSE||action==A_OPEN_PATH)){
+        p->pending=action+1;
+        api->msgbox("Unsaved changes","Save changes to this picture?",MB_SAVEDISCARD,paint_answer,p);
+    }else paint_perform(p,action);
 }
 
 static void paint_key(int inst, int k)
 {
     Paint *p = &paints[inst];
-    if(!p->canvas)return;
+    if(k==K_CLOSE_REQUEST){if(p->canvas)paint_action(p,A_CLOSE);else api->win_close_self(WT_PAINT,inst);return;}
+    if(!p->canvas||p->pending)return;
     if (p->mode != PM_NORM) { if (k == 27) p->mode = PM_NORM; return; }
     if (k == 19) { paint_action(p, A_SAVE); return; }
     if (k == 15) { paint_action(p, A_OPEN); return; }
@@ -602,11 +658,14 @@ static void paint_wheel(int inst, int dz)
 
 static int paint_fit_w(Paint *p)
 {
-    int w = LEFT_W + p->cw + 4; return w < MINW ? MINW : w;
+    int w = LEFT_W + p->cw + 4;
+    if(w>SW-24)w=SW-24;
+    return w < MINW ? MINW : w;
 }
 static int paint_fit_h(Paint *p)
 {
-    int h = p->ch < 200 ? 200 : p->ch; return TOP_H + 8 + h + SW_H;
+    int h = TOP_H + 8 + (p->ch < 200 ? 200 : p->ch) + SW_H;
+    return h>SH-72?SH-72:h;
 }
 
 static void tool_select(Paint *p, int t)
@@ -636,15 +695,15 @@ static void paint_mouse(int inst, int lx, int ly, int ev, int cw, int ch)
             int mode = p->mode;
             int x0 = mode == PM_SIZE ? 96 : (mode - PM_FILE) * 48;
             p->mode = PM_NORM;
-            if (lx < x0 || lx >= x0 + 224 || ly < TOP_H + 2 || ly >= TOP_H + 82) return;
+            if (lx < x0 || lx >= x0 + 224 || ly < TOP_H + 2 || ly >= TOP_H + 2 + (mode == PM_EDIT ? 5 : 4) * 20) return;
             int row = (ly - TOP_H - 2) / 20;
             if (mode == PM_SIZE) {
                 text_commit(p, 0);
-                paint_set_size(p, psizes[row].w, psizes[row].h);
+                if(p->text[0] || !paint_set_size(p, psizes[row].w, psizes[row].h))return;
                 p->ox = p->oy = 0; view_clamp(p);
                 win_fit_client(WT_PAINT, inst, paint_fit_w(p), paint_fit_h(p));
                 kfmt(p->msg, sizeof p->msg, "Canvas: %d x %d pixels", p->cw, p->ch);
-            } else paint_action(p, (mode - PM_FILE) * 4 + row);
+            } else paint_action(p, mode == PM_EDIT && row == 4 ? A_CUSTOM : (mode - PM_FILE) * 4 + row);
             return;
         }
         if (lx >= 4 && lx < 76 && ly >= TOP_H + 4 && ly < TOP_H + 164) {
@@ -815,6 +874,7 @@ static void tool_icon(int t,int x,int y,u8 col)
 }
 static void paint_close(int inst)
 {
+    if(size_owner==&paints[inst])size_finish(0);
     active[inst]=0;
     db_free(api,&paints[inst].storage);paints[inst].canvas=0;
     if(undo_inst==inst){db_free(api,&undo_storage);undo_inst=-1;}
@@ -919,8 +979,9 @@ static void paint_draw(Win *w, int cx, int cy, int cw, int ch)
     if (p->mode != PM_NORM) {
         int x = cx + (p->mode == PM_SIZE ? 96 : (p->mode - PM_FILE) * 48);
         int y = cy + TOP_H;
-        panel(x, y, 224, 84, 0);
-        for (int i = 0; i < 4; i++) {
+        int rows = p->mode == PM_EDIT ? 5 : 4;
+        panel(x, y, 224, 4 + rows * 20, 0);
+        for (int i = 0; i < rows; i++) {
             int yy = y + 2 + i * 20;
             int hov = mx >= x + 2 && mx < x + 222 && my >= yy && my < yy + 20;
             int selected = p->mode == PM_VIEW && i < 3 && p->zoom == (1 << i);
@@ -955,11 +1016,17 @@ static int bmp_opener(const char *name, const char *fullpath,
     int inst = win_open(paint_type);
     if (inst < 0) return -1;
     Paint *p = &paints[inst];
+    if(p->pending){api->notify("Finish the current Paint dialog first.");return 0;}
+    if(p->modified||(p->tx>=0&&p->text[0])){
+        sh_spec_make(fullpath!=0,fullpath?fullpath:name,p->open_path,sizeof p->open_path);
+        paint_action(p,A_OPEN_PATH);return 0;
+    }
     if (paint_parse_bmp(p, data, n) != 0) return -1;
     p->has_file = 1;
     if (fullpath) { p->fsrc = 1; strlcpy(p->fpath, fullpath, sizeof p->fpath); }
     else          { p->fsrc = 0; strlcpy(p->fpath, name, sizeof p->fpath); }
     kfmt(p->msg, sizeof p->msg, "opened %s", pbase(p->fpath));
+    p->modified=0;
     p->mode = PM_NORM;
     win_fit_client(paint_type, inst, paint_fit_w(p), paint_fit_h(p));
     return 0;
@@ -986,7 +1053,7 @@ int kext_entry(const Kapi *k)
         .open = paint_reset, .close = paint_close, .draw = paint_draw, .key = paint_key,
         .mouse = paint_mouse, .client_size = paint_csize,
         .min_client = paint_min, .wheel = paint_wheel,
-        .live_draw = APP_INDEPENDENT,
+        .live_draw = APP_INDEPENDENT|APP_CLOSE_REQUEST,
     };
     paint_type = api->register_app(&d);
     if (paint_type < 0) return 1;

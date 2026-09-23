@@ -12,7 +12,9 @@ static u32 fill[2],bank,packets,dropped,file_size,file_number,usb_gen,epoch,epoc
 static u32 alloc_count,fs_count,disk_count,guard_bad;
 static char alloc_line[2][88],fs_line[2][112],disk_line[4][112];
 static const char *labels[]={"Capture network to USB (.pcap)","Log memory allocation failures",
-    "Show all disk activity","Check stack guards","Show filesystem errors"};
+    "Show all disk activity","Check stack guards","Show filesystem errors","Poison freed memory"};
+#define ROWS ((int)(sizeof labels/sizeof labels[0]))
+#define ROW_H 22
 #define CAP_BANK 524288u
 #define CAP_FILE 1048576u
 
@@ -157,7 +159,11 @@ static void shutdown(void)
 }
 static void foreground(void)
 {
-    if(!(ops.flags&~DBG_NET))return;
+    if(!ops.flags)return;
+    int marker_x=*api->screen_w-52,marker_y=*api->screen_h-52;
+    api->fill_rect(marker_x,marker_y,48,20,C_BLACK);
+    api->draw_text(marker_x+4,marker_y+2,"DEBUG",C_YELLOW);
+    if(!(ops.flags&(DBG_ALLOC|DBG_DISK|DBG_STACK|DBG_FS)))return;
     int width=*api->screen_w-8;if(width>504)width=504;
     int x=*api->screen_w-width-4,y=4;char s[88];
     int rows=0;if(ops.flags&DBG_ALLOC)rows+=3;if(ops.flags&DBG_DISK)rows+=5;
@@ -189,8 +195,8 @@ static void size(int inst,int *w,int *h){(void)inst;*w=352;*h=198;}
 static void draw(Win *w,int x,int y,int cw,int ch)
 {
     (void)w;(void)ch;
-    for(int i=0;i<5;i++){
-        int yy=y+8+i*26;api->rect(x+8,yy,14,14,i==focus?C_NAVY:C_BLACK);
+    for(int i=0;i<ROWS;i++){
+        int yy=y+8+i*ROW_H;api->rect(x+8,yy,14,14,i==focus?C_NAVY:C_BLACK);
         if(ops.flags&(1u<<i))api->draw_text(x+11,yy,"x",C_BLACK);
         api->draw_text_clip(x+30,yy,labels[i],C_BLACK,cw-38);
     }
@@ -204,17 +210,24 @@ static void draw(Win *w,int x,int y,int cw,int ch)
 }
 static void key(int inst,int k)
 {
-    (void)inst;if(k==K_UP)focus=(focus+4)%5;else if(k==K_DOWN||k=='\t')focus=(focus+1)%5;
+    (void)inst;if(k==K_UP)focus=(focus+ROWS-1)%ROWS;else if(k==K_DOWN||k=='\t')focus=(focus+1)%ROWS;
     else if(k==' '||k=='\n')toggle(focus);
 }
 static void mouse(int inst,int x,int y,int ev,int cw,int ch)
 {
     (void)inst;(void)cw;(void)ch;
-    if(ev==EV_PRESS&&x>=8&&x<344&&y>=8&&y<138){focus=(y-8)/26;toggle(focus);}
+    if(ev==EV_PRESS&&x>=8&&x<344&&y>=8&&y<8+ROWS*ROW_H){focus=(y-8)/ROW_H;toggle(focus);}
 }
 static int hotkey(int k)
 {
     if(k!=4)return 0;api->win_open(appid);core->place(appid);return 1;
+}
+static void snapshot(char *out,u32 cap)
+{
+    api->kfmt(out,cap,"Debug snapshot at tick %u (last healthy poll)\nFlags %x\nAllocation failures %u\n%s\n%s\nFilesystem errors %u\n%s\n%s\nDisk events %u\n%s\n%s\n%s\n%s\nStack guard mask %x\nCapture %s: %s\nPackets %u; recorder drops %u; file bytes %u\nBuffer fill %u/%u; bank %u; bank capacity %u\n",
+        *api->ticks,ops.flags,alloc_count,alloc_line[0],alloc_line[1],fs_count,fs_line[0],fs_line[1],
+        disk_count,disk_line[0],disk_line[1],disk_line[2],disk_line[3],guard_bad,
+        capture_name,capture_status,packets,dropped,file_size,fill[0],fill[1],bank,capture_bank);
 }
 const KextHeader kext_header={KEXT_MAGIC,KAPI_VERSION,KEXT_KIND_KERNEL,0,"Debug"};
 int kext_entry(const Kapi *k)
@@ -224,7 +237,7 @@ int kext_entry(const Kapi *k)
     static const AppDesc d={.title="Debug",.max_inst=1,.in_menu=0,.draw=draw,
         .key=key,.mouse=mouse,.client_size=size,.live_draw=APP_INDEPENDENT};
     appid=api->register_app(&d);if(appid<0)return 1;
-    ops.abi=DEBUG_ABI;ops.event=event;ops.draw=foreground;ops.packet=packet;
+    ops.abi=DEBUG_ABI;ops.event=event;ops.draw=foreground;ops.packet=packet;ops.snapshot=snapshot;
     if(api->register_service("debug",&ops)||api->register_key_hook(hotkey)||api->timer_add(5,poll,0)<0)return 1;
     api->register_shutdown(shutdown);core->bind(&ops);return 0;
 }

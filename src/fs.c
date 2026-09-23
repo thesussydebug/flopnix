@@ -172,7 +172,6 @@ static int fs_write_locked(const char *name, const u8 *buf, u32 size)
 
             if (existed) *e = saved;
             else e->used = 0;
-            commit_table();
             return -1;
         }
     }

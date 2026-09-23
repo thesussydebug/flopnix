@@ -13,6 +13,12 @@ static u32 arena_slot;
 
 static int paging_on;
 static int have_pge;
+static void page_load(u32 address)
+{
+    extern u32 panic_tss[];
+    panic_tss[7]=address;
+    __asm__ volatile("mov %0, %%cr3" :: "r"(address) : "memory");
+}
 static u32 fb_pde_first, fb_pde_count;
 int paging_active(void) { return paging_on; }
 
@@ -80,7 +86,7 @@ void paging_init(void)
         pg_span4m(fb, fblen, &fb_pde_first, &fb_pde_count);
     }
 
-    __asm__ volatile("mov %0, %%cr3" :: "r"((u32)page_dir) : "memory");
+    page_load((u32)page_dir);
 
     u32 cr4;
     __asm__ volatile("mov %%cr4, %0" : "=r"(cr4));
@@ -141,7 +147,7 @@ void paging_space_switch(int slot)
     if (slot == pd_current) return;
     pd_current = slot;
     u32 cr3 = slot < 0 ? (u32)page_dir : (u32)kext_pd[slot];
-    __asm__ volatile("mov %0, %%cr3" :: "r"(cr3) : "memory");
+    page_load(cr3);
 }
 
 int paging_space_current(void) { return pd_current; }
@@ -261,7 +267,7 @@ void paging_flush(void)
     if (!paging_on) return;
 
     u32 cr3 = pd_current < 0 ? (u32)page_dir : (u32)kext_pd[pd_current];
-    __asm__ volatile("mov %0, %%cr3" :: "r"(cr3) : "memory");
+    page_load(cr3);
 }
 
 void paging_flush_all(void)

@@ -59,6 +59,7 @@ entry_start:
     mov si, msg_badimg
     jmp halt_msg
 .cs_ok:
+    mov [img_sum], di
     mov si, msg_imgok
     call sputs
 
@@ -663,11 +664,9 @@ isr%1:
 
 isr_common:
     pushad
-    push dword [esp+40]
-    push dword [esp+40]
-    push dword [esp+40]
+    push esp
     call isr_dispatch
-    add esp, 12
+    add esp, 4
     popad
     add esp, 8
     iretd

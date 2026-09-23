@@ -408,7 +408,7 @@ static void desktop_transfer(const char *list,int mode,const char *folder)
 {
     char dest[FS_NAMELEN],msg[64];api->strlcpy(dest,folder,sizeof dest);
     ft_batch(api,list,0,dest,mode,&transfers);ft_message(api,&transfers,msg,sizeof msg);
-    say(msg);lst_touch();
+    say(msg);lst_touch();ft_report(api,&transfers);
 }
 static void place_on_desk(const char *spec,int move)
 {desktop_transfer(spec,move?FT_DRAG:FT_COPY,"desktop");}

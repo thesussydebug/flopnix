@@ -1,6 +1,10 @@
 /* Records faults and recovers when the affected context allows it. */
 #include "os.h"
 #include "faultring.inc"
+#include "panicnet.h"
+
+const PanicMonitor *panic_monitor;
+
 
 volatile int fault_armed[THR_MAX];
 JmpBuf fault_ctx[THR_MAX];
@@ -20,7 +24,7 @@ void fault_notice(void)
     fault_show_banner(msg);
 }
 
-static FaultRec fault_hist[FAULT_HIST];
+FaultRec fault_hist[FAULT_HIST];
 
 int fault_count(void) { return fault_ring_count(fault_recoveries); }
 
@@ -33,31 +37,28 @@ const FaultRec *fault_get(int i)
 static void fault_record(u32 vec, u32 err, u32 eip)
 {
     FaultRec *r = &fault_hist[fault_recoveries % FAULT_HIST];
+    memset(r,0,sizeof *r);
+    r->sequence=fault_recoveries+1;
+    r->cr2=fault_cr2;
     r->vec  = vec;
     r->err  = err;
     r->eip  = eip;
     r->tick = ticks;
-    const char *who = kext_at(eip);
-    char tm[96];
-    kfmt(tm, sizeof tm, "RECOVERED P%u eip %x cr2 %x err %x in %s",
-         vec, eip, fault_cr2, err, who ? who : "kernel/unknown");
+    fault_snapshot(r);
+    char tm[192];
+    kfmt(tm, sizeof tm, "RECOVERED P%u eip %x cr2 %x err %x at %s",
+         vec, eip, fault_cr2, err, r->location);
     ktrace(tm);
-    int i = 0;
-    if (who) for (; who[i] && i < (int)sizeof r->owner - 1; i++) r->owner[i] = who[i];
-    else     for (const char *k = "kernel"; *k && i < (int)sizeof r->owner - 1; k++) r->owner[i++] = *k;
-    r->owner[i] = 0;
 }
 
 void fault_record_hang(const char *who)
 {
     FaultRec *r = &fault_hist[fault_recoveries % FAULT_HIST];
+    memset(r,0,sizeof *r);
+    r->sequence=fault_recoveries+1;
     r->vec  = FAULT_VEC_HANG;
-    r->err  = 0;
-    r->eip  = 0;
     r->tick = ticks;
-    int i = 0;
-    if (who) for (; who[i] && i < (int)sizeof r->owner - 1; i++) r->owner[i] = who[i];
-    r->owner[i] = 0;
+    strlcpy(r->owner,who?who:"",sizeof r->owner);
     fault_vec = FAULT_VEC_HANG;
     fault_err = 0;
     fault_eip = 0;
@@ -68,8 +69,9 @@ void fault_record_hang(const char *who)
     fault_recoveries++;
 }
 
-void fault_handle(u32 vec, u32 err, u32 eip)
+void fault_handle(const u32 *frame)
 {
+    u32 vec=frame[8],err=frame[9],eip=frame[10];
     if (panic_active || vec==8 || thr_self<0 || thr_self>=THR_MAX)
         emergency_enter(vec,err,eip,vec==14 ? page_fault_addr() : 0,vec==8 ? EM_DOUBLE : EM_REPORT);
 
@@ -98,5 +100,6 @@ void fault_handle(u32 vec, u32 err, u32 eip)
 
         fj_long(&fault_ctx[ft], (int)vec + 1);
     }
+    if(panic_monitor)panic_monitor->capture(frame);
     panic(vec, err, eip);
 }

@@ -120,26 +120,37 @@ static int ft_transfer(const Kapi *k,const char *spec,int drive,const char *dir,
 static void ft_batch(const Kapi *k,const char *list,int drive,const char *dir,int mode,FtBatch *b)
 {
     static char work[FT_LIST];k->strlcpy(work,list,sizeof work);k->memset(b,0,sizeof *b);
-    int pending=0;char *p=work;
+    int pending=0,index=0;char *p=work;
+    for(const char *s=work;*s;s++)if(*s!='\n'&&(s==work||s[-1]=='\n'))b->total++;
+    k->esc_arm();
     while(*p){char *end=p;while(*end&&*end!='\n')end++;char save=*end;*end=0;
-        if(*p){int moved=0;char dst[FT_PATHMAX];b->total++;
-            k->busy_set(mode==FT_COPY?"Copying":"Transferring",ft_leaf(p),-1);
-            int rc=ft_transfer(k,p,drive,dir,mode,dst,&moved);
-            if(rc<0){
-                b->failed++;if(!b->first[0])k->strlcpy(b->first,ft_reason(rc),sizeof b->first);
+        if(*p){int moved=0;char dst[FT_PATHMAX],label[FT_PATHMAX+24];
+            k->kfmt(label,sizeof label,"%d of %d: %s",++index,b->total,ft_leaf(p));
+            if(!b->cancelled)k->busy_set(mode==FT_COPY?"Copying (Esc to stop)":"Transfer (Esc to stop)",label,(index-1)*256/b->total);
+            if(k->esc_pending())b->cancelled=1;
+            int rc=b->cancelled?0:ft_transfer(k,p,drive,dir,mode,dst,&moved);
+            if(b->cancelled||rc<0){
+                if(b->cancelled||rc==FT_EXISTS)b->skipped++;else b->failed++;
+                if(rc==FT_DELETE)b->copied++;
+                if(rc<0&&!b->first[0]){k->strlcpy(b->first,ft_reason(rc),sizeof b->first);k->strlcpy(b->first_file,p,sizeof b->first_file);}
                 int n=k->strlen(p);if(pending+n+2<FT_LIST){if(pending)b->pending[pending++]='\n';k->memcpy(b->pending+pending,p,n+1);pending+=n;}
-            }else if(rc==1)b->same++;
+            }else if(rc==1){b->same++;b->skipped++;}
             else{if(moved)b->moved++;else b->copied++;k->strlcpy(b->last,ft_leaf(dst),sizeof b->last);}
         }if(!save)break;p=end+1;
     }k->busy_end();k->broadcast("file.changed","");k->gui_dirty();
 }
 static void ft_message(const Kapi *k,const FtBatch *b,char *out,int cap)
 {
-    if(b->failed){if(b->total==1)k->strlcpy(out,b->first,cap);else k->kfmt(out,cap,"%d of %d done: %s",b->total-b->failed,b->total,b->first);}
-    else if(b->total==b->same)k->strlcpy(out,"Already in this folder",cap);
-    else if(b->copied+b->moved==1)k->kfmt(out,cap,"%s: %s",b->moved?"Moved":"Copied",b->last);
-    else if(b->copied&&b->moved)k->kfmt(out,cap,"%d copied, %d moved",b->copied,b->moved);
-    else k->kfmt(out,cap,"%d items %s",b->copied+b->moved,b->moved?"moved":"copied");
+    if(b->total==1&&!b->skipped&&!b->failed)k->kfmt(out,cap,"1 %s: %s",b->moved?"moved":"copied",b->last);
+    else k->kfmt(out,cap,"%d copied, %d moved, %d skipped, %d failed",b->copied,b->moved,b->skipped,b->failed);
+}
+static void ft_report(const Kapi *k,const FtBatch *b)
+{
+    if(!b->failed&&!b->cancelled&&b->skipped==b->same)return;
+    char summary[64],text[288];ft_message(k,b,summary,sizeof summary);
+    k->kfmt(text,sizeof text,"%s. %s\n%s\n%s",summary,
+        b->cancelled?"Stopped; completed items kept.":"Completed items kept.",b->first_file,b->first);
+    k->msgbox(b->cancelled?"Transfer stopped":"Transfer results",text,MB_OK,0,0);
 }
 static int ft_clip_get(const Kapi *k,char *list,int *mode)
 {

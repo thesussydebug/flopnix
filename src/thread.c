@@ -18,8 +18,11 @@ typedef struct {
     char name[12];
 } Thread;
 
-static Thread thr[THR_MAX];
+Thread panic_threads[THR_MAX];
+_Static_assert(sizeof(Thread)==32,"thread diagnostic layout");
 static u8 stacks[THR_MAX][THR_STACK] __attribute__((aligned(16)));
+static u8 fpu_state[THR_MAX][108] __attribute__((aligned(16)));
+static int fpu_on;
 
 static int thr_on;
 static int preempt;
@@ -43,21 +46,28 @@ int thread_overflowed(void) { return thr_overflow; }
 u32 thread_guard_mask(void)
 {
     u32 bad=0,f=irq_save();
-    for(int i=1;i<THR_MAX;i++)if(thr[i].state!=THR_FREE&&!stack_ok(i))bad|=1u<<i;
+    for(int i=1;i<THR_MAX;i++)if(panic_threads[i].state!=THR_FREE&&!stack_ok(i))bad|=1u<<i;
     irq_restore(f);return bad;
 }
 
 void thr_switch(u32 *save_esp, u32 load_esp);
 void thr_bootstrap(void);
 
-static int thread_state(int s) { return (s < 0 || s >= THR_MAX) ? THR_FREE : thr[s].state; }
+static int thread_state(int s) { return (s < 0 || s >= THR_MAX) ? THR_FREE : panic_threads[s].state; }
 
 void threads_init(void)
 {
     if (thr_on) return;
-    for (int i = 0; i < THR_MAX; i++) { thr[i].state = THR_FREE; thr[i].kext = -1; }
-    thr[0].state = THR_RUN;
-    strlcpy(thr[0].name, "main", sizeof thr[0].name);
+    u32 cr0;
+    __asm__ volatile("mov %%cr0,%0" : "=r"(cr0));
+    if (!(cr0 & 12)) {
+        u16 status = 0xffff;
+        __asm__ volatile("fninit; fnstsw %0" : "+m"(status));
+        fpu_on = status == 0;
+    }
+    for (int i = 0; i < THR_MAX; i++) { panic_threads[i].state = THR_FREE; panic_threads[i].kext = -1; }
+    panic_threads[0].state = THR_RUN;
+    strlcpy(panic_threads[0].name, "main", sizeof panic_threads[0].name);
     thr_self = 0;
     thr_on = 1;
 }
@@ -67,7 +77,7 @@ int thread_create(void (*fn)(void), const char *name)
     if (!thr_on || !fn) return -1;
     int s = -1;
     for (int i = 1; i < THR_MAX; i++)
-        if (thr[i].state == THR_FREE || thr[i].state == THR_DEAD) { s = i; break; }
+        if (panic_threads[i].state == THR_FREE || panic_threads[i].state == THR_DEAD) { s = i; break; }
     if (s < 0) return -1;
 
     u32 *fill = (u32 *)stacks[s];
@@ -80,14 +90,14 @@ int thread_create(void (*fn)(void), const char *name)
     *--sp = 0;
     *--sp = 0;
     *--sp = 0;
-    thr[s].esp = (u32)sp;
-    thr[s].creator = kext_owner_now();
-    thr[s].kext = -1;
-    strlcpy(thr[s].name, name ? name : "thread", sizeof thr[s].name);
-    thr[s].state = THR_READY;
+    panic_threads[s].esp = (u32)sp;
+    panic_threads[s].creator = kext_owner_now();
+    panic_threads[s].kext = -1;
+    strlcpy(panic_threads[s].name, name ? name : "thread", sizeof panic_threads[s].name);
+    panic_threads[s].state = THR_READY;
     if (!thr_testing) {
         char m[40];
-        kfmt(m, sizeof m, "thread %d started (%s)", s, thr[s].name);
+        kfmt(m, sizeof m, "thread %d started (%s)", s, panic_threads[s].name);
         ktrace(m);
     }
     return s;
@@ -99,31 +109,33 @@ static void reschedule(void)
 
     if (!stack_ok(thr_self)) {
         thr_overflow = thr_self;
-        thr[thr_self].state = THR_DEAD;
+        panic_threads[thr_self].state = THR_DEAD;
         if (!thr_testing) {
             char m[56];
             kfmt(m, sizeof m, "thread %d (%s) BLEW ITS STACK - killed",
-                 thr_self, thr[thr_self].name);
+                 thr_self, panic_threads[thr_self].name);
             klog(m); klog("\n");
             ktrace(m);
         }
     }
     unsigned char st[THR_MAX];
     for (int i = 0; i < THR_MAX; i++)
-        st[i] = stack_ok(i) ? thr[i].state : THR_DEAD;
+        st[i] = stack_ok(i) ? panic_threads[i].state : THR_DEAD;
     int nxt = sched_next(st, THR_MAX, thr_self);
     if (nxt < 0 || nxt == thr_self) return;
 
     int prev = thr_self;
-    if (thr[prev].state == THR_RUN) thr[prev].state = THR_READY;
-    thr[nxt].state = THR_RUN;
-    thr[nxt].runs++;
+    if (panic_threads[prev].state == THR_RUN) panic_threads[prev].state = THR_READY;
+    panic_threads[nxt].state = THR_RUN;
+    panic_threads[nxt].runs++;
 
-    thr[prev].kext = kext_current();
+    panic_threads[prev].kext = kext_current();
     cpu_thread_switch(nxt);
+    if (fpu_on) __asm__ volatile("fnsave %0; fwait" : "=m"(fpu_state[prev]) :: "memory");
     thr_self = nxt;
-    thr_switch(&thr[prev].esp, thr[nxt].esp);
-    kext_enter(thr[prev].kext);
+    thr_switch(&panic_threads[prev].esp, panic_threads[nxt].esp);
+    kext_enter(panic_threads[prev].kext);
+    if (fpu_on) __asm__ volatile("frstor %0" :: "m"(fpu_state[prev]) : "memory");
 }
 
 void thr_yield(void)
@@ -149,19 +161,32 @@ int  thr_preempt_on(void)    { return preempt; }
 void thr_exit(void)
 {
     irq_save();
-    if (thr_on && thr_self > 0) thr[thr_self].state = THR_DEAD;
+    if (thr_on && thr_self > 0) panic_threads[thr_self].state = THR_DEAD;
     for (;;) { reschedule(); sti(); hlt(); cli(); }
 }
 
 static volatile char tt_seq[16];
 static volatile int  tt_n;
+static volatile int tt_fpu_failed;
 
 static void tt_mark(char c)
 {
     if (tt_n < (int)sizeof tt_seq - 1) tt_seq[tt_n++] = c;
 }
-static void tt_a(void) { for (int i = 0; i < 4; i++) { tt_mark('a'); thr_yield(); } }
-static void tt_b(void) { for (int i = 0; i < 4; i++) { tt_mark('b'); thr_yield(); } }
+static void tt_run(int value)
+{
+    for (int i = 0; i < 4; i++) {
+        int result;
+        if (fpu_on) __asm__ volatile("fildl %0" :: "m"(value) : "st");
+        tt_mark((char)value); thr_yield();
+        if (fpu_on) {
+            __asm__ volatile("fistpl %0" : "=m"(result) :: "st");
+            if (result != value) tt_fpu_failed = 1;
+        }
+    }
+}
+static void tt_a(void) { tt_run('a'); }
+static void tt_b(void) { tt_run('b'); }
 
 static Mutex tt_mx = MUTEX_INIT;
 static volatile int tt_shared;
@@ -206,25 +231,26 @@ static u32 stack_used(int s)
 int thread_info(int slot, ThreadInfo *o)
 {
     if (slot < 0 || slot >= THR_MAX || !o) return 0;
-    o->state = thr[slot].state;
-    o->runs  = thr[slot].runs;
+    o->state = panic_threads[slot].state;
+    o->runs  = panic_threads[slot].runs;
     o->stack_used = stack_used(slot);
     o->stack_size = THR_STACK;
-    strlcpy(o->name, thr[slot].state == THR_FREE ? "-" : thr[slot].name,
+    strlcpy(o->name, panic_threads[slot].state == THR_FREE ? "-" : panic_threads[slot].name,
             sizeof o->name);
-    return thr[slot].state != THR_FREE;
+    return panic_threads[slot].state != THR_FREE;
 }
 
 int threads_selftest(void)
 {
     thr_testing = 1;
-    tt_n = 0;
+    tt_n = tt_fpu_failed = 0;
     int a = thread_create(tt_a, "t-a");
     int b = thread_create(tt_b, "t-b");
     if (a < 0 || b < 0) { thr_testing = 0; return 3; }
     tt_wait2(a, b, 400);
     if (thread_state(a) != THR_DEAD || thread_state(b) != THR_DEAD) { thr_testing = 0; return 1; }
     if (tt_n < 8) { thr_testing = 0; return 2; }
+    if (tt_fpu_failed) { thr_testing = 0; return 9; }
     int swaps = 0;
     for (int i = 1; i < tt_n; i++) if (tt_seq[i] != tt_seq[i - 1]) swaps++;
     if (swaps < 4) { thr_testing = 0; return 4; }
@@ -301,7 +327,7 @@ void mtx_unwind(int snap)
 int thread_kext_busy(int owner)
 {
     for (int i=0;i<THR_MAX;i++)
-        if (i!=thr_self && thr[i].state!=THR_FREE && thr[i].state!=THR_DEAD &&
-            (thr[i].creator==owner || thr[i].kext==owner)) return 1;
+        if (i!=thr_self && panic_threads[i].state!=THR_FREE && panic_threads[i].state!=THR_DEAD &&
+            (panic_threads[i].creator==owner || panic_threads[i].kext==owner)) return 1;
     return 0;
 }

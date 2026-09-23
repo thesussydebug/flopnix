@@ -18,10 +18,11 @@ typedef struct Blk {
 } Blk;
 
 static Blk *freelist;
-static u32 heap_top;
-static u32 grow_base, grow_top, grow_limit;
+u32 heap_top;
+u32 grow_base, grow_top;
+static u32 grow_limit;
 static u8 heap_on;
-static MemBuffer buffers[32];
+MemBuffer panic_buffers[32];
 
 void mem_track(const char *name, const void *ptr, u32 size)
 {
@@ -29,24 +30,24 @@ void mem_track(const char *name, const void *ptr, u32 size)
     if(!size){mem_untrack(ptr);return;}
     u32 flags=irq_save();
     int slot=-1;
-    for(int i=0;i<32;i++){if(buffers[i].size&&buffers[i].base==(u32)ptr){slot=i;break;}if(!buffers[i].size)slot=i;}
+    for(int i=0;i<32;i++){if(panic_buffers[i].size&&panic_buffers[i].base==(u32)ptr){slot=i;break;}if(!panic_buffers[i].size)slot=i;}
     if(slot>=0){int i=slot;
-        strlcpy(buffers[i].name,name,sizeof buffers[i].name);
-        buffers[i].base=(u32)ptr;buffers[i].size=size;buffers[i].owner=kext_owner_now();irq_restore(flags);return;
+        strlcpy(panic_buffers[i].name,name,sizeof panic_buffers[i].name);
+        panic_buffers[i].base=(u32)ptr;panic_buffers[i].size=size;panic_buffers[i].owner=kext_owner_now();irq_restore(flags);return;
     }
     irq_restore(flags);
 }
 void mem_untrack(const void *ptr)
 {
     u32 flags=irq_save();
-    for(int i=0;i<32;i++)if(buffers[i].base==(u32)ptr)buffers[i].size=0;
+    for(int i=0;i<32;i++)if(panic_buffers[i].base==(u32)ptr)panic_buffers[i].size=0;
     irq_restore(flags);
 }
 int mem_buffer(int index, MemBuffer *out)
 {
     if(index<0||!out)return 0;
     u32 flags=irq_save();MemBuffer value;int found=0;
-    for(int i=0;i<32;i++)if(buffers[i].size&&index--==0){value=buffers[i];found=1;break;}
+    for(int i=0;i<32;i++)if(panic_buffers[i].size&&index--==0){value=panic_buffers[i];found=1;break;}
     irq_restore(flags);if(found)*out=value;return found;
 }
 
@@ -69,6 +70,7 @@ static void split(Blk *b, u32 n)
 {
     if (b->size < n + sizeof(Blk) + 8) return;
     Blk *rest = (Blk *)((u8 *)(b + 1) + n);
+    if (!b->free && (debug_flags() & DBG_POISON)) memset(rest, 0xdd, b->size - n);
     rest->magic = HMAGIC;
     rest->size = b->size - n - sizeof(Blk);
     rest->free = 1;
@@ -153,9 +155,9 @@ void *krealloc(void *p, u32 n)
         if (!next) { irq_restore(flags); return 0; }
         memcpy(next, p, b->size);
     }
-    for (int i = 0; i < 32; i++) if (buffers[i].size && buffers[i].base == (u32)p) {
-        buffers[i].base = (u32)next;
-        buffers[i].size = n;
+    for (int i = 0; i < 32; i++) if (panic_buffers[i].size && panic_buffers[i].base == (u32)p) {
+        panic_buffers[i].base = (u32)next;
+        panic_buffers[i].size = n;
     }
     if (next != p) kfree(p);
     irq_restore(flags);
@@ -170,6 +172,7 @@ void kfree(void *p)
     if (!heap_contains((u32)b)) {irq_restore(flags);return;}
     if (b->magic != HMAGIC || b->free) {irq_restore(flags);return;}
     mem_untrack(p);
+    if (debug_flags() & DBG_POISON) memset(p, 0xdd, b->size);
     b->free = 1;
     for (Blk *s = freelist; s; s = s->next)
         while (s->free && s->next && s->next->free &&

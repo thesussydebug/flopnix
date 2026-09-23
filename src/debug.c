@@ -19,6 +19,8 @@ static void debug_place(int type)
 
 const DebugCore debug_core={DEBUG_ABI,debug_bind,thread_guard_mask,fat_append,debug_place};
 
+u32 debug_flags(void){return sink?sink->flags:0;}
+
 void debug_event(u32 kind,const char *name,u32 a,u32 b,int result)
 {
     if(sink&&(sink->flags&kind))sink->event(kind,name,a,b,result);

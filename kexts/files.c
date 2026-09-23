@@ -583,33 +583,43 @@ static void open_row(int i)
         nav_to(1, "", np);
         return;
     }
-    if (r->size > 256 * 1024) {
-        strlcpy(F->fm_msg, "too big to open (256 KB max)", sizeof F->fm_msg);
+    if (r->size >= 0x7FFFFFFFu) {
+        strlcpy(F->fm_msg, "file is too large to open", sizeof F->fm_msg);
         return;
     }
+    u32 capacity = r->size + 1;
+    u8 *data = capacity <= IOBUF_SZ ? iobuf : api->kmalloc(capacity);
+    if (!data) {
+        strlcpy(F->fm_msg, "not enough memory to open file", sizeof F->fm_msg);
+        return;
+    }
+    if (data != iobuf) api->mem_track("Files open buffer", data, capacity);
+    api->buffer_lock();
 
     api->busy_set("Opening", r->name, -1);
     if (F->cur_drive == 0) {
-        int n = fs_read(r->name, iobuf, IOBUF_SZ);
-        if (n < 0) strlcpy(F->fm_msg, "read failed", sizeof F->fm_msg);
-        else if (opener_dispatch(r->name, 0, iobuf, n) != 0)
+        int n = fs_read(r->name, data, capacity);
+        if (n < 0 || (u32)n != r->size) strlcpy(F->fm_msg, "could not read complete file", sizeof F->fm_msg);
+        else if (opener_dispatch(r->name, 0, data, n) != 0)
             strlcpy(F->fm_msg, "no app for this file", sizeof F->fm_msg);
     } else {
         char full[192];
         int pl = strlen(F->cur_path);
         if (pl > 1) kfmt(full, sizeof full, "%s/%s", F->cur_path, r->name);
         else kfmt(full, sizeof full, "/%s", r->name);
-        int len = fat_read(full, iobuf, IOBUF_SZ);
-        if (len < 0) strlcpy(F->fm_msg, "read failed", sizeof F->fm_msg);
+        int len = fat_read(full, data, capacity);
+        if (len < 0 || (u32)len != r->size) strlcpy(F->fm_msg, "could not read complete file", sizeof F->fm_msg);
         else {
             char nm[64], fp[192];
             strlcpy(nm, r->name, sizeof nm);
             strlcpy(fp, full, sizeof fp);
-            if (opener_dispatch(nm, fp, iobuf, len) != 0)
+            if (opener_dispatch(nm, fp, data, len) != 0)
                 strlcpy(F->fm_msg, "no app for this file", sizeof F->fm_msg);
         }
     }
     api->busy_end();
+    api->buffer_unlock();
+    if (data != iobuf) api->kfree(data);
 }
 
 static void begin_rename(void);
@@ -844,7 +854,7 @@ static void copy_list_to(const char *list,int drive,const char *adir,const char 
 {
     Fm *target=F;char dir[128];strlcpy(dir,drive?upath:adir,sizeof dir);
     ft_batch(api,list,drive,dir,mode,&transfers);
-    F=target;F->need_refresh=1;ft_message(api,&transfers,F->fm_msg,sizeof F->fm_msg);
+    F=target;F->need_refresh=1;ft_message(api,&transfers,F->fm_msg,sizeof F->fm_msg);ft_report(api,&transfers);
 }
 
 static void say_count(const char *verb, int n, int dropped)

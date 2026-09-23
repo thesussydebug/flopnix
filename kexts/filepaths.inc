@@ -6,8 +6,8 @@ enum { FT_PATH=-1, FT_MISSING=-2, FT_EXISTS=-3, FT_MEMORY=-4,
 #define FT_LIST 4096
 #define FT_PATHMAX 96
 typedef struct {
-    int total, copied, moved, same, failed;
-    char first[64], last[FT_PATHMAX], pending[FT_LIST];
+    int total, copied, moved, same, failed, skipped, cancelled;
+    char first[64], first_file[FT_PATHMAX+2], last[FT_PATHMAX], pending[FT_LIST];
 } FtBatch;
 
 static const char *ft_reason(int rc)

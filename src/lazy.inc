@@ -40,19 +40,14 @@ static void lazy_catalog(void)
 int app_ensure_loaded(int type)
 {
     int owner=app_type_owner(type);
-    if (owner>=0 && kexts[owner].status==46)
+    if (owner>=0 && kexts[owner].status)
         return kext_load(kexts[owner].name)==0;
-    if (owner>=0 && kexts[owner].status) return 0;
     for (int i = 0; i < NLAZY; i++) {
         if (lazy_types[i] != type + 1) continue;
         if (lazy_state[i] == 2) return 1;
         if (lazy_state[i] == 1) return app_type_owner(type) >= 0;
         int r = kext_load(lazy_specs[i].file);
         if (!r) return 1;
-        char msg[96];
-        kfmt(msg, sizeof msg, "%s: %s (E%d)", lazy_specs[i].title,
-             r == 42 ? "not enough memory; close another app and retry" : "could not load from floppy", r);
-        klog(msg); klog("\n"); fault_show_banner(msg);
         return 0;
     }
     return type >= 0 && type < app_count();

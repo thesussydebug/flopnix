@@ -64,6 +64,7 @@ for name in sorted(expected):
     entry = files['sys/'+name]
     offset = entry['start']*512
     assert image[offset:offset+entry['size']] == built, name
+assert {p.name for p in (root/'built').iterdir()} == {'flopnix.img', 'flopnix.ku', 'flopnix-update.json', 'kexts'}
 print(f'PASS: image, kernel update, boot checksum, and all {len(expected)} production extensions match.')
 for name in ('flopnix.img', 'flopnix.ku'):
     data = (root/'built'/name).read_bytes()

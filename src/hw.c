@@ -184,13 +184,16 @@ void irq_unregister(int irq)
 }
 
 volatile int in_irq;
+const u32 *panic_frame;
 
-void isr_dispatch(u32 vec, u32 err, u32 eip)
+__attribute__((minsize)) void isr_dispatch(const u32 *frame)
 {
+    u32 vec=frame[8],err=frame[9],eip=frame[10];
     if (panic_active>=2) { cli(); for (;;) hlt(); }
+    panic_frame=frame;
     if (vec==2) emergency_enter(vec,err,eip,0,EM_NMI);
     if (emergency_irq(vec,eip)) return;
-    if (vec < 32) { fault_handle(vec, err, eip); return; }
+    if (vec < 32) { fault_handle(frame); return; }
 
     if (vec >= 48) return;
 

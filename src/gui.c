@@ -25,7 +25,7 @@ u8 gui_dirty;
 u8 gui_blink;
 u8 gui_up;
 
-static char fault_banner[72];
+static char fault_banner[128];
 static u32  fault_banner_until;
 
 static char busy_title[24], busy_msg[44];
@@ -34,7 +34,7 @@ static u8   busy_on;
 void fault_show_banner(const char *msg)
 {
     strlcpy(fault_banner, msg, sizeof fault_banner);
-    fault_banner_until = ticks + 500;
+    fault_banner_until = ticks + 800;
     gui_dirty = 1;
 }
 
@@ -952,7 +952,12 @@ void gui_mouse(int dx, int dy, u8 btn, u32 when)
         if (!in(mx, my, w->x, w->y, w->w, w->h)) continue;
         win_raise(i);
         int cbx = w->x + w->w - BORDER - 17, cby = w->y + BORDER + 1;
-        if (in(mx, my, cbx, cby, 16, 16)) { win_close(i); return; }
+        if (in(mx, my, cbx, cby, 16, 16)) {
+            const AppDesc *d=app_desc(w->type);
+            if(d&&(d->live_draw&APP_CLOSE_REQUEST)&&!app_unresponsive(i))app_key(w,K_CLOSE_REQUEST);
+            else win_close(i);
+            return;
+        }
         if (app_resizable(w->type) &&
             in(mx, my, w->x + w->w - GRIP, w->y + w->h - GRIP, GRIP, GRIP)) {
             resize_win = i;
@@ -1183,10 +1188,13 @@ void gui_compose(void)
         draw_text_clip(gx + 17, gy + 2, dnd_label, C_BLACK, 110 - 21);
     }
     if (fault_banner[0] && ticks < fault_banner_until) {
-        int bw = (int)strlen(fault_banner) * 8 + 16;
-        fill_rect(SW / 2 - bw / 2, 2, bw, 16, C_MAROON);
-        rect(SW / 2 - bw / 2, 2, bw, 16, C_RED);
-        draw_text(SW / 2 - bw / 2 + 8, 4, fault_banner, C_WHITE);
+        int len=strlen(fault_banner),cols=(SW-32)/8,rows=(len+cols-1)/cols;
+        int bw=(len<cols?len:cols)*8+16,x=(SW-bw)/2;
+        fill_rect(x,2,bw,rows*16,C_MAROON);rect(x,2,bw,rows*16,C_RED);
+        for(int row=0;row<rows;row++){
+            char line[128];int n=len-row*cols;if(n>cols)n=cols;
+            memcpy(line,fault_banner+row*cols,n);line[n]=0;draw_text(x+8,4+row*16,line,C_WHITE);
+        }
     }
     if (busy_on) {
 

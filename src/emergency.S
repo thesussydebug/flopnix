@@ -16,10 +16,14 @@ emergency_enter:
     movw %di, %ss
     movl $emergency_stack+8192, %esp
 
+    movl %cr3, %edi
+    movl %edi, panic_controls+4
     movl %cr0, %edi
+    movl %edi, panic_controls
     testl $0x80000000, %edi
     jz 1f
     movl %cr4, %edi
+    movl %edi, panic_controls+8
     andl $~0x80, %edi
     movl %edi, %cr4
     movl $emergency_pd, %edi

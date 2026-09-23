@@ -746,15 +746,15 @@ static volatile u8 hang_ended;
 
 static void app_recover(Win *w)
 {
-    char msg[72];
-    const char *who = kext_at(fault_eip);
+    char msg[128];
+    const FaultRec *fault = fault_get(0);
     const char *nm = w->tbuf_on ? w->tbuf : w->title;
     if (hang_ended) {
         hang_ended = 0;
         kfmt(msg, sizeof msg, "%s stopped responding - ended", nm);
     } else {
-        kfmt(msg, sizeof msg, "%s crashed (P%u) - window closed",
-             who ? who : nm, fault_vec);
+        kfmt(msg, sizeof msg, "P%u %s - window closed",
+             fault_vec, fault ? fault->location : nm);
     }
     klog(msg);
     if (!fault_fallback[thr_self]) fault_show_banner(msg);

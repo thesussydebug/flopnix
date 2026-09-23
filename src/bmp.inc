@@ -24,16 +24,16 @@ static inline int bmp_head(const u8 *bm, u32 n, BmpHead *o)
     if (bm[0] != 'B' || bm[1] != 'M') return -1;
     if (bmp_u32(bm + 30) != 0) return -1;
     u32 dib = bmp_u32(bm + 14);
-    if (dib < 40) return -1;
+    if (dib < 40 || dib > n - 14 || bmp_u16(bm + 26) != 1) return -1;
 
     int w = (int)bmp_u32(bm + 18);
     int h = (int)bmp_u32(bm + 22);
     u32 bpp = bmp_u16(bm + 28);
     if (bpp != 8 && bpp != 24) return -1;
 
+    if (w <= 0 || w > BMP_MAXDIM || !h || h < -BMP_MAXDIM || h > BMP_MAXDIM) return -1;
     int topdown = h < 0;
     if (topdown) h = -h;
-    if (w <= 0 || h <= 0 || w > BMP_MAXDIM || h > BMP_MAXDIM) return -1;
 
     o->w = w;
     o->h = h;
@@ -47,10 +47,8 @@ static inline int bmp_head(const u8 *bm, u32 n, BmpHead *o)
 
 static inline int bmp_row_ok(const BmpHead *o, int row, u32 n)
 {
-    if (!o || row < 0 || row >= o->h) return 0;
-    u32 end = o->off + (u32)(row + 1) * o->rowsz;
-    if (end < o->off) return 0;
-    return end <= n;
+    if (!o || row < 0 || row >= o->h || !o->rowsz || o->off > n) return 0;
+    return (u32)row < (n - o->off) / o->rowsz;
 }
 
 static inline int bmp_src_row(const BmpHead *o, int y)

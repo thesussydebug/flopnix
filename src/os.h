@@ -9,7 +9,7 @@ typedef __builtin_va_list va_list;
 #define va_arg(v, t)   __builtin_va_arg(v, t)
 
 #define OS_NAME    "FLOPNIX"
-#define OS_VER     "0.8.5_2"
+#define OS_VER     "0.8.6"
 #ifndef OS_BUILD_DATE
 #define OS_BUILD_DATE "unknown"
 #endif
@@ -172,7 +172,7 @@ int emergency_irq(u32 vec,u32 eip);
 __attribute__((noreturn)) void emergency_enter(u32 vec,u32 err,u32 eip,u32 cr2,u32 reason);
 void idt_set_task_gate(int vec,u16 selector);
 void panic(u32 vec, u32 err, u32 eip);
-void fault_handle(u32 vec, u32 err, u32 eip);
+void fault_handle(const u32 *frame);
 u32  cpu_now(void);
 
 #define MAX_APPS 40
@@ -187,6 +187,7 @@ void busy_set(const char *title, const char *msg, int frac256);
 void busy_end(void);
 #define THR_MAX 8
 u32 thread_guard_mask(void);
+u32 debug_flags(void);
 void debug_event(u32 kind,const char *name,u32 a,u32 b,int result);
 const char *debug_path(int usb,const char *path);
 void debug_disk(int usb,int write,u32 lba,u32 count,int result);
@@ -603,6 +604,8 @@ int  kext_load(const char *name);
 int  kext_count(void);
 const KextInfo *kext_get(int i);
 const char *kext_at(u32 eip);
+void fault_symbol(u32 address, char *out, int cap);
+void fault_snapshot(FaultRec *record);
 int  register_cmd(const char *name, const char *usage,
                   void (*fn)(const char *args));
 const char *cmd_usage(const char *name);

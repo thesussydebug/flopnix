@@ -12,7 +12,7 @@ typedef signed   int   i32;
 #endif
 
 /* New fields are appended to keep existing extension offsets stable. */
-#define KAPI_VERSION 36
+#define KAPI_VERSION 38
 
 #define KEXT_MAGIC 0x5458454B
 enum { KEXT_KIND_KERNEL = 1, KEXT_KIND_APP = 2 };
@@ -40,7 +40,7 @@ enum {
 
 enum {
     K_UP = 0x100, K_DOWN, K_LEFT, K_RIGHT,
-    K_HOME, K_END, K_DEL, K_PGUP, K_PGDN
+    K_HOME, K_END, K_DEL, K_PGUP, K_PGDN, K_CLOSE_REQUEST
 };
 
 enum { EV_PRESS, EV_DRAG, EV_RELEASE, EV_RPRESS };
@@ -129,7 +129,7 @@ typedef struct {
     u8  reserved[414];
 } FCfg;
 
-enum { APP_LIVE_DRAW=1, APP_INDEPENDENT=2 };
+enum { APP_LIVE_DRAW=1, APP_INDEPENDENT=2, APP_CLOSE_REQUEST=4 };
 
 enum { APP_CAT_AUTO, APP_CAT_PROGRAMS, APP_CAT_GAMES, APP_CAT_SYSTEM,
        APP_CAT_DEV };
@@ -177,6 +177,9 @@ typedef struct {
     u32  eip;
     u32  tick;
     char owner[16];
+    char location[96];
+    u32 sequence, cr2, module_base, module_id;
+    char module[FS_NAMELEN];
 } FaultRec;
 
 typedef struct {
@@ -187,7 +190,7 @@ typedef struct {
     int  status;
 } KextInfo;
 
-enum { MB_OK = 1, MB_OKCANCEL, MB_YESNO, MB_YESNOCANCEL };
+enum { MB_OK = 1, MB_OKCANCEL, MB_YESNO, MB_YESNOCANCEL, MB_SAVEDISCARD };
 
 #define FAULT_VEC_HANG 0xFE
 enum { MBR_OK, MBR_CANCEL, MBR_YES, MBR_NO };
@@ -634,4 +637,5 @@ typedef struct {
     void (*network_lock)(void);
     void (*network_unlock)(void);
     void *(*krealloc)(void *ptr, u32 size);
+    void (*fault_symbol)(u32 address, char *out, int cap);
 } Kapi;

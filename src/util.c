@@ -77,7 +77,7 @@ u32 krand(void)
     return rng_state;
 }
 
-static char klog_buf[2048];
+char klog_buf[2048];
 static int  klog_len;
 
 void klog(const char *s)
@@ -108,7 +108,7 @@ int klog_read(char *dst, int cap)
     return n;
 }
 
-static char trace_buf[4096];
+char trace_buf[4096];
 static int  trace_len;
 static u32  trace_seq;
 
@@ -130,7 +130,7 @@ int trace_slice_read(u32 off, char *dst, u32 count)
 
 void ktrace(const char *msg)
 {
-    char line[96];
+    char line[208];
     kfmt(line, sizeof line, "%us %s\n", ticks / 100, msg);
     int n = (int)strlen(line);
     if (n > (int)sizeof trace_buf / 2) n = sizeof trace_buf / 2;
@@ -159,13 +159,13 @@ int trace_read(char *dst, int cap)
     return n;
 }
 
-int net_parse_ip(const char *s, u32 *out)
+__attribute__((minsize)) int net_parse_ip(const char *s, u32 *out)
 {
     u8 b[4];
     for (int i = 0; i < 4; i++) {
         int v = 0, any = 0;
-        while (*s >= '0' && *s <= '9') { v = v * 10 + (*s++ - '0'); any = 1; }
-        if (!any || v > 255) return 0;
+        while (*s >= '0' && *s <= '9') { v = v * 10 + (*s++ - '0'); if (v > 255) return 0; any = 1; }
+        if (!any) return 0;
         b[i] = v;
         if (i < 3 && *s++ != '.') return 0;
     }
@@ -329,6 +329,7 @@ int strcasecmp(const char *a, const char *b)
 
 void strlcpy(char *d, const char *s, int cap)
 {
+    if (cap <= 0) return;
     int i = 0;
     while (s[i] && i < cap - 1) { d[i] = s[i]; i++; }
     d[i] = 0;
@@ -385,6 +386,7 @@ static int numstr(char *out, u32 v, u32 base, int neg)
 
 __attribute__((minsize)) void kfmt(char *dst, int cap, const char *f, ...)
 {
+    if (cap <= 0) return;
     va_list ap;
     va_start(ap, f);
     int o = 0;
@@ -398,7 +400,11 @@ __attribute__((minsize)) void kfmt(char *dst, int cap, const char *f, ...)
 
         if (*f == '-') { left = 1; f++; }
         if (*f == '0') { padc = '0'; f++; }
-        while (*f >= '0' && *f <= '9') pad = pad * 10 + (*f++ - '0');
+        while (*f >= '0' && *f <= '9') {
+            int digit = *f++ - '0';
+            pad = pad > (0x7fffffff - digit) / 10 ? 0x7fffffff : pad * 10 + digit;
+        }
+        if (!*f) { PUT('%'); break; }
 
         char tmp[16];
         const char *s = tmp;
@@ -407,7 +413,7 @@ __attribute__((minsize)) void kfmt(char *dst, int cap, const char *f, ...)
         switch (*f) {
         case 's': s = va_arg(ap, const char *); if (!s) s = "(null)"; len = strlen(s); break;
         case 'c': cc = (char)va_arg(ap, int); tmp[0] = cc; tmp[1] = 0; len = 1; break;
-        case 'd': { int v = va_arg(ap, int); len = numstr(tmp, v < 0 ? (u32)-v : (u32)v, 10, v < 0); break; }
+        case 'd': { int v = va_arg(ap, int); len = numstr(tmp, v < 0 ? 0u - (u32)v : (u32)v, 10, v < 0); break; }
         case 'u': len = numstr(tmp, va_arg(ap, u32), 10, 0); break;
         case 'x': len = numstr(tmp, va_arg(ap, u32), 16, 0); break;
         case '%': tmp[0] = '%'; tmp[1] = 0; len = 1; break;
@@ -415,9 +421,9 @@ __attribute__((minsize)) void kfmt(char *dst, int cap, const char *f, ...)
         }
         if (left) {
             while (*s) { PUT(*s++); }
-            while (len < pad--) PUT(' ');
+            while (len < pad-- && o < cap - 1) PUT(' ');
         } else {
-            while (len < pad--) PUT(padc);
+            while (len < pad-- && o < cap - 1) PUT(padc);
             while (*s) PUT(*s++);
         }
         f++;
@@ -432,6 +438,7 @@ static const char B64[] =
 
 int b64_encode(const u8 *in, u32 n, char *out, int cap)
 {
+    if (cap <= 0) return -1;
     int o = 0;
     for (u32 i = 0; i < n; i += 3) {
         u32 b0 = in[i];
@@ -535,6 +542,7 @@ const char *path_ext(const char *p)
 
 void path_dir(const char *p, char *out, int cap)
 {
+    if (cap <= 0) return;
     int cut = -1;
     for (int i = 0; p[i]; i++)
         if (p[i] == '/' || p[i] == ':') cut = i;
@@ -568,6 +576,7 @@ static int dow(int y, int m, int d)
 
 void date_fmt(u32 dt, const char *fmt, char *out, int cap)
 {
+    if (cap <= 0) return;
     int Y = 1980 + ((dt >> 25) & 0x7F);
     int M = (dt >> 21) & 0x0F;
     int D = (dt >> 16) & 0x1F;

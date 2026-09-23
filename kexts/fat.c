@@ -328,12 +328,12 @@ int fat_read(const char *path, u8 *buf, u32 max)
 
     int slash = -1;
     for (int i = 0; path[i]; i++) if (path[i] == '/') slash = i;
-    char dir[64];
+    char dir[96];
     const char *fname;
     if (slash < 0) { strlcpy(dir, "/", sizeof dir); fname = path; }
     else {
         int n = slash > 0 ? slash : 1;
-        if (n > 63) return -1;
+        if (n >= (int)sizeof dir) return -1;
         memcpy(dir, path, n); dir[n] = 0;
         fname = path + slash + 1;
     }
@@ -386,7 +386,7 @@ u32 fat_free_kb(void)
 
     if (!freec_ok) {
         u32 freec = 0;
-        for (u32 c = 2; c <= total_clus; c++) {
+        for (u32 c = 2; valid_cluster(c); c++) {
             u32 v = fat_get(c);
             if (v == 0xFFFFFFFF) return 0;
             if (v == 0) freec++;
@@ -467,7 +467,7 @@ static u32 alloc_chain(int n)
 {
     if (n <= 0 || total_clus < 2) return 0;
     u32 first = 0, prev = 0;
-    u32 start = (next_free >= 2 && next_free <= total_clus) ? next_free : 2;
+    u32 start = valid_cluster(next_free) ? next_free : 2;
     u32 c = start;
     int wrapped = 0;
     while (n > 0) {
@@ -494,7 +494,7 @@ static u32 alloc_chain(int n)
             n--;
         }
         c++;
-        if (c > total_clus) {
+        if (!valid_cluster(c)) {
             if (wrapped) break;
             c = 2;
             wrapped = 1;
@@ -671,6 +671,7 @@ int fat_write(const char *path, const u8 *buf, u32 size)
     u32 slot_lba; int slot_off; u32 oldc = 0; int wasdir = 0;
     int found = dir_slot(dclus, r16, raw, &slot_lba, &slot_off, &oldc, &wasdir);
     if (found == 0) return -2;
+    if (found == 1 && !lookup) return -1;
 
     if (found == 1 && wasdir) return -3;
     int longname=0;u32 long_lba=0,end_lba=0;int long_off=0;
@@ -760,8 +761,7 @@ int fat_append(const char *path, const u8 *buf, u32 size)
     u8 raw[11];
     int lookup = dir_scan(dclus, r16, 1, fname, 0, 0, 0, 0, 0, raw);
     if (lookup < 0) return -1;
-    if (!lookup)
-        to_83(fname, raw);
+    if (!lookup) return fat_write(path, buf, size);
 
     u32 slot_lba; int slot_off; u32 first = 0; int wasdir = 0;
     int found = dir_slot(dclus, r16, raw, &slot_lba, &slot_off, &first, &wasdir);
@@ -955,8 +955,7 @@ static int entry_info(const char *path, u32 *slot_lba, int *slot_off,
     if (!resolve_dir(dir, &dclus, &r16)) return -1;
     u8 raw[11];
     int lookup = dir_scan(dclus, r16, 1, fname, 0, 0, 0, 0, 0, raw);
-    if (lookup < 0) return -1;
-    if (!lookup) to_83(fname, raw);
+    if (lookup <= 0) return -1;
     return dir_slot(dclus, r16, raw, slot_lba, slot_off, clus, isdir) == 1
            ? 0 : -1;
 }
@@ -1015,9 +1014,7 @@ int fat_delete(const char *path)
     if (!resolve_dir(dir, &dclus, &r16)) return -1;
     u8 raw[11];
     int lookup = dir_scan(dclus, r16, 1, fname, 0, 0, 0, 0, 0, raw);
-    if (lookup < 0) return -1;
-    if (!lookup)
-        to_83(fname, raw);
+    if (lookup <= 0) return -1;
     u32 slot_lba; int slot_off; u32 oldc = 0; int isdir = 0;
     if (dir_slot(dclus, r16, raw, &slot_lba, &slot_off, &oldc, &isdir) != 1)
         return -1;

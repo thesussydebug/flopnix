@@ -12,32 +12,32 @@ static int wrap_count(const char *s, int maxc)
     int lines = 0;
     while (*s) {
         int len = 0, brk = 0;
-        while (s[len] && len < maxc) { if (s[len] == ' ') brk = len; len++; }
-        if (s[len] && brk) len = brk;
-        s += len; while (*s == ' ') s++;
+        while (s[len] && s[len]!='\n' && len < maxc) { if (s[len] == ' ') brk = len; len++; }
+        if (s[len] && s[len]!='\n' && brk) len = brk;
+        s += len; if(*s=='\n')s++;while (*s == ' ') s++;
         lines++;
-        if (lines >= 6) break;
+        if (lines >= 10) break;
     }
     return lines ? lines : 1;
 }
 static void wrap_draw(int x, int y, const char *s, int maxc, u8 col)
 {
     int line = 0;
-    while (*s && line < 6) {
+    while (*s && line < 10) {
         int len = 0, brk = 0;
-        while (s[len] && len < maxc) { if (s[len] == ' ') brk = len; len++; }
-        if (s[len] && brk) len = brk;
+        while (s[len] && s[len]!='\n' && len < maxc) { if (s[len] == ' ') brk = len; len++; }
+        if (s[len] && s[len]!='\n' && brk) len = brk;
         char b[80];
         int n = len < 79 ? len : 79;
         api->memcpy(b, s, n); b[n] = 0;
         api->draw_text(x, y + line * 16, b, col);
-        s += len; while (*s == ' ') s++;
+        s += len; if(*s=='\n')s++;while (*s == ' ') s++;
         line++;
     }
 }
 
-static char mb_title[40], mb_text[192];
-static int  mb_kind, mb_nb, mb_res[3];
+static char mb_title[40], mb_text[288];
+static int  mb_kind, mb_nb, mb_res[3], mb_focus;
 static const char *mb_lbl[3];
 static void (*mb_cb)(int, void *);
 static void *mb_ctx;
@@ -51,6 +51,9 @@ static void mb_setbtns(void)
                       mb_lbl[1] = "No"; mb_res[1] = MBR_NO; break;
     case MB_YESNOCANCEL: mb_nb = 3; mb_lbl[0] = "Yes"; mb_res[0] = MBR_YES;
                       mb_lbl[1] = "No"; mb_res[1] = MBR_NO;
+                      mb_lbl[2] = "Cancel"; mb_res[2] = MBR_CANCEL; break;
+    case MB_SAVEDISCARD: mb_nb = 3; mb_lbl[0] = "Save"; mb_res[0] = MBR_YES;
+                      mb_lbl[1] = "Discard"; mb_res[1] = MBR_NO;
                       mb_lbl[2] = "Cancel"; mb_res[2] = MBR_CANCEL; break;
     default:          mb_nb = 1; mb_lbl[0] = "OK"; mb_res[0] = MBR_OK; break;
     }
@@ -82,6 +85,7 @@ static void mb_draw(void)
     for (int i = 0; i < mb_nb; i++) {
         int b[4]; mb_btnrect(i, b);
         button_label(api,b[0],b[1],b[2],b[3],mb_lbl[i],0,1);
+        if(i==mb_focus)api->rect(b[0]+2,b[1]+2,b[2]-4,b[3]-4,C_BLACK);
     }
 }
 static int mb_mouse(int px, int py, int ev)
@@ -100,9 +104,15 @@ static int mb_mouse(int px, int py, int ev)
 }
 static int mb_key(int k)
 {
-    if(k!=27)return 0;
+    if(k=='\t'||k==K_LEFT||k==K_RIGHT){
+        mb_focus=(mb_focus+((k==K_LEFT||(k=='\t'&&(api->kbd_mods()&1)))?mb_nb-1:1))%mb_nb;api->gui_dirty();return 1;
+    }
+    int pick=-1;
+    if(k=='\n'||k=='\r'||k==' ')pick=mb_focus;
+    if(mb_kind==MB_SAVEDISCARD){if(k=='s'||k=='S')pick=0;else if(k=='d'||k=='D')pick=1;else if(k=='c'||k=='C')pick=2;}
+    if(k!=27&&pick<0)return 1;
     void (*cb)(int,void *)=mb_cb;void *ctx=mb_ctx;
-    int result=mb_kind==MB_YESNO?MBR_NO:mb_kind==MB_OK?MBR_OK:MBR_CANCEL;
+    int result=pick>=0?mb_res[pick]:mb_kind==MB_YESNO?MBR_NO:mb_kind==MB_OK?MBR_OK:MBR_CANCEL;
     api->set_overlay(0,0);if(cb)cb(result,ctx);return 1;
 }
 static void d_msgbox(const char *title, const char *text, int buttons,
@@ -112,6 +122,7 @@ static void d_msgbox(const char *title, const char *text, int buttons,
     api->strlcpy(mb_text, text ? text : "", sizeof mb_text);
     mb_kind = buttons; mb_cb = cb; mb_ctx = ctx;
     mb_setbtns();
+    mb_focus=mb_kind==MB_SAVEDISCARD?2:0;
     api->set_overlay(mb_draw, mb_mouse);
     api->set_overlay_key(mb_key);
     api->gui_dirty();

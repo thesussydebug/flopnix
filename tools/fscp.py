@@ -6,6 +6,7 @@ import sys, os, struct, datetime
 SUPER, TABLE, TSECT, DATA, END = 288, 289, 10, 299, 2880
 MAGIC, VER, ENTSZ = 0x53465046, 2, 40
 NFILES = 128
+ATTR_DIR = 0x10
 
 def load(path):
     with open(path, "rb") as source:
@@ -33,7 +34,7 @@ def ensure_fs(d):
             continue
         if e['used'] != 1 or not e['name'] or len(e['name']) >= 24:
             raise ValueError('Invalid FLOPFS file table; image left unchanged.')
-        if e['attr'] & 1:
+        if e['attr'] & ATTR_DIR:
             valid = e['size'] == e['start'] == e['nsect'] == 0
         else:
             valid = DATA <= e['start'] < END and 0 < e['nsect'] <= END-e['start'] and e['size'] <= e['nsect']*512
@@ -92,7 +93,7 @@ def do_copy(img, src, dstname):
     nsect = max(1, (len(data) + 511) // 512)
 
     ents = entries(d)
-    if any(e['used'] and e['name'] == dstname and e['attr'] & 1 for e in ents):
+    if any(e['used'] and e['name'] == dstname and e['attr'] & ATTR_DIR for e in ents):
         raise ValueError('Cannot replace a FLOPFS folder with a file.')
     slot = next((e["i"] for e in ents if e["used"] and e["name"] == dstname), None)
     if slot is None:

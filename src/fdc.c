@@ -73,11 +73,9 @@ static void sleep_ticks(u32 n)
     while ((u32)(ticks - t0) < n && ++guard < lim) gui_pump();
 }
 
-static void sense_int(u8 *st0, u8 *cyl)
+static int sense_int(u8 *st0, u8 *cyl)
 {
-    fdc_out(0x08);
-    fdc_in(st0);
-    fdc_in(cyl);
+    return fdc_out(0x08) && fdc_in(st0) && fdc_in(cyl);
 }
 
 static void motor(int on)
@@ -105,27 +103,24 @@ void fdc_tick(void)
 static int recalibrate(void)
 {
     u8 st0, cyl;
+    cur_cyl = -1;
     motor(1);
     fdc_irq_fl = 0;
-    fdc_out(0x07);
-    fdc_out(0x00);
-    if (!wait_irq(200)) return 0;
-    sense_int(&st0, &cyl);
+    if (!fdc_out(0x07) || !fdc_out(0x00) || !wait_irq(200) ||
+        !sense_int(&st0, &cyl) || (st0 & 0xC0) || cyl) return 0;
     cur_cyl = 0;
-    return (st0 & 0xC0) == 0;
+    return 1;
 }
 
 static int seek(int cyl, int head)
 {
     if (cur_cyl == cyl) return 1;
     u8 st0, pcn;
+    cur_cyl = -1;
     fdc_irq_fl = 0;
-    fdc_out(0x0F);
-    fdc_out(head << 2);
-    fdc_out(cyl);
-    if (!wait_irq(200)) return 0;
-    sense_int(&st0, &pcn);
-    if (pcn != cyl) return 0;
+    if (!fdc_out(0x0F) || !fdc_out(head << 2) || !fdc_out(cyl) ||
+        !wait_irq(200) || !sense_int(&st0, &pcn) ||
+        (st0 & 0xC0) || pcn != cyl) return 0;
     cur_cyl = cyl;
     sleep_ticks(2);
     return 1;
@@ -226,7 +221,7 @@ static int fdc_rw(u32 lba, u8 *buf, int write, u32 count)
     for (int attempt = 0; attempt < 4; attempt++) {
         tries = attempt + 1;
         if (attempt) { recalibrate(); }
-        if (!seek(c, h)) continue;
+        if (!seek(c, h)) { fdc_init(); continue; }
         if (write) memcpy(DMABUF, buf, count*512);
         dma_setup(!write, count*512);
         fdc_irq_fl = 0;

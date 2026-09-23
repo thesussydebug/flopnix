@@ -216,24 +216,28 @@ static int bulk(int in, void *buf, int len)
     u8 ep = in ? ep_in : ep_out;
     u16 mps = in ? mps_in : mps_out;
 
-    int n = 0, off = 0;
+    int off = 0;
     do {
-        int chunk = len - off > mps ? mps : len - off;
-        mk_td(n, off + chunk >= len, in ? PID_IN : PID_OUT,
-              dev_addr, ep, *tog, (u8 *)buf + off, chunk);
-        *tog ^= 1;
-        off += chunk;
-        n++;
-    } while (off < len && n < 15);
+        int n = 0;
+        do {
+            int chunk = len - off > mps ? mps : len - off;
+            mk_td(n, off + chunk >= len || n == 14, in ? PID_IN : PID_OUT,
+                  dev_addr, ep, *tog, (u8 *)buf + off, chunk);
+            *tog ^= 1;
+            off += chunk;
+            n++;
+        } while (off < len && n < 15);
 
-    int r = run_tds(n);
-    if (r != 0) {
-        int stalled = 0;
-        for (int i = 0; i < n; i++)
-            if (td[i].cs & TD_STALLED) stalled = 1;
-        if (stalled) clear_halt(ep, in);
-    }
-    return r;
+        int r = run_tds(n);
+        if (r != 0) {
+            int stalled = 0;
+            for (int i = 0; i < n; i++)
+                if (td[i].cs & TD_STALLED) stalled = 1;
+            if (stalled) clear_halt(ep, in);
+            return r;
+        }
+    } while (off < len);
+    return 0;
 }
 
 static u32 cbw_tag = 1;
@@ -261,13 +265,16 @@ static int scsi(const u8 *cmd, int cmdlen, int in, u8 *data, u32 dlen)
         }
     }
     u8 csw[13];
+    memset(csw, 0xFF, sizeof csw);
     if (bulk(1, csw, 13) != 0 && bulk(1, csw, 13) != 0) {
         bot_reset();
         return -1;
     }
     if (data_err) return -1;
-    if (*(u32 *)csw != 0x53425355) { bot_reset(); return -1; }
-    return csw[12];
+    u32 residue = *(u32 *)(csw + 8);
+    if (*(u32 *)csw != 0x53425355 || *(u32 *)(csw + 4) != *(u32 *)(cbw + 4) ||
+        residue > dlen || csw[12] > 1) { bot_reset(); return -1; }
+    return csw[12] ? csw[12] : residue ? -1 : 0;
 }
 
 static void request_sense(void)

@@ -5,6 +5,23 @@
 #include "http_core.inc"
 
 static const Kapi *api;
+static __attribute__((noinline)) void *net_copy(void *dst,const void *src,u32 n)
+{
+    volatile u8 *d=dst;const volatile u8 *s=src;
+    while(n--)*d++=*s++;
+    return dst;
+}
+static __attribute__((noinline)) void *net_fill(void *dst,int value,u32 n)
+{
+    volatile u8 *d=dst;while(n--)*d++=(u8)value;return dst;
+}
+static inline u8 net_inb(u16 p){u8 v;__asm__ volatile("inb %1,%0":"=a"(v):"Nd"(p));return v;}
+static inline u16 net_inw(u16 p){u16 v;__asm__ volatile("inw %1,%0":"=a"(v):"Nd"(p));return v;}
+static inline u32 net_inl(u16 p){u32 v;__asm__ volatile("inl %1,%0":"=a"(v):"Nd"(p));return v;}
+static inline void net_outb(u16 p,u8 v){__asm__ volatile("outb %0,%1"::"a"(v),"Nd"(p));}
+static inline void net_outw(u16 p,u16 v){__asm__ volatile("outw %0,%1"::"a"(v),"Nd"(p));}
+static inline void net_outl(u16 p,u32 v){__asm__ volatile("outl %0,%1"::"a"(v),"Nd"(p));}
+
 
 #define kfmt            api->kfmt
 #define strlen          api->strlen
@@ -12,9 +29,9 @@ static const Kapi *api;
 #define strncmp         api->strncmp
 #define strcasecmp      api->strcasecmp
 #define strlcpy         api->strlcpy
-#define memcpy          api->memcpy
+#define memcpy          net_copy
 #define memmove         api->memmove
-#define memset          api->memset
+#define memset          net_fill
 #define human_size      api->human_size
 #define human_size_kb   api->human_size_kb
 #define ticks           (*api->ticks)
@@ -22,12 +39,12 @@ static const Kapi *api;
 #define rtc_read        api->rtc_read
 #define rtc_now_dos     api->rtc_now_dos
 #define dos_fmt         api->dos_fmt
-#define outb            api->outb
-#define inb             api->inb
-#define outw            api->outw
-#define inw             api->inw
-#define outl            api->outl
-#define inl             api->inl
+#define outb            net_outb
+#define inb net_inb
+#define outw            net_outw
+#define inw net_inw
+#define outl            net_outl
+#define inl net_inl
 #define CFG             (api->cfg)
 
 void net_init(void);
@@ -53,6 +70,8 @@ static u32 net_dns_srv;
 
 enum { NIC_NONE, NIC_NE2K, NIC_RTL8139, NIC_TULIP, NIC_PCNET };
 static int nic_kind;
+static int pm_active;
+static void nic_poll(void);
 static u16 io;
 static u16 rio;
 
@@ -507,6 +526,7 @@ int net_up(void) { return nic_kind != NIC_NONE; }
 
 static void capture_frame(const u8 *frame,u32 size)
 {
+    if(pm_active)return;
     static const DebugOps *d;
     if(!d)d=api->service_get("debug");
     if(d&&d->abi==DEBUG_ABI&&(d->flags&DBG_NET))d->packet(frame,size);
@@ -646,6 +666,9 @@ static void udp_send(u32 dst, const u8 *dmac, u16 sport, u16 dport,
     memcpy(pkt + 8, pay, plen);
     ip_send(dst, dmac, 17, pkt, ulen);
 }
+
+#include "faultnet.inc"
+#include "panicnet.inc"
 
 #define DNS_SPORT 1077
 static u16 dns_id_cur;
@@ -1064,6 +1087,7 @@ static void dhcp_pump(void)
 
 static void handle_frame(u8 *fr, u16 len)
 {
+    if(pm_active){pm_receive(fr,len);return;}
     capture_frame(fr,len);
     diag_rx++;
     if (len < 14) return;
@@ -1174,24 +1198,18 @@ int net_dhcp(u32 timeout){api->network_lock();int result=net_dhcp_locked(timeout
 
 static void tcp_pump(void);
 
-static void net_poll_inner(void)
+static void nic_poll(void)
 {
     if (nic_kind == NIC_NONE) return;
-
-    dhcp_pump();
     if (nic_kind == NIC_PCNET) {
-        pc_poll(); dhcp_pump(); tcp_pump(); return;
+        pc_poll(); return;
     }
     if (nic_kind == NIC_RTL8139) {
         rtl_poll_hw();
-        dhcp_pump();
-        tcp_pump();
         return;
     }
     if (nic_kind == NIC_TULIP) {
         tul_poll_hw();
-        dhcp_pump();
-        tcp_pump();
         return;
     }
     for (int guard = 0; guard < 8; guard++) {
@@ -1231,6 +1249,13 @@ static void net_poll_inner(void)
         outb(io + BNRY, nb);
         outb(io + ISR, 0x01);
     }
+}
+
+static void net_poll_inner(void)
+{
+    if(nic_kind==NIC_NONE)return;
+    dhcp_pump();
+    nic_poll();
     dhcp_pump();
     tcp_pump();
 }
@@ -1239,6 +1264,8 @@ void net_poll(void)
 {
     u32 f=net_irq_save();
     net_poll_inner();
+    faultnet_poll();
+    pm_cache();
     net_irq_restore(f);
 }
 
@@ -1471,7 +1498,11 @@ int kext_entry(const Kapi *k)
     api->register_service("net.text",&text_ops);
     api->register_service("net.http",&http_ops);
     api->register_service("net.http.diag",&http_diag_ops);
+    api->register_cmd("debugnet","debugnet <PC-IP> [port] | off - send crash diagnostics",cmd_panicnet);
+    api->register_cmd("panicnet","panicnet <PC-IP> [port] | off - inspect a stopped kernel",cmd_panicnet);
     api->register_cmd("netdiag", "netdiag - report NIC, link and traffic state",
                       cmd_netdiag);
+    api->register_cmd("faultnet", "faultnet <PC-IP> [port] | off | test - send fault reports",
+                      cmd_faultnet);
     return 0;
 }

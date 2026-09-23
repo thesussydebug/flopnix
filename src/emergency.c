@@ -1,6 +1,9 @@
 /* Writes crash details directly to the screen and serial port. */
 #include "os.h"
 #include "emergency_core.inc"
+#include "panicnet.h"
+extern const PanicMonitor *panic_monitor;
+u32 panic_controls[3];
 #include "panic_report.inc"
 #pragma clang diagnostic push
 #pragma clang diagnostic ignored "-Wunused-function"
@@ -125,7 +128,8 @@ __attribute__((noreturn)) void emergency_render(u32 vec,u32 err,u32 eip,u32 cr2,
     if (original==1) { em_field("Original exception: P",em_vec,0); em_field("Original instruction: ",em_eip,1); if (em_vec==14) em_field("Original memory: ",em_cr2,1); }
     else { if (vec!=0xffffffffu) em_field("Exception: P",vec,0); else em_line("No processor exception was raised.",C_WHITE); em_field("Memory address: ",cr2,1); }
     em_line("System execution has been halted.",C_WHITE);
-    em_line("Record these details, then restart.",C_WHITE);
+    em_line(panic_monitor ? "Starting LAN crash debugger..." : "Record these details, then restart.",C_WHITE);
+    if(panic_monitor)panic_monitor->emergency(vec,err,eip,cr2,reason,original,em_vec,em_err,em_eip,em_cr2);
     for (;;) hlt();
 }
 
