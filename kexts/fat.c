@@ -385,12 +385,27 @@ u32 fat_free_kb(void)
     if (!fat_mount() || fattype == 12) return 0;
 
     if (!freec_ok) {
-        u32 freec = 0;
-        for (u32 c = 2; valid_cluster(c); c++) {
-            u32 v = fat_get(c);
-            if (v == 0xFFFFFFFF) return 0;
-            if (v == 0) freec++;
+        u8 *scan = api->kmalloc(32768u);
+        u32 batch = scan ? 64u : 1u;
+        if (!scan) scan = secbuf;
+        u32 freec = 0, step = fattype == 16 ? 2u : 4u;
+        u32 end = total_clus + 1, limit = fattype == 16 ? 0xFFF0u : 0x0FFFFFF0u;
+        if (end > limit) end = limit;
+        for (u32 c = 2; c < end;) {
+            u32 sector = c * step / 512;
+            u32 count = (end * step + 511) / 512 - sector;
+            if (count > batch) count = batch;
+            if (scan == secbuf) cache_lba = 0xFFFFFFFF;
+            if (usb_read(fat_lba + sector, count, scan) != 0 || usb_gen() != seen_gen) {
+                if (scan != secbuf) api->kfree(scan);
+                return 0;
+            }
+            for (u32 off = c * step % 512; off < count * 512 && c < end; off += step, c++) {
+                u32 v = step == 2 ? rd16(scan + off) : rd32(scan + off) & 0x0FFFFFFF;
+                if (!v) freec++;
+            }
         }
+        if (scan != secbuf) api->kfree(scan);
         freec_cache = freec;
         freec_ok = 1;
     }

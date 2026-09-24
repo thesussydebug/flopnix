@@ -75,7 +75,7 @@ static inline const char *sh_usage(const char *c)
     if (sc_eq(c, "shutdown")) return "shutdown      - power off (or safe-to-turn-off)";
     if (sc_eq(c, "testram"))  return "testram       - test RAM above 8 MB, 3 passes";
 
-    if (sc_eq(c, "help"))     return "help          - list the available commands";
+    if (sc_eq(c, "help"))     return "help [command] - list commands or explain one";
     if (sc_eq(c, "cls"))      return "cls           - clear the screen";
     if (sc_eq(c, "date"))     return "date          - current date and time";
     if (sc_eq(c, "uptime"))   return "uptime        - time since boot";

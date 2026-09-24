@@ -20,6 +20,10 @@ _entry16:
     times 4-($-$$) db 0
 img_sum  dw 0
 img_sect dw 0
+    db 'FXK1'
+    dd KERNEL_API
+    db KERNEL_VERSION, 0
+    times 40-($-$$) db 0
 
 entry_start:
     cli

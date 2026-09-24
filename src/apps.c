@@ -10,6 +10,7 @@
 #include "tabcomp.inc"
 #include "shcmd.inc"
 #include "shspec.inc"
+#include "shellstream.h"
 
 extern char __bss_start[], __bss_end[], __load_end[];
 
@@ -49,6 +50,9 @@ static Term terms[MAXINST];
 static Term *term_context[THR_MAX],*term_last;
 #define T term_context[thr_self]
 static int tdcols, tdrows;
+static ShellStream *streams[THR_MAX];
+static u8 in_shell_exec;
+#define STREAM streams[thr_self]
 
 static char *line_at(Term *t, int i) { return t->sb[(t->head + i) % SBMAX]; }
 static char *cur_line(void) { return line_at(T, T->nlines - 1); }
@@ -62,6 +66,7 @@ static void tnl(void)
 }
 static void tputc(char c)
 {
+    if(STREAM){STREAM->putc(c,STREAM->ctx);return;}
     T->view = 0;
 
     gui_dirty = 1;
@@ -103,13 +108,13 @@ static void tprompt(void)
     if(T->pending[0]){strlcpy(T->line,T->pending,sizeof T->line);T->len=strlen(T->line);T->pending[0]=0;tdraw_input();}
 }
 
-const char *shell_cwd_get(void) { return T ? T->cwd : ""; }
+const char *shell_cwd_get(void) { return STREAM ? STREAM->cwd : T ? T->cwd : ""; }
 
 int shell_cwd_set(const char *d)
 {
-    if (!T || !d) return 0;
+    if ((!T&&!STREAM) || !d) return 0;
     if ((int)strlen(d) >= SC_MAX) return 0;
-    strlcpy(T->cwd, d, sizeof T->cwd);
+    strlcpy(STREAM?STREAM->cwd:T->cwd, d, SC_MAX);
     return 1;
 }
 
@@ -149,10 +154,11 @@ u32 used_kb(void)
             kapi.mem_info(MI_POOL_USED) + heap_capacity() - heap_avail()) / 1024 + 120;
 }
 
-void shell_print(const char *s) { if(!T)T=term_last;if(T)tprint(s); }
+void shell_print(const char *s) { if(!T&&!STREAM)T=term_last;if(T||STREAM)tprint(s); }
 
 void term_clear(void)
 {
+    if(STREAM){tprint("\033[2J\033[H");return;}
     if (!T) return;
     memset(T->sb, 0, sizeof T->sb);
     T->head = T->cx = T->view = 0;
@@ -160,6 +166,7 @@ void term_clear(void)
 }
 int term_fx(int mode)
 {
+    if(STREAM)return 0;
     if (!T) return 0;
     if (mode == 1) return T->fx = 1;
     if (mode == 2) return T->rainbow = !T->rainbow;
@@ -167,7 +174,7 @@ int term_fx(int mode)
 }
 const char *term_hist(int i)
 {
-    if (!T || i < 0) return 0;
+    if (STREAM || !T || i < 0) return 0;
     int count = T->hist_n > THIST ? THIST : T->hist_n;
     if (i >= count) return 0;
     int lo = T->hist_n > THIST ? T->hist_n - THIST : 0;
@@ -345,6 +352,7 @@ int apps_animating(void)
 
 static void term_reset(int inst)
 {
+    ShellStream *saved=STREAM;STREAM=0;
     T = &terms[inst];term_last=T;
     memset(T, 0, sizeof *T);
     T->nlines = 1;
@@ -357,6 +365,7 @@ static void term_reset(int inst)
         tprint("boot: recovered from a BIOS hang - see 'dmesg'\n");
     tprint("\n");
     tprompt();
+    STREAM=saved;
 }
 
 static void term_scroll(Term *t, int lines)
@@ -430,6 +439,8 @@ static void term_key(int inst, int k)
     if (ch == '\t') { term_tab(); return; }
     T->tab_on = 0;
     if (ch == '\n') {
+        u32 flags=irq_save();int busy=in_shell_exec;if(!busy)T->running=1;irq_restore(flags);
+        if(busy){tprint("\nRemote command running; try again.\n");tprompt();return;}
         tputc('\n');
         T->line[T->len] = 0;
         hist_push(T->line);
@@ -571,8 +582,6 @@ static int reg_owner[MAX_APPS];
 static u8 reg_used[MAX_APPS][MAXINST];
 static int nregs;
 
-static u8 in_shell_exec;
-
 static void sh_dispatch(char *cmd)
 {
     while (*cmd == ' ') cmd++;
@@ -610,6 +619,23 @@ int shell_exec(const char *line)
     return 0;
 }
 
+static int shell_stream_run(ShellStream *stream,const char *line)
+{
+    if(!stream||!stream->putc||!line||strlen(line)>=192)return -1;
+    u32 flags=irq_save();
+    int busy=in_shell_exec;
+    for(int i=0;i<MAXINST;i++)busy|=terms[i].running;
+    if(busy){irq_restore(flags);return -2;}
+    in_shell_exec=1;STREAM=stream;irq_restore(flags);
+    char buf[192];strlcpy(buf,line,sizeof buf);
+    int resident=kext_current(),pd=preempt_depth();
+    volatile int result=0;
+    FAULT_GUARD(sh_dispatch(buf),{worker_unwind(pd);result=-3;});
+    kext_enter(resident);STREAM=0;in_shell_exec=0;
+    return result;
+}
+const ShellStreamOps shell_stream_ops={SHELL_STREAM_ABI,shell_stream_run};
+
 static Term *newest_term(void)
 {
     for (int i = MAXINST - 1; i >= 0; i--)
@@ -618,12 +644,14 @@ static Term *newest_term(void)
 }
 int shell_history_count(void)
 {
+    if(STREAM)return 0;
     Term *t = newest_term();
     if (!t) return 0;
     return t->hist_n < THIST ? t->hist_n : THIST;
 }
 const char *shell_history(int i)
 {
+    if(STREAM)return "";
     Term *t = newest_term();
     if (!t) return "";
     int lo = t->hist_n > THIST ? t->hist_n - THIST : 0;

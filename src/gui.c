@@ -30,7 +30,7 @@ static u32  fault_banner_until;
 
 static char busy_title[24], busy_msg[44];
 static int  busy_frac = -1;
-static u8   busy_on;
+static u8   busy_on,busy_update;
 void fault_show_banner(const char *msg)
 {
     strlcpy(fault_banner, msg, sizeof fault_banner);
@@ -676,6 +676,7 @@ int gui_pump(void)
 
 void gui_wheel(int dz)
 {
+    if(busy_update||kupd_critical)return;
     if (input_dismiss()) return;
     int f = focused();
     if (f >= 0) { app_wheel(&wins[f], dz); gui_dirty = 1; }
@@ -721,6 +722,7 @@ static void screenshot(void)
 
 void gui_key(int k)
 {
+    if(busy_update||kupd_critical){if(k==27&&!kupd_critical)esc_latched=1;return;}
     if (input_dismiss()) return;
     if(k==27){esc_latched=1;int f=focused();if(f>=0&&!ov_mouse&&!menu_open)app_cancel_window(f);}
     if (k == K_PRTSC) { screenshot(); return; }
@@ -786,6 +788,7 @@ static void dnd_finish(void)
 
 void gui_mouse(int dx, int dy, u8 btn, u32 when)
 {
+    if(busy_update||kupd_critical){mbtn_prev=btn;return;}
 
     pb_main(&pump_btn, btn);
     if (input_dismiss() && (dx || dy || btn)) return;
@@ -1231,7 +1234,7 @@ void busy_set(const char *title, const char *msg, int frac256)
     strlcpy(busy_title, title, sizeof busy_title);
     strlcpy(busy_msg, msg, sizeof busy_msg);
     busy_frac = frac256;
-    busy_on = 1;
+    busy_on = 1;busy_update=!strcmp(title,"Kernel update");
     gui_dirty = 1;
     gui_pump();
 }
@@ -1239,6 +1242,6 @@ void busy_set(const char *title, const char *msg, int frac256)
 void busy_end(void)
 {
     if(app_current_window()>=0){app_local_progress(0,0,-1);return;}
-    busy_on = 0;
+    busy_on = busy_update = 0;
     gui_dirty = 1;
 }

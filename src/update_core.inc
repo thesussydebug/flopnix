@@ -57,6 +57,7 @@ static inline int ku_manifest(const u8 *p,u32 n,const u8 *key,u32 floor,u32 last
 static inline int ku_image(const u8 *p,u32 n,const KuRelease *r)
 {
     if(n!=r->size||n<4096||n>KU_MAX||(n&511)||p[0]!=0xeb||(u32)(p[6]|p[7]<<8)!=n/512)return 0;
+    if(ku_equal(p+8,(const u8 *)"FXK1",4)&&ku_u32(p+12)!=r->abi)return 0;
     u16 sum=0;for(u32 i=0;i<n;i+=2){u16 w=i==4?0:(u16)(p[i]|p[i+1]<<8);sum=(u16)(((sum<<1)|(sum>>15))+w);}
     if(sum!=(u16)(p[4]|p[5]<<8))return 0;
     return ku_crc_feed(0,p,n)==r->crc;

@@ -21,6 +21,9 @@ kernel = (root/'built/flopnix.ku').read_bytes()
 meta = json.loads((root/'built/flopnix-update.json').read_text())
 assert meta['format'] == 2 and meta['size'] == len(kernel) and meta['crc32'] == f'{zlib.crc32(kernel):08x}'
 assert meta['api'] == int(re.search(r'#define KAPI_VERSION\s+(\d+)', (root/'src/kapi.h').read_text()).group(1))
+assert meta['version'] == re.search(r'#define OS_VER\s+"([^"]+)"', (root/'src/os.h').read_text()).group(1)
+assert kernel[8:12] == b'FXK1' and struct.unpack_from('<I', kernel, 12)[0] == meta['api']
+assert kernel[16:40].split(b'\0', 1)[0].decode('ascii') == meta['version']
 assert len(image) == 1474560
 assert image[:512] == (root/'out/boot.bin').read_bytes()
 assert image[512:512+len(kernel)] == kernel

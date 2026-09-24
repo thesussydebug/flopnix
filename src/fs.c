@@ -125,7 +125,7 @@ static int fs_read_locked(const char *name, u8 *buf, u32 max)
     return (int)size;
 }
 
-static int fs_write_locked(const char *name, const u8 *buf, u32 size)
+static int fs_write_locked(const char *name, const u8 *buf, u32 size, int fresh)
 {
 
     if (!fs_name_ok(name)) return -1;
@@ -142,7 +142,7 @@ static int fs_write_locked(const char *name, const u8 *buf, u32 size)
     FsEnt saved = {0};
     int existed = (e != 0);
     if (existed) saved = *e;
-    if (e && nsect > e->nsect) { grow = e; e = 0; }
+    if (e && (fresh || nsect > e->nsect)) { grow = e; e = 0; }
     if (!e) {
         int start = alloc(nsect);
         if (start < 0) return -2;
@@ -387,7 +387,9 @@ const char *ext_type(const char *name)
 
 int fs_read(const char *name,u8 *buf,u32 max){mtx_lock(&fs_mutex);const char *old=debug_path(0,name);int r=fs_read_locked(name,buf,max);debug_done(0,old,r);mtx_unlock(&fs_mutex);return r;}
 
-int fs_write(const char *name,const u8 *buf,u32 size){mtx_lock(&fs_mutex);const char *old=debug_path(0,name);int r=fs_write_locked(name,buf,size);debug_done(2,old,r);mtx_unlock(&fs_mutex);return r;}
+int fs_write(const char *name,const u8 *buf,u32 size){mtx_lock(&fs_mutex);const char *old=debug_path(0,name);int r=fs_write_locked(name,buf,size,0);debug_done(2,old,r);mtx_unlock(&fs_mutex);return r;}
+
+int fs_replace(const char *name,const u8 *buf,u32 size){mtx_lock(&fs_mutex);const char *old=debug_path(0,name);int r=fs_write_locked(name,buf,size,1);debug_done(2,old,r);mtx_unlock(&fs_mutex);return r;}
 
 int fs_delete(const char *name){mtx_lock(&fs_mutex);const char *old=debug_path(0,name);int r=fs_delete_locked(name);debug_done(2,old,r);mtx_unlock(&fs_mutex);return r;}
 

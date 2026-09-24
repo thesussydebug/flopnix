@@ -12,6 +12,8 @@ CFLAGS="--target=i386-unknown-none-elf -ffreestanding -fno-builtin \
 CFLAGS="$CFLAGS -DOS_BUILD_DATE=\"$(date +%Y-%m-%d)\""
 
 mkdir -p out built/kexts
+exec 9>out/.build.lock
+flock 9
 
 osver=$(sed -n 's/.*#define OS_VER  *"\([^"]*\)".*/\1/p' src/os.h)
 if ! [[ "$osver" =~ ^[0-9]+\.[0-9]+\.[0-9]+(_[0-9]+)?$ ]]; then
@@ -41,7 +43,8 @@ python tools/appcatalog.py || exit 1
 
 echo "== assembling"
 nasm -f bin boot/boot.asm -o out/boot.bin
-nasm -f elf32 ${STUBDEF:-} boot/stub.asm -o out/stub.o
+kapi=$(sed -n 's/^#define KAPI_VERSION  *\([0-9]*\).*/\1/p' src/kapi.h)
+nasm -f elf32 ${STUBDEF:-} -DKERNEL_API="$kapi" -DKERNEL_VERSION="\"$osver\"" boot/stub.asm -o out/stub.o
 clang --target=i386-unknown-none-elf -c src/setjmp.S -o out/setjmp.o
 clang --target=i386-unknown-none-elf -c src/switch.S -o out/switch.o
 clang --target=i386-unknown-none-elf -c src/emergency.S -o out/emergency_entry.o
@@ -73,7 +76,7 @@ for sym in $(undefs out/emergency.o); do
         *) echo "emergency.o: unsafe recovery dependency: $sym" >&2; exit 1;;
     esac
 done
-for n in debug fat net dialogs notes diskhealth opl2 midi gdi g3d desktop edit files settings paint about calc clock calendar memmap memedit minesweeper reversi snake pong tetris shell crashsim taskmgr serialmon faultlog kextview clipview bench charmap game2048 baseconv archive textweb breakout update; do
+for n in debug fat net remote dialogs notes diskhealth opl2 midi gdi g3d desktop edit files settings paint about calc clock calendar memmap memedit minesweeper reversi snake pong tetris shell crashsim taskmgr serialmon faultlog kextview clipview bench charmap game2048 baseconv archive textweb breakout update; do
     SZ=
     case $n in debug|charmap|game2048|baseconv|archive|textweb|breakout|update) SZ=-Os;; esac
     clang $CFLAGS $SZ -c "kexts/$n.c" -o "out/$n.kxo"

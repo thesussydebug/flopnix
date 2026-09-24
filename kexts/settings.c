@@ -634,6 +634,8 @@ static void confsec(const char *args)
         kfmt(line,sizeof line,"57  Color RGB: %u, %u, %u\n",c->wp_col[0],c->wp_col[1],c->wp_col[2]);api->shell_print(line);
         kfmt(line,sizeof line,"5a  Gradient RGB: %u,%u,%u to %u,%u,%u\n",c->wp_ga[0],c->wp_ga[1],c->wp_ga[2],c->wp_gb[0],c->wp_gb[1],c->wp_gb[2]);api->shell_print(line);
         kfmt(line,sizeof line,"60  Time zone: %d quarter-hours from UTC\n",c->tz_qh);api->shell_print(line);
+        u32 automatic=0;api->config_get("remote.auto",&automatic);
+        kfmt(line,sizeof line,"Automatic Remote: %s at boot (saved by the Debug checkbox)\n",automatic==1?"On":"Off");api->shell_print(line);
         api->shell_print("Offsets are hexadecimal. Remaining bytes hold network\nand app preferences; unused bytes normally stay zero.\n");
         api->shell_print("Use Save changes in Settings to write to disk.\nWallpaper uses Apply; network fields must be applied.\nRun confsec again to refresh; confsec raw shows all bytes.\n");return;
     }

@@ -12,7 +12,7 @@ static u32 fill[2],bank,packets,dropped,file_size,file_number,usb_gen,epoch,epoc
 static u32 alloc_count,fs_count,disk_count,guard_bad;
 static char alloc_line[2][88],fs_line[2][112],disk_line[4][112];
 static const char *labels[]={"Capture network to USB (.pcap)","Log memory allocation failures",
-    "Show all disk activity","Check stack guards","Show filesystem errors","Poison freed memory"};
+    "Show all disk activity","Check stack guards","Show filesystem errors","Poison freed memory","Automatic Remote"};
 #define ROWS ((int)(sizeof labels/sizeof labels[0]))
 #define ROW_H 22
 #define CAP_BANK 524288u
@@ -137,8 +137,19 @@ static void capture_toggle(void)
     }
     capture_busy=0;api->gui_dirty();
 }
+static int automatic_remote(void)
+{
+    u32 value=0;return api->config_get("remote.auto",&value)&&value==1;
+}
 static void toggle(int row)
 {
+    if(row==ROWS-1){
+        int value=!automatic_remote();
+        api->notify(api->config_set("remote.auto",(u32)value)?
+            (value?"Automatic Remote saved: on at next boot.":"Automatic Remote saved: off at next boot."):
+            "Cannot save Automatic Remote. Check the boot floppy.");
+        api->gui_dirty();return;
+    }
     if(row==0)capture_toggle();else{u32 f=lock();ops.flags^=1u<<row;unlock(f);}
     api->gui_dirty();
 }
@@ -191,22 +202,22 @@ static void foreground(void)
     }
 #undef LINE
 }
-static void size(int inst,int *w,int *h){(void)inst;*w=352;*h=198;}
+static void size(int inst,int *w,int *h){(void)inst;*w=352;*h=198+ROW_H;}
 static void draw(Win *w,int x,int y,int cw,int ch)
 {
     (void)w;(void)ch;
     for(int i=0;i<ROWS;i++){
         int yy=y+8+i*ROW_H;api->rect(x+8,yy,14,14,i==focus?C_NAVY:C_BLACK);
-        if(ops.flags&(1u<<i))api->draw_text(x+11,yy,"x",C_BLACK);
+        if(i==ROWS-1?automatic_remote():(ops.flags&(1u<<i)))api->draw_text(x+11,yy,"x",C_BLACK);
         api->draw_text_clip(x+30,yy,labels[i],C_BLACK,cw-38);
     }
     char s[88];api->kfmt(s,sizeof s,"U:%s",capture_name);
     if(capture_name[0]){
-        api->draw_text_clip(x+8,y+140,s,C_BLACK,cw-16);
+        api->draw_text_clip(x+8,y+140+ROW_H,s,C_BLACK,cw-16);
         api->kfmt(s,sizeof s,"Packets %u  lost %u",packets,dropped);
-        api->draw_text_clip(x+8,y+158,s,C_BLACK,cw-16);
+        api->draw_text_clip(x+8,y+158+ROW_H,s,C_BLACK,cw-16);
     }
-    api->draw_text_clip(x+8,y+176,capture_status,C_MAROON,cw-16);
+    api->draw_text_clip(x+8,y+176+ROW_H,capture_status,C_MAROON,cw-16);
 }
 static void key(int inst,int k)
 {

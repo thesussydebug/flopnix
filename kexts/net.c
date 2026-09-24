@@ -2,6 +2,7 @@
 #include "kapi.h"
 #include "debug.h"
 #include "nettext.h"
+#include "netlisten.h"
 #include "http_core.inc"
 
 static const Kapi *api;
@@ -792,12 +793,15 @@ static void tcp_pump(void)
     if (a) tcp_act(a, 0, 0, 0);
 }
 
+#include "net_listen.inc"
+
 static int (*hs_sink)(const u8 *, int, void *);
 static void *hs_ctx;
 static HttpReader hs_http;
 static int hs_raw,hs_abort;
 static u32 hs_got;
 static volatile u8 tcp_busy;
+#include "netpush.inc"
 static NetHttpDiag http_diag;
 static void http_diag_read(NetHttpDiag *out){out->stage=http_diag.stage;out->result=http_diag.result;}
 static const NetHttpDiagOps http_diag_ops={NET_HTTP_DIAG_ABI,http_diag_read};
@@ -865,6 +869,7 @@ static int net_transfer_locked(u32 ip, u16 port, const char *host,
     tcp_rip = ip;
     tcp_rport = port;
     tcp_lport = (u16)(0xC000 | (ticks & 0x3FFF));
+    if(tcp_lport==nl.port)tcp_lport=(u16)(0xC000|((tcp_lport+1)&0x3FFF));
     hs_sink = sink; hs_ctx = ctx;
     hr_init(&hs_http);hs_raw=!host;hs_abort=0;
     hs_read=hs_write=0;
@@ -1118,7 +1123,10 @@ static void handle_frame(u8 *fr, u16 len)
             u16 ul  = (u16)(((u16)udp[4] << 8) | udp[5]);
             if (ul < 8 || ul > tl - ihl) return;
             if ((udp[6] || udp[7]) && nw_l4_csum(ip->src, ip->dst, 17, udp, ul)) return;
-            if (dpt == 68 && udp[0] == 0 && udp[1] == 67)
+            if(dpt==KU_PUSH_PORT&&ip->dst==net_ip&&
+               (((u16)udp[0]<<8)|udp[1])==KU_PUSH_PORT)
+                push_receive(ip->src,fr+6,udp+8,ul-8);
+            else if (dpt == 68 && udp[0] == 0 && udp[1] == 67)
                 dhcp_recv(udp + 8, ul - 8);
             else if (dpt == DNS_SPORT && ip->dst == net_ip && ip->src == dns_expected && udp[0] == 0 && udp[1] == 53) {
                 u32 a = nw_dns_parse(udp + 8, ul - 8, dns_id_cur);
@@ -1139,9 +1147,10 @@ static void handle_frame(u8 *fr, u16 len)
             u8 *th = (u8 *)ip + ihl;
             u16 sp = (u16)(((u16)th[0] << 8) | th[1]);
             u16 dp = (u16)(((u16)th[2] << 8) | th[3]);
+            if (nw_tcp_csum(ip->src, ip->dst, th, tl - ihl)) return;
+            if (nl_input(ip->src,fr+6,th,tl-ihl)) return;
             if (ip->src != tcp_rip || sp != tcp_rport || dp != tcp_lport)
                 return;
-            if (nw_tcp_csum(ip->src, ip->dst, th, tl - ihl)) return;
             int thl = (th[12] >> 4) * 4;
             int plen = (int)tl - ihl - thl;
             if (thl < 20 || plen < 0) return;
@@ -1258,6 +1267,7 @@ static void net_poll_inner(void)
     nic_poll();
     dhcp_pump();
     tcp_pump();
+    nl_pump();
 }
 
 void net_poll(void)
@@ -1265,6 +1275,7 @@ void net_poll(void)
     u32 f=net_irq_save();
     net_poll_inner();
     faultnet_poll();
+    push_poll();
     pm_cache();
     net_irq_restore(f);
 }
@@ -1496,8 +1507,10 @@ int kext_entry(const Kapi *k)
     net_init();
     api->register_net(&net_ops);
     api->register_service("net.text",&text_ops);
+    api->register_service("net.listen",&listen_ops);
     api->register_service("net.http",&http_ops);
     api->register_service("net.http.diag",&http_diag_ops);
+    api->register_service("net.update",&push_ops);
     api->register_cmd("debugnet","debugnet <PC-IP> [port] | off - send crash diagnostics",cmd_panicnet);
     api->register_cmd("panicnet","panicnet <PC-IP> [port] | off - inspect a stopped kernel",cmd_panicnet);
     api->register_cmd("netdiag", "netdiag - report NIC, link and traffic state",

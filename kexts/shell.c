@@ -14,14 +14,6 @@
 
 static const Kapi *api;
 
-static int rt_usable(u32 base)
-{
-    if (!api->mem_mapped) return 1;
-    for (u32 off = 0; off < 0x10000; off += 0x1000)
-        if (!api->mem_mapped(base + off)) return 0;
-    return 1;
-}
-
 #define ticks           (*api->ticks)
 #define timer_alive     (*api->timer_alive)
 
@@ -713,6 +705,13 @@ static void sh_exec(char *cmd)
         return;
     }
 
+    if(!strcmp(c0,"help")&&*cargs){
+        const char *usage=cmd_usage(cargs);if(!usage)usage=sh_usage(cargs);
+        if(usage){tprint(usage);tputc('\n');}
+        else{tprint("No help for '");tprint(cargs);tprint("'. Type help to list commands.\n");}
+        return;
+    }
+
     if(sf_exec(c0,cargs))return;
 
     if (!strcmp(cmd, "help")) {
@@ -726,6 +725,7 @@ static void sh_exec(char *cmd)
         tprint("net:   ifconfig [ip]  ping <ip|host>  dns <host>\n");
         tprint("       wget <url>  ntp [+/-H:MM]  netdiag lspci\n");
         tprint("       debugnet panicnet faultnet - remote diagnostics\n");
+        tprint("       remote [on [port]|off|status] - help remote for startup\n");
         tprint("fun:   matrix rainbow beep\n");
         tprint("cfg:   set [video|mouse|net ...]  confsec [raw]\n");
         tprint("sys:   uname free df uptime date cal fetch clear cls ver\n");
@@ -734,7 +734,7 @@ static void sh_exec(char *cmd)
         tprint("       bios testram bench\n");
         tprint("debug: peek - read memory; poke - write memory\n");
         tprint("       ring3 - user-mode test; crash - panic test (halts!)\n");
-        tprint("help:  help; <command> /help, -h or --help for usage\n");
+        tprint("help:  help <command> for usage; <command> -h also works\n");
         tprint("PgUp/PgDn or wheel to scroll\n");
     } else if (!strcmp(cmd, "set") || !strncmp(cmd, "set ", 4)) {
         static const char *vnames[5] = { "?", "640x480", "800x600", "1024x768", "vga" };
@@ -1523,32 +1523,40 @@ static void sh_exec(char *cmd)
         flip();
         for (;;) { __asm__ volatile("cli; hlt"); }
     } else if (!strcmp(cmd, "testram")) {
-        u32 top = api->boot_info(BI_MEM_KB) * 1024u;
-        u32 lo = 0x00800000u;
-        if (top <= lo + 0x10000) { tprint("testram: needs more than 8 MB of RAM\n"); return; }
-        kfmt(buf, sizeof buf, "testing %u KB (8 MB..top), 3 passes, Esc aborts\n",
-             (top - lo) / 1024);
+        u32 limit = api->mem_info(MI_HEAP_LIMIT);
+        u32 capacity = api->mem_info(MI_HEAP_CAPACITY);
+        u32 bytes = api->heap_avail() + (limit > capacity ? limit - capacity : 0);
+        u32 reserve = bytes / 4;
+        if (reserve > 0x100000u) reserve = 0x100000u;
+        bytes = (bytes - reserve) & ~7u;
+        void *test = 0;
+        while (bytes >= 4096u) {
+            test = api->kmalloc(bytes);
+            if (test) break;
+            bytes = (bytes / 2) & ~7u;
+        }
+        if (!test) { tprint("testram: not enough free memory\n"); return; }
+        u32 lo = (u32)test, top = lo + bytes;
+        kfmt(buf, sizeof buf, "testing %u KB of allocated RAM, 3 passes, Esc aborts\n",
+             bytes / 1024);
         tprint(buf);
         int abort = 0, fail = 0;
-        u32 skipped = 0;
         api->esc_arm();
         for (int pass = 0; pass < RT_PASSES && !abort && !fail; pass++) {
             kfmt(buf, sizeof buf, "pass %d: writing...\n", pass + 1);
             tprint(buf);
-            skipped = 0;
             for (u32 a = lo; a < top && !abort; a += 0x10000) {
                 u32 wds = (top - a < 0x10000 ? top - a : 0x10000) / 4;
-                if (rt_usable(a)) rt_fill((u32 *)a, wds, a, pass);
-                else skipped++;
+                rt_fill((volatile u32 *)a, wds, a, pass);
                 gui_pump();
                 if (api->esc_pending()) abort = 1;
             }
+            if (abort) break;
             kfmt(buf, sizeof buf, "pass %d: verifying...\n", pass + 1);
             tprint(buf);
             for (u32 a = lo; a < top && !abort && !fail; a += 0x10000) {
                 u32 wds = (top - a < 0x10000 ? top - a : 0x10000) / 4;
-                if (!rt_usable(a)) { gui_pump(); if (api->esc_pending()) abort = 1; continue; }
-                i32 bad = rt_check((const u32 *)a, wds, a, pass);
+                i32 bad = rt_check((const volatile u32 *)a, wds, a, pass);
                 if (bad >= 0) {
                     kfmt(buf, sizeof buf, "FAULT at %x (pass %d)\n",
                          a + (u32)bad * 4, pass + 1);
@@ -1559,11 +1567,7 @@ static void sh_exec(char *cmd)
                 if (api->esc_pending()) abort = 1;
             }
         }
-        if (skipped) {
-            kfmt(buf, sizeof buf, "skipped %u KB the kernel keeps unmapped\n",
-                 skipped * 64u);
-            tprint(buf);
-        }
+        api->kfree(test);
         if (abort)     tprint("aborted\n");
         else if (fail) tprint("MEMORY IS FAULTY - do not trust this machine\n");
         else           tprint("memory ok\n");

@@ -6,6 +6,10 @@
 #include "debug.h"
 #include "panicnet.h"
 #include "kexterror.inc"
+#include "shellstream.h"
+#include "kextfile.h"
+extern const ShellStreamOps shell_stream_ops;
+extern int fs_replace(const char *,const u8 *,u32);
 extern const DebugCore debug_core;
 
 #define MAX_SECT 32
@@ -957,6 +961,9 @@ int register_service(const char *name, const void *ops)
 const void *service_get(const char *name)
 {
     if (!name || (graphics_bit(name) & gfx_disabled)) return 0;
+    static const KextFileOps files={KEXT_FILE_ABI,peek_header,fs_replace};
+    if(!strcmp(name,"kext.files"))return &files;
+    if(!strcmp(name,"shell.stream"))return &shell_stream_ops;
     static const FloppyOps floppy={FLOPPY_ABI,fdc_read_many};
     if(!strcmp(name,"disk.floppy"))return &floppy;
     if(!strcmp(name,"debug.core"))return &debug_core;

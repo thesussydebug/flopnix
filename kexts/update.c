@@ -6,7 +6,7 @@
 #pragma clang diagnostic ignored "-Wunused-function"
 #include "textweb_core.inc"
 #pragma clang diagnostic pop
-#include "update_core.inc"
+#include "netupdate.h"
 #include "dynbuf.h"
 #include "ui.inc"
 static const Kapi *api;
@@ -132,24 +132,32 @@ static void diagnose(void)
     }
     db_free(api,&d.buf);busy=0;api->gui_dirty();
 }
-static int current_matches(void)
+static int installed_checksum(u32 *checksum,u32 *size,int cancellable)
 {
-    u8 sector[512];u32 crc=0;
+    u8 sector[512];u32 crc=0,sect=1;
     const FloppyOps *disk=api->service_get("disk.floppy");
     u8 *batch=disk&&disk->abi==FLOPPY_ABI?api->kmalloc(FLOPPY_TRACK_SECTORS*512):0;
-    u8 *buf=batch?batch:sector;u32 count=batch?FLOPPY_TRACK_SECTORS:1;int match=-1;
+    u8 *buf=batch?batch:sector;u32 count=batch?FLOPPY_TRACK_SECTORS:1;int result=0;
     if(batch)api->mem_track("Kernel comparison",batch,FLOPPY_TRACK_SECTORS*512);
-    for(u32 i=0;i<release.size/512;){
-        u32 n=release.size/512-i,track=FLOPPY_TRACK_SECTORS-(i+1)%FLOPPY_TRACK_SECTORS;
+    for(u32 i=0;i<sect;){
+        u32 n=sect-i,track=FLOPPY_TRACK_SECTORS-(i+1)%FLOPPY_TRACK_SECTORS;
         if(n>count)n=count;if(n>track)n=track;
-        if(closing||api->esc_pending()||(batch?disk->read(i+1,buf,n):api->disk_read(i+1,buf)))goto done;
-        if(!i&&(u32)(buf[6]|buf[7]<<8)!=release.size/512){match=0;goto done;}
+        if((cancellable&&(closing||api->esc_pending()))||
+           (batch?disk->read(i+1,buf,n):api->disk_read(i+1,buf)))goto done;
+        if(!i){sect=(u32)(buf[6]|buf[7]<<8);if(buf[0]!=0xeb||sect<8||sect>255)goto done;}
         crc=ku_crc_feed(crc,buf,n*512);i+=n;
+        api->gui_pump();
     }
-    match=crc==release.crc;
+    *checksum=crc;*size=sect*512;result=1;
 done:
-    if(batch)api->kfree(batch);return match;
+    if(batch)api->kfree(batch);return result;
 }
+static int current_matches(void)
+{
+    u32 crc,size;if(!installed_checksum(&crc,&size,1))return -1;
+    return size==release.size&&crc==release.crc;
+}
+#include "updatepush.inc"
 static void check(void)
 {
     if(busy)return;ready=installed=0;report_count=report_top=0;if(!settings())return;
@@ -206,7 +214,7 @@ static void opened(int inst)
     char display[33];u8 key[16];
     if(ku_pair_key(prefs.code,key))ku_pair_text(key,display);else display[0]=0;
     af_set(&fields[0],address,sizeof address,prefs.address);af_set(&fields[1],code,sizeof code,display);
-    focus=0;say("Enter the address and pairing code shown by Update Host.");
+    focus=0;say("Manager pushes are automatic. These controls are for manual updates.");
 }
 static void closed(int inst){(void)inst;closing=1;ready=0;}
 static void size(int inst,int *w,int *h){(void)inst;*w=520;*h=424;}
@@ -250,11 +258,12 @@ static void mouse(int inst,int x,int y,int ev,int cw,int ch)
     else if(ui_hit(ui_r(340,240,76,24),x,y))key(inst,K_PGUP);
     else if(ui_hit(ui_r(424,240,76,24),x,y))key(inst,K_PGDN);
 }
-const KextHeader kext_header={KEXT_MAGIC,KAPI_VERSION,KEXT_KIND_APP,KEXT_RECLAIMABLE,"Kernel Update"};
+const KextHeader kext_header={KEXT_MAGIC,KAPI_VERSION,KEXT_KIND_KERNEL,0,"Kernel Update"};
 int kext_entry(const Kapi *k)
 {
     if(k->version<KAPI_VERSION)return 1;api=k;ui_init(k,0);
     static const AppDesc d={.title="Kernel Update",.max_inst=1,.in_menu=1,.category=APP_CAT_SYSTEM,
         .open=opened,.close=closed,.draw=draw,.key=key,.mouse=mouse,.client_size=size,.live_draw=APP_INDEPENDENT};
-    return api->register_app(&d)<0;
+    if(api->register_app(&d)<0)return 1;
+    return api->timer_add(25,push_tick,0)<0;
 }
