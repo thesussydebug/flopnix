@@ -1,10 +1,4 @@
 #pragma once
-static u32 br_capacity(u32 memory_kb)
-{
-    if(memory_kb>=16256)return 1048576;
-    if(memory_kb>=7936)return 262144;
-    return 131072;
-}
 static int br_redirect(int status){return status==301||status==302||status==303||status==307||status==308;}
 static u32 br_gopher_text(u8 *data,u32 len)
 {

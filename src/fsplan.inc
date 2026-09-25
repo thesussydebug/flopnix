@@ -3,7 +3,7 @@ typedef struct {
     u16 start, sects;
     u16 nstart;
     u8  used;
-    u8  idx;
+    u16 idx;
 } FpEnt;
 
 static inline int fs_plan(FpEnt *e, int n, u16 data0)

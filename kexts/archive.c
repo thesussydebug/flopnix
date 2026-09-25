@@ -14,7 +14,7 @@ static int count,selected,scroll,dirty,type=-1,alive,extract_all,focus;
 static int working,pending;
 static char pending_path[202];
 static void run_pending(void);
-static char filename[28],message[100];static AppField field;
+static char filename[FS_NAMELEN+2],message[100];static AppField field;
 static void say(const char *s){api->strlcpy(message,s,sizeof message);api->gui_dirty();}
 static int reserve(void)
 {
@@ -184,21 +184,21 @@ static void dropped(int inst,int x,int y,const char *kind,const char *payload)
     }
     work_end();
 }
-static int save_name(char out[24])
+static int save_name(char out[FS_NAMELEN])
 {
     const char *s=filename;if((s[0]=='a'||s[0]=='A')&&s[1]==':')s+=2;
-    int n=(int)api->strlen(s);if(n<5||n>=24||api->strcasecmp(s+n-4,".fpa"))return 0;
-    char part[24];int k=0;
+    int n=(int)api->strlen(s);if(n<5||n>=FS_NAMELEN||api->strcasecmp(s+n-4,".fpa"))return 0;
+    char part[FS_NAMELEN];int k=0;
     for(int i=0;i<=n;i++){
-        if(!s[i]||s[i]=='/'){part[k]=0;if(!ar_name(part))return 0;k=0;}
-        else part[k++]=s[i];
+        if(!s[i]||s[i]=='/'){part[k]=0;if(!k||(k==1&&part[0]=='.')||(k==2&&part[0]=='.'&&part[1]=='.'))return 0;k=0;}
+        else {if((u8)s[i]<32||s[i]==':'||s[i]=='\\')return 0;part[k++]=s[i];}
     }
-    api->strlcpy(out,s,24);return 1;
+    api->strlcpy(out,s,FS_NAMELEN);return 1;
 }
 static void save_file(int answer,void *ctx)
 {
     (void)ctx;if(!alive||answer!=MBR_YES)return;
-    char name[24];if(!save_name(name)||!reserve())return;
+    char name[FS_NAMELEN];if(!save_name(name)||!reserve())return;
     api->busy_set("Archive Manager","Writing archive...",-1);
     int r=api->fs_write(name,data,length);api->busy_end();
     if(r==0){dirty=0;say("Archive saved.");api->broadcast("file.saved",name);}
@@ -211,7 +211,7 @@ static void save_now(int answer,void *ctx)
 }
 static void save(void)
 {
-    char name[24];if(!save_name(name)){pending=0;say("Use an A: name ending in .fpa (23 characters including folder).");return;}
+    char name[FS_NAMELEN];if(!save_name(name)){pending=0;say("Use an A: name ending in .fpa (63 characters including folder).");return;}
     if(api->fs_exists(name))api->msgbox("Replace archive?","A file with this name already exists. Replace it?",MB_YESNO,save_now,0);
     else save_now(MBR_YES,0);
 }

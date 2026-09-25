@@ -181,6 +181,7 @@ static void d_progress_set(int pct, const char *label)
 static void d_progress_close(void) { api->set_overlay(0, 0); api->gui_dirty(); }
 
 #define PK_ROWS 9
+#define PK_MAX (FS_NFILES + 1)
 static char pk_title[40], pk_ext[8], pk_path[128];
 static int  pk_dirs, pk_drive, pk_scroll, pk_n;
 static int  pk_save, pk_nlen;
@@ -188,8 +189,8 @@ static char pk_name[64], pk_error[40];
 static char pk_sel[80];
 static void (*pk_cb)(const char *, void *);
 static void *pk_ctx;
-static char pk_names[80][64];
-static u8   pk_isdir[80];
+static char pk_names[PK_MAX][64];
+static u8   pk_isdir[PK_MAX];
 static FatEnt fe_scratch[80];
 
 static int pk_match(const char *nm)
@@ -200,7 +201,7 @@ static int pk_match(const char *nm)
 }
 static void pk_add(const char *nm, int isdir)
 {
-    if (pk_n >= 80) return;
+    if (pk_n >= PK_MAX) return;
     api->strlcpy(pk_names[pk_n], nm, 64);
     pk_isdir[pk_n++] = (u8)isdir;
 }
@@ -268,7 +269,7 @@ static void pk_save_commit(void)
     char spec[132];
     int result = save_path(pk_drive, pk_path, pk_name, pk_ext, spec, sizeof spec);
     const char *error = 0;
-    if (result == SAVE_PATH_LONG) error = "Path too long (A: 23 chars max)";
+    if (result == SAVE_PATH_LONG) error = "Path too long (A: 63 chars max)";
     else if (result) error = "Invalid file path";
     else if (spec[0] == 'a') {
         const char *name = spec + 2;

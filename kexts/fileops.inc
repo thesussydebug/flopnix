@@ -8,7 +8,7 @@ static int ft_copy_name(const Kapi *k,int drive,const char *dir,const char *leaf
     const char *ext=dot?dot:"";int bl=dot?(int)(dot-leaf):(int)k->strlen(leaf);
     for(int i=1;i<100;i++){
         char suffix[8],base[64],name[80];k->kfmt(suffix,sizeof suffix,"_%d",i);
-        int room=(drive?8:23-(int)k->strlen(dir)-(dir[0]?1:0)-(int)k->strlen(ext))-(int)k->strlen(suffix);
+        int room=(drive?8:FS_NAMELEN-1-(int)k->strlen(dir)-(dir[0]?1:0)-(int)k->strlen(ext))-(int)k->strlen(suffix);
         if(room<1)return FT_PATH;if(bl<room)room=bl;if(room>63)room=63;
         k->memcpy(base,leaf,room);base[room]=0;k->kfmt(name,sizeof name,"%s%s%s",base,suffix,ext);
         int rc=drive?ft_usb_name(k,dir,name,dst):ft_join(k,0,dir,name,dst);
@@ -36,7 +36,7 @@ static int ft_transfer(const Kapi *,const char *,int,const char *,int,char *,int
 static int ft_tree_copy(const Kapi *k,int sd,const char *src,int dd,const char *dst,int depth)
 {
     if(depth>=8)return FT_TREE;
-    FatEnt *items=k->kmalloc(129*sizeof *items);if(!items)return FT_MEMORY;
+    FatEnt *items=k->kmalloc((sd?129:FS_NFILES)*sizeof *items);if(!items)return FT_MEMORY;
     int count=0,rc=0;
     if(sd){count=k->fat_list(src,items,129);if(count<0)rc=FT_READ;else if(count>=129)rc=FT_TREE;}
     else for(int i=0;i<FS_NFILES;i++){

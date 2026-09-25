@@ -8,7 +8,7 @@ import struct
 import subprocess
 import tempfile
 import zlib
-from fscp import entries
+from fscp import entries, ensure_fs, layout
 
 root = Path(__file__).resolve().parents[1]
 names = re.search(r'for n in ([\w ]+); do', (root/'build.sh').read_text()).group(1).split()
@@ -17,6 +17,8 @@ actual = {p.name for p in (root/'built/kexts').glob('*.kx')}
 assert actual == expected, ('built/kexts', actual ^ expected)
 
 image = (root/'built/flopnix.img').read_bytes()
+ensure_fs(image)
+assert layout(image) == (512, 64, 80, 369), 'Expected expanded FLOPFS image'
 kernel = (root/'built/flopnix.ku').read_bytes()
 meta = json.loads((root/'built/flopnix-update.json').read_text())
 assert meta['format'] == 2 and meta['size'] == len(kernel) and meta['crc32'] == f'{zlib.crc32(kernel):08x}'

@@ -78,7 +78,7 @@ static int files_type = -1;
 #define iobuf           api->iobuf
 #define IOBUF_SZ        api->iobuf_size
 #define opener_dispatch api->open_with
-static FatEnt fe_scratch[128];
+static FatEnt fe_scratch[FS_NFILES];
 
 typedef struct {
     char name[64];
@@ -87,7 +87,7 @@ typedef struct {
     int  fslot;
 } Row;
 
-#define MAXROWS 128
+#define MAXROWS (FS_NFILES + 1)
 
 #define MAXSEL  MAXROWS
 #define HISTMAX 24
@@ -1342,14 +1342,19 @@ static void fileman_draw(Win *w, int cx, int cy, int cw, int ch)
         int name_end = size_x - 4 < clip1 ? size_x - 4 : clip1;
         if (F->renaming && idx == i_sel) {
             fill_rect(text_x - 2, ry, (name_end - text_x) + 2, ROW_H, C_WHITE);
-            if (F->rnall && F->rnlen)
-                fill_rect(text_x, ry + 1, F->rnlen * 8, ROW_H - 2, C_NAVY);
-            draw_text_clip2(text_x, ry, F->rnbuf,
+            int shown=(name_end-text_x)/8;if(shown<1)shown=1;
+            int offset=F->rncar>=shown?F->rncar-shown+1:0;
+            if (F->rnall && F->rnlen){
+                int left=text_x>clip0?text_x:clip0;
+                int right=text_x+(F->rnlen<shown?F->rnlen:shown)*8;if(right>name_end)right=name_end;
+                if(right>left)fill_rect(left,ry+1,right-left,ROW_H-2,C_NAVY);
+            }
+            draw_text_clip2(text_x, ry, F->rnbuf+offset,
                             F->rnall ? C_WHITE : C_BLACK, clip0, name_end);
 
             if (*api->gui_blink && !F->rnall) {
-                int cxp = text_x + F->rncar * 8;
-                if (cxp < name_end) fill_rect(cxp, ry + 1, 1, ROW_H - 2, C_BLACK);
+                int cxp = text_x + (F->rncar-offset) * 8;
+                if (cxp >= clip0 && cxp < name_end) fill_rect(cxp, ry + 1, 1, ROW_H - 2, C_BLACK);
             }
         } else {
             u8 nfg = selr ? C_WHITE : (is_cut_row(r) ? C_G0 + 4 : (r->is_dir ? C_NAVY : C_BLACK));

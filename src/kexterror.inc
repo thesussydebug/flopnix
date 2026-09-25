@@ -1,6 +1,10 @@
 static void kext_error_text(char *out,int cap,const char *name,int status,unsigned required,unsigned current)
 {
     if(status==43){
+        if(required<39&&current>=39){
+            kfmt(out,cap,"%s: E43 uses old API %u. Install rebuilt extensions for API %u.",name,required,current);
+            return;
+        }
         kfmt(out,cap,"%s: E43 needs API %u; kernel has %u. Update kernel.",name,required,current);
         return;
     }

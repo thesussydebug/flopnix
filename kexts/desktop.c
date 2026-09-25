@@ -20,7 +20,7 @@ static const Kapi *api;
 #define DESK_LST "desktop.lst"
 #define DMAX FS_NFILES
 static char names[DMAX][FS_NAMELEN];
-static int nnames, vis[DMAX], nvis;
+static int nnames, vis[DMAX], nvis, desk_page;
 static u8 loaded, sync_forced;
 static u32 sync_t;
 
@@ -136,7 +136,7 @@ static int desk_enqueue(int kind,const char *name,const char *target,const char 
     u32 f=desk_lock();
     if(desk_qcount==DQ_MAX){desk_unlock(f);api->kfree(job.data);say("Desktop queue full; wait and try again");return 0;}
     if(desk_timer<0){desk_unlock(f);api->kfree(job.data);say("Desktop queue unavailable; try again");return 0;}
-    desk_queue[(desk_qhead+desk_qcount)%DQ_MAX]=job;desk_qcount++;
+    api->memcpy(&desk_queue[(desk_qhead+desk_qcount)%DQ_MAX],&job,sizeof job);desk_qcount++;
     int waiting=desk_active||desk_qcount>1;desk_unlock(f);
     if(waiting)say("Desktop request queued; waiting for current work");
     return 1;
@@ -189,13 +189,28 @@ static int rows_per_col(void)
     return r < 1 ? 1 : r;
 }
 
+static int page_size(void)
+{
+    int cols=(*api->screen_w-ICONX)/CELLW;
+    return rows_per_col()*(cols>0?cols:1);
+}
+
+static int page_count(void)
+{
+    int count=(nvis+page_size()-1)/page_size();
+    if(count<1)count=1;
+    if(desk_page>=count)desk_page=count-1;
+    return count;
+}
+
 static const char *icon_name(int n, int *ox, int *oy)
 {
-    if (n < 0 || n >= nvis) return 0;
+    page_count();
+    if (n < 0 || n >= page_size() || desk_page*page_size()+n >= nvis) return 0;
     int rpc = rows_per_col();
     *ox = ICONX + (n / rpc) * CELLW;
     *oy = ICONY + (n % rpc) * CELLH;
-    return names[vis[n]];
+    return names[vis[desk_page*page_size()+n]];
 }
 
 static const char *icon_at(int x, int y)
@@ -359,6 +374,15 @@ static void d_draw(void)
     }
     }
     lst_sync();
+    int pages=page_count();
+    if(pages>1){
+        int px=sw-168;
+        api->panel(px,3,160,20,0);
+        api->panel(px,3,24,20,0);api->draw_text(px+8,5,"<",desk_page?C_BLACK:C_GRAY);
+        api->panel(px+136,3,24,20,0);api->draw_text(px+144,5,">",desk_page+1<pages?C_BLACK:C_GRAY);
+        char label[24];api->kfmt(label,sizeof label,"Page %d/%d",desk_page+1,pages);
+        api->draw_text(px+30,5,label,C_BLACK);
+    }
     int x, y;
     for (int n = 0; ; n++) {
         const char *nm = icon_name(n, &x, &y);
@@ -373,13 +397,14 @@ static void d_draw(void)
             if (ex + ew > *api->screen_w - 1) ex = *api->screen_w - 1 - ew;
             api->fill_rect(ex, y + 31, ew, 16, C_WHITE);
             api->rect(ex, y + 31, ew, 16, C_NAVY);
+            int shown=(ew-4)/8,offset=ren_car>=shown?ren_car-shown+1:0;
             if (ren_all && ren_len)
-                api->fill_rect(ex + 2, y + 32, ren_len * 8, 14, C_NAVY);
-            api->draw_text_clip(ex + 2, y + 32, ren_buf,
+                api->fill_rect(ex + 2, y + 32, (ren_len<shown?ren_len:shown)*8, 14, C_NAVY);
+            api->draw_text_clip(ex + 2, y + 32, ren_buf+offset,
                                 ren_all ? C_WHITE : C_BLACK, ew - 4);
 
             if (*api->gui_blink && !ren_all)
-                api->fill_rect(ex + 2 + ren_car * 8, y + 32, 1, 14, C_BLACK);
+                api->fill_rect(ex + 2 + (ren_car-offset) * 8, y + 32, 1, 14, C_BLACK);
             continue;
         }
         const char *label = desk_leaf(nm);
@@ -511,7 +536,7 @@ static void ren_commit(void)
     if (!ren_name[0]) return;
     if (!ren_len) { say("a name cannot be empty"); ren_cancel(); return; }
     char dst[FS_NAMELEN];
-    if (!desk_path(dst, ren_buf, sizeof dst)) { say("Use 1-15 characters, without slashes"); return; }
+    if (!desk_path(dst, ren_buf, sizeof dst)) { say("Use 1-55 characters, without slashes"); return; }
     if (api->strcmp(dst, ren_name)) {
         if (api->fs_exists(dst)) { say("That name is already used"); return; }
         char source[FS_NAMELEN];api->strlcpy(source,ren_name,sizeof source);
@@ -530,6 +555,11 @@ static int d_key(int k)
 
     int c = ctrl ? kb_unctrl(k, 1) : k;
     if (!ren_name[0]) {
+        if(k==K_PGUP||k==K_PGDN){
+            int pages=page_count();desk_page+=k==K_PGUP?-1:1;
+            if(desk_page<0)desk_page=0;if(desk_page>=pages)desk_page=pages-1;
+            lastp_name[0]=0;api->gui_dirty();return 1;
+        }
         if (ctrl && c == 'a') {
             dsel_clear();
             for (int i = 0; i < nvis; i++) dsel_add(names[vis[i]]);
@@ -549,7 +579,7 @@ static int d_key(int k)
     if (ctrl && c == 'a') { ren_all = 1; api->gui_dirty(); return 1; }
 
     int printable = k >= 32 && k < 127 && k != '/';
-    TextField t = { ren_buf, 16, ren_len, ren_car, ren_all };
+    TextField t = { ren_buf, FS_NAMELEN - 8, ren_len, ren_car, ren_all };
     tf_key(&t, k, printable);
     ren_len = t.len; ren_car = t.caret; ren_all = t.all;
     api->gui_dirty();
@@ -616,7 +646,7 @@ static void desk_pick_now(int idx, void *ctx)
         desktop_paste("desktop");
     } else if (idx == 1) {
         char nm[FS_NAMELEN];
-        for (int i = 0; i < 10; i++) {
+        for (int i = 0; i < FS_NFILES; i++) {
             if (i) api->kfmt(nm, sizeof nm, "desktop/new%d.txt", i + 1);
             else   api->strlcpy(nm, "desktop/new.txt", sizeof nm);
             if (!api->fs_exists(nm)) {
@@ -626,7 +656,7 @@ static void desk_pick_now(int idx, void *ctx)
             }
         }
     } else if(idx==2){
-        char nm[FS_NAMELEN];for(int n=1;n<100;n++){
+        char nm[FS_NAMELEN];for(int n=1;n<=FS_NFILES;n++){
             api->kfmt(nm,sizeof nm,"desktop/Folder%d",n);
             if(!api->fs_exists(nm)&&!api->fs_dir_count(nm)){
                 if(!api->fs_mkdir(nm)){lst_touch();dsel_single(nm);api->strlcpy(sel,nm,sizeof sel);ren_begin(nm);}else say("Could not create folder");break;
@@ -644,6 +674,13 @@ static void desk_pick(int idx,void *ctx)
 
 static void d_mouse(int x, int y, int ev)
 {
+    if(ev==EV_PRESS&&page_count()>1&&y>=3&&y<23&&x>=*api->screen_w-168&&x<*api->screen_w-8){
+        if(ren_name[0]){ren_commit();if(ren_name[0])return;}
+        int px=*api->screen_w-168;
+        if(x<px+24&&desk_page>0)desk_page--;
+        if(x>=px+136&&desk_page+1<page_count())desk_page++;
+        lastp_name[0]=0;band=dragging=0;api->gui_dirty();return;
+    }
     if (ev == EV_PRESS || ev == EV_RPRESS) {
 
         const char *hit = icon_at(x, y);
@@ -787,7 +824,7 @@ static void desk_poll(void *ctx)
 {
     (void)ctx;u32 f=desk_lock();
     if(desk_active||!desk_qcount){desk_unlock(f);return;}
-    DeskJob job=desk_queue[desk_qhead];desk_qhead=(desk_qhead+1)%DQ_MAX;desk_qcount--;desk_active=1;
+    DeskJob job;api->memcpy(&job,&desk_queue[desk_qhead],sizeof job);desk_qhead=(desk_qhead+1)%DQ_MAX;desk_qcount--;desk_active=1;
     desk_unlock(f);
     switch(job.kind){
     case DQ_OPEN:icon_open_now(job.name);break;

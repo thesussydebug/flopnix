@@ -12,7 +12,7 @@ typedef signed   int   i32;
 #endif
 
 /* New fields are appended to keep existing extension offsets stable. */
-#define KAPI_VERSION 38
+#define KAPI_VERSION 39
 
 #define KEXT_MAGIC 0x5458454B
 enum { KEXT_KIND_KERNEL = 1, KEXT_KIND_APP = 2 };
@@ -85,10 +85,10 @@ enum {
     MI_HEAP_GROW_BASE, MI_HEAP_GROW_END, MI_HEAP_CAPACITY, MI_HEAP_LIMIT
 };
 
-#define FS_NAMELEN 24
+#define FS_NAMELEN 64
 #define FS_MAXFILE 524288
 
-#define FS_NFILES 128
+#define FS_NFILES 512
 typedef struct {
     char name[FS_NAMELEN];
     u32  size;
@@ -179,7 +179,7 @@ typedef struct {
     char owner[16];
     char location[96];
     u32 sequence, cr2, module_base, module_id;
-    char module[FS_NAMELEN];
+    char module[24];
 } FaultRec;
 
 typedef struct {

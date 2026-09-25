@@ -4,7 +4,26 @@
 #define BR_RULES 48
 typedef struct {u8 fg,bg,flags,align;} BrStyle;
 typedef struct {u16 start;u8 link,pad;BrStyle style;} BrRun;
-typedef struct {TwPage page;BrRun run[BR_RUNS];int runs;u8 background;char title[80];} BrPage;
+#define BR_OBJECTS 64
+#define BR_CONTROLS 32
+#define BR_CELLS 96
+#define BR_TABLES 12
+#define BR_OPTIONS 64
+#define BR_FORMS 8
+#define BR_ANCHORS 32
+enum { BR_IMAGE=1,BR_FRAME,BR_CONTROL,BR_TABLE,BR_RULE };
+enum { BC_TEXT,BC_PASSWORD,BC_AREA,BC_CHECK,BC_RADIO,BC_SUBMIT,BC_RESET,BC_HIDDEN,BC_SELECT,BC_BUTTON,BC_FILE };
+typedef struct {u16 start,end;u8 kind,link;int width,height,ref;BrStyle style;char url[TW_URL],label[80],name[32];} BrObject;
+typedef struct {char action[TW_URL],target[32];u8 post,unsupported;} BrForm;
+typedef struct {char name[64],value[256],initial[256];int form,object,type,limit,option,count,choice,initial_choice;u8 checked,initial_checked,disabled,readonly,multiple;} BrControl;
+typedef struct {char label[64],value[128];u8 selected,initial,disabled;} BrOption;
+typedef struct {u16 start,end;int table,row,col,span,rows,width;BrStyle style;} BrCell;
+typedef struct {int object,cols,rows,border,padding,spacing,width,frame,vertical;char sizes[80];} BrTable;
+typedef struct {char name[64];u16 off;} BrAnchor;
+typedef struct {TwPage page;BrRun run[BR_RUNS];int runs;u8 background;char title[80];
+    BrObject object[BR_OBJECTS];BrControl control[BR_CONTROLS];BrForm form[BR_FORMS];BrOption option[BR_OPTIONS];BrCell cell[BR_CELLS];BrTable table[BR_TABLES];BrAnchor anchor[BR_ANCHORS];
+    int objects,controls,forms,options,cells,tables,anchors;char target[TW_LINKS][32];u8 download[TW_LINKS];char base[TW_URL];
+} BrPage;
 typedef struct {char selector[40];BrStyle style;u8 mask,weight;} BrRule;
 typedef struct {BrRule rule[BR_RULES];int count;} BrCss;
 typedef struct {char tag[12];BrStyle style;int link;} BrFrame;
@@ -131,15 +150,18 @@ static int br_tag(const char *s,int p,int *end,char *tag,int *closing,int *attrs
     if(!tw_copy(tag,12,s+a,z-a))tag[0]=0;for(int i=0;tag[i];i++)if(tag[i]>='A'&&tag[i]<='Z')tag[i]+=32;
     *attrs=z;*end=e;return 1;
 }
-static void br_render(BrPage *b,const char *s,int mode,const char *base,BrCss *css)
+#include "browser_elements.inc"
+static void br_render_extra(BrPage *b,const char *s,int mode,const char *base,BrCss *css,const char *external)
 {
     b->runs=0;b->background=15;b->title[0]=0;
+    b->objects=b->controls=b->forms=b->options=b->cells=b->tables=b->anchors=0;tw_copy(b->base,TW_URL,base,tw_len(base));
+    for(int i=0;i<TW_LINKS;i++){b->target[i][0]=0;b->download[i]=0;}
     if(mode!=1){
         tw_render(&b->page,s,mode,base);BrStyle normal={0,15,0,0};br_run(b,normal,0);b->run[0].start=0;
         if(mode==2){int oldlen=b->page.len;for(int p=0;b->page.text[p];){int link=0;if(b->page.text[p]=='['){int q=p+1;while(link<=TW_LINKS&&b->page.text[q]>='0'&&b->page.text[q]<='9')link=link*10+b->page.text[q++]-'0';if(b->page.text[q]!=']'||link>b->page.links)link=0;}b->page.len=p;BrStyle st={link?1:0,15,link?2:0,0};br_run(b,st,link);while(b->page.text[p]&&b->page.text[p]!='\n')p++;if(b->page.text[p])p++;}b->page.len=oldlen;}
         return;
     }
-    css->count=0;
+    css->count=0;if(external)br_css(css,external,tw_len(external));
     int script=0;
     for(int p=0;s[p];){if(s[p]!='<'){p++;continue;}
         if(!script&&s[p+1]=='!'&&s[p+2]=='-'&&s[p+3]=='-'){p+=4;while(s[p]&&!(s[p]=='-'&&s[p+1]=='-'&&s[p+2]=='>'))p++;if(s[p])p+=3;continue;}
@@ -147,6 +169,7 @@ static void br_render(BrPage *b,const char *s,int mode,const char *base,BrCss *c
         if(br_same(tag,"script"))script=!close;
         if(!script&&br_same(tag,"style")&&!close){int z=e+1;while(s[z]&&!(s[z]=='<'&&s[z+1]=='/'&&tw_len(s+z+2)>=5&&tw_ci(s+z+2,"style",5)))z++;br_css(css,s+e+1,z-e-1);p=z;}else p=e+1;}
     b->page.len=b->page.links=b->page.clipped=0;b->page.text[0]=0;
+    BrParse state; br_parse_init(&state);
     BrFrame stack[32];int depth=0,overflow=0,skip=0,title=0;BrFrame cur={{0},{0,15,0,0},0};
     for(int p=0;s[p];){
         if(s[p]=='<'){
@@ -157,6 +180,7 @@ static void br_render(BrPage *b,const char *s,int mode,const char *base,BrCss *c
             if(br_same(tag,"title")){title=!close;p=e+1;continue;}
             int block=br_block(tag);
             if(close){
+                br_close_element(b,&state,tag);
                 if(overflow)overflow--;else for(int i=depth-1;i>=0;i--)if(br_same(stack[i].tag,tag)){cur=stack[i];depth=i;break;}
                 if(block)br_separate(b,tag);
             }else{
@@ -169,24 +193,26 @@ static void br_render(BrPage *b,const char *s,int mode,const char *base,BrCss *c
                 }
                 BrFrame next=cur;char value[256];
                 if(block)br_separate(b,tag);
-                if(br_same(tag,"head"))next.style.flags|=8;
-                if(br_same(tag,"b")||br_same(tag,"strong")||(tag[0]=='h'&&tag[1]>='1'&&tag[1]<='6'&&!tag[2]))next.style.flags|=1;
+                if(br_same(tag,"head")||br_same(tag,"noframes"))next.style.flags|=8;
+                if(br_same(tag,"b")||br_same(tag,"strong")||br_same(tag,"th")||(tag[0]=='h'&&tag[1]>='1'&&tag[1]<='6'&&!tag[2]))next.style.flags|=1;
                 if(tag[0]=='h'&&tag[1]>='1'&&tag[1]<='6'&&!tag[2])next.style.fg=1;
                 if(br_same(tag,"u"))next.style.flags|=2;if(br_same(tag,"pre"))next.style.flags|=4;if(br_same(tag,"center"))next.style.align=1;
                 if(br_attr(s+a,e-a,"color",value,sizeof value)){int c=br_color(value);if(c>=0)next.style.fg=(u8)c;}
                 if(br_attr(s+a,e-a,"bgcolor",value,sizeof value)){int c=br_color(value);if(c>=0)next.style.bg=(u8)c;}
                 if(br_attr(s+a,e-a,"align",value,sizeof value)){if(br_same(value,"center"))next.style.align=1;else if(br_same(value,"right"))next.style.align=2;}
                 if(br_same(tag,"a")&&br_attr(s+a,e-a,"href",value,sizeof value)){
-                    char url[TW_URL];if(tw_resolve(base,value,url)){int len=b->page.len,link=tw_addlink(&b->page,url,value,tw_len(value));b->page.len=len;b->page.text[len]=0;next.link=link+1;if(next.link){next.style.fg=1;next.style.flags|=2;}}
+                    char url[TW_URL];if(br_resolve(b->base,value,url)){int len=b->page.len,link=tw_addlink(&b->page,url,value,tw_len(value));b->page.len=len;b->page.text[len]=0;next.link=link+1;if(next.link){br_attr(s+a,e-a,"target",b->target[link],32);b->download[link]=(u8)br_has(s+a,e-a,"download");next.style.fg=1;next.style.flags|=2;}}
                 }
                 br_style(&next.style,css,tag,s+a,e-a);
-                if(br_same(tag,"body"))b->background=next.style.bg;
+                if(br_same(tag,"body")){if(br_attr(s+a,e-a,"text",value,sizeof value)){int c=br_color(value);if(c>=0)next.style.fg=(u8)c;}b->background=next.style.bg;}
+                br_anchor(b,s+a,e-a,tag);
+                if(br_open_element(b,&state,s,&p,e,a,tag,next.style,next.link)){continue;}
                 int empty=br_same(tag,"br")||br_same(tag,"hr")||br_same(tag,"img")||br_same(tag,"meta")||br_same(tag,"link")||br_same(tag,"input")||br_same(tag,"base")||br_same(tag,"wbr")||(e>p&&s[e-1]=='/');
                 if(br_same(tag,"br"))tw_put(&b->page,'\n',0);
                 else if(br_same(tag,"hr")){br_break(b);for(int i=0;i<24;i++)br_put(b,next.style,0,'-');br_break(b);}
                 else if(br_same(tag,"img")){if(br_attr(s+a,e-a,"alt",value,sizeof value))for(int i=0;value[i];i++)br_put(b,next.style,next.link,value[i]);}
                 else if(br_same(tag,"li")){br_put(b,next.style,0,'*');br_put(b,next.style,0,' ');}
-                else if(br_same(tag,"td")||br_same(tag,"th")){br_put(b,next.style,0,' ');br_put(b,next.style,0,'|');br_put(b,next.style,0,' ');}
+
                 if(!empty&&tag[0]){if(depth<32&&!overflow){stack[depth]=cur;tw_copy(stack[depth].tag,sizeof stack[depth].tag,tag,tw_len(tag));depth++;cur=next;}else {overflow++;b->page.clipped=1;}}
             }
             p=e+1;continue;
@@ -195,6 +221,9 @@ static void br_render(BrPage *b,const char *s,int mode,const char *base,BrCss *c
         if(title){int n=tw_len(b->title);if(n<79){b->title[n]=(char)(br_space(c)?' ':c);b->title[n+1]=0;}continue;}
         if(skip)continue;br_put(b,cur.style,cur.link,c);
     }
+    br_finish_elements(b,&state);
     for(int i=0;i<b->runs;i++)if(b->run[i].link){TwLink *link=&b->page.link[b->run[i].link-1];int start=b->run[i].start,end=i+1<b->runs?b->run[i+1].start:b->page.len;if(end-start>79)end=start+79;if(end>start)tw_copy(link->label,sizeof link->label,b->page.text+start,end-start);}
 }
 static int br_run_at(const BrPage *b,int off){int lo=0,hi=b->runs;while(lo<hi){int mid=(lo+hi)/2;if(b->run[mid].start<=off)lo=mid+1;else hi=mid;}return lo?lo-1:0;}
+
+static void br_render(BrPage *b,const char *s,int mode,const char *base,BrCss *css){br_render_extra(b,s,mode,base,css,0);}

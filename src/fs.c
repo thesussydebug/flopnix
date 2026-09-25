@@ -8,30 +8,49 @@
 
 #define FS_SUPER 288
 #define FS_TABLE 289
-#define FS_TSECT 10
-#define FS_DATA  299
+#define FS_TSECT (FS_NFILES * sizeof(FsEnt) / 512)
+#define FS_DATA  fs_data
 #define FS_END   2880
 #define FS_MAGIC 0x53465046
-#define FS_VER   2
+#define FS_VER   3
 
 static FsEnt table[FS_NFILES];
+typedef struct { char name[24]; u32 size,mtime; u16 start,nsect; u8 used,attr,pad[2]; } FsLegacy;
+static FsLegacy legacy[128];
+static u32 fs_data=FS_TABLE+FS_TSECT, fs_tsect=FS_TSECT;
+static int fs_slots=FS_NFILES, fs_namelen=FS_NAMELEN;
+typedef struct { u8 bits[FS_TSECT]; } FsSectors;
 static int mounted;
 static Mutex fs_mutex=MUTEX_INIT;
 #include "fscache.inc"
 
-static u32 entry_sectors(const FsEnt *e)
+static void mark_entry(FsSectors *s,const FsEnt *e)
 {
-    u32 off = (const u8 *)e - (const u8 *)table;
-    return (1u << (off / 512)) | (1u << ((off + sizeof *e - 1) / 512));
+    u32 size=fs_slots==128?sizeof(FsLegacy):sizeof(FsEnt);
+    u32 off=(e-table)*size;
+    s->bits[off/512]=s->bits[(off+size-1)/512]=1;
 }
 
-static int flush_table(u32 sectors)
+static FsSectors entry_sectors(const FsEnt *e)
 {
-    for (u32 i = 0; i < FS_TSECT; ) {
-        if (!(sectors & (1u << i))) { i++; continue; }
-        u32 first = i++;
-        while (i < FS_TSECT && (sectors & (1u << i))) i++;
-        if (fdc_write_many(FS_TABLE + first, (u8 *)table + first * 512, i - first)) return 0;
+    FsSectors s={0};mark_entry(&s,e);return s;
+}
+
+static int flush_table(FsSectors sectors)
+{
+    const u8 *raw=(const u8 *)table;
+    if(fs_slots==128){
+        for(int i=0;i<128;i++){
+            memcpy(legacy[i].name,table[i].name,24);
+            memcpy(&legacy[i].size,&table[i].size,16);
+        }
+        raw=(const u8 *)legacy;
+    }
+    for(u32 i=0;i<fs_tsect;){
+        if(!sectors.bits[i]){i++;continue;}
+        u32 first=i++;
+        while(i<fs_tsect&&sectors.bits[i])i++;
+        if(fdc_write_many(FS_TABLE+first,raw+first*512,i-first))return 0;
     }
     return 1;
 }
@@ -43,7 +62,7 @@ static void reload_table(void)
     fdc_result_restore(&result);
 }
 
-static int commit_table(u32 sectors)
+static int commit_table(FsSectors sectors)
 {
     if(flush_table(sectors))return 1;
     reload_table();return 0;
@@ -54,10 +73,21 @@ int fs_ensure(void)
     if (mounted) return mounted > 0;
     u8 sec[512];
     if (fdc_read(FS_SUPER, sec) != 0) { mounted = -1; return 0; }
-    int ok = *(u32 *)sec == FS_MAGIC &&
-             *(u32 *)(sec + 4) == FS_VER &&
-             *(u32 *)(sec + 8) == sizeof(FsEnt);
-    if(ok&&fdc_read_many(FS_TABLE,(u8 *)table,FS_TSECT))ok=0;
+    int old=*(u32 *)(sec+4)==2&&*(u32 *)(sec+8)==sizeof(FsLegacy);
+    int ok=*(u32 *)sec==FS_MAGIC&&(old||
+        (*(u32 *)(sec+4)==FS_VER&&*(u32 *)(sec+8)==sizeof(FsEnt)));
+    fs_slots=old?128:FS_NFILES;fs_namelen=old?24:FS_NAMELEN;
+    fs_tsect=old?10:FS_TSECT;fs_data=FS_TABLE+fs_tsect;
+    memset(table,0,sizeof table);
+    if(ok&&fdc_read_many(FS_TABLE,old?(u8 *)legacy:(u8 *)table,fs_tsect))ok=0;
+    if(ok&&old)for(int i=0;i<128;i++){
+        if(legacy[i].used){
+            int n=0;while(n<24&&legacy[i].name[n])n++;
+            if(n==24){ok=0;break;}
+        }
+        memcpy(table[i].name,legacy[i].name,24);
+        memcpy(&table[i].size,&legacy[i].size,16);
+    }
     if(!ok||!fs_table_valid(table,FS_NFILES,FS_DATA,FS_END)){
         memset(table,0,sizeof table);mounted=-1;
         klog("FLOPFS: metadata unreadable or invalid; disk left unchanged.\n");
@@ -134,6 +164,7 @@ static int fs_write_locked(const char *name, const u8 *buf, u32 size, int fresh)
 
     if (!fs_name_ok(name)) return -1;
     if (!fs_ensure()) return -1;
+    if (strlen(name)>=(u32)fs_namelen) return -1;
     if (size > (u32)(FS_END - FS_DATA) * 512) return -2;
     int nsect = (size + 511) / 512;
     if (nsect == 0) nsect = 1;
@@ -153,8 +184,8 @@ static int fs_write_locked(const char *name, const u8 *buf, u32 size, int fresh)
         if (grow) e = grow;
         else {
             int i;
-            for (i = 0; i < FS_NFILES && table[i].used; i++) ;
-            if (i == FS_NFILES) return -2;
+            for (i = 0; i < fs_slots && table[i].used; i++) ;
+            if (i == fs_slots) return -2;
             e = &table[i];
             memset(e, 0, sizeof *e);
             strlcpy(e->name, name, FS_NAMELEN);
@@ -187,23 +218,19 @@ static int fs_delete_locked(const char *name)
     if (!fs_ensure()) return FS_EIO;
     FsEnt *e = find(name);
     if (!e) return -1;
-    u32 sector = (u32)((u8 *)&e->used - (u8 *)table) / 512;
     e->used = 0;
-    if (fdc_write(FS_TABLE + sector, (u8 *)table + sector * 512)) {
-        reload_table();
-        return FS_EIO;
-    }
-    return 0;
+    return commit_table(entry_sectors(e)) ? 0 : FS_EIO;
 }
 
 static int fs_mkdir_locked(const char *name)
 {
     if (!fs_dirname_ok(name)) return -1;
     if (!fs_ensure()) return -1;
+    if (strlen(name)+2>=(u32)fs_namelen) return -1;
     if (find(name)) return -1;
     int i;
-    for (i = 0; i < FS_NFILES && table[i].used; i++) ;
-    if (i == FS_NFILES) return -2;
+    for (i = 0; i < fs_slots && table[i].used; i++) ;
+    if (i == fs_slots) return -2;
     FsEnt *e = &table[i];
     memset(e, 0, sizeof *e);
     strlcpy(e->name, name, FS_NAMELEN);
@@ -242,7 +269,7 @@ static int fs_rename_locked(const char *oldname, const char *newname)
     if (find(newname)) return -1;
     int l = 0;
     while (newname[l]) l++;
-    if (l >= FS_NAMELEN) return -1;
+    if (l >= fs_namelen) return -1;
     strlcpy(e->name, newname, FS_NAMELEN);
     return commit_table(entry_sectors(e)) ? 0 : -1;
 }
@@ -252,6 +279,7 @@ static int fs_rename_dir_locked(const char *olddir, const char *newdir)
     if (!fs_dirname_ok(newdir)) return -1;
     if (fs_under(newdir,olddir)) return -1;
     if (!fs_ensure()) return -1;
+    if (strlen(newdir)+2>=(u32)fs_namelen) return -1;
     if (!strcmp(olddir, newdir)) return 0;
     if (find(newdir)) return -1;
     for(int i=0;i<FS_NFILES;i++)
@@ -263,24 +291,24 @@ static int fs_rename_dir_locked(const char *olddir, const char *newdir)
         if (!table[i].used) continue;
         if (!strcmp(table[i].name, olddir)) { hits++; continue; }
         if (!fs_under(table[i].name, olddir)) continue;
-        if (!fs_rejoin(table[i].name, olddir, newdir, nn, FS_NAMELEN)) return -2;
+        if (!fs_rejoin(table[i].name, olddir, newdir, nn, fs_namelen)) return -2;
         if (find(nn)) return -1;
         hits++;
     }
     if (!hits) return -1;
 
-    u32 sectors = 0;
+    FsSectors sectors = {0};
     for (int i = 0; i < FS_NFILES; i++) {
         if (!table[i].used) continue;
         if (!strcmp(table[i].name, olddir)) {
             strlcpy(table[i].name, newdir, FS_NAMELEN);
-            sectors |= entry_sectors(&table[i]);
+            mark_entry(&sectors,&table[i]);
             continue;
         }
         if (!fs_under(table[i].name, olddir)) continue;
         if (fs_rejoin(table[i].name, olddir, newdir, nn, FS_NAMELEN)) {
             strlcpy(table[i].name, nn, FS_NAMELEN);
-            sectors |= entry_sectors(&table[i]);
+            mark_entry(&sectors,&table[i]);
         }
     }
     return commit_table(sectors) ? 0 : -1;
@@ -320,7 +348,7 @@ static int fs_defrag_locked(void (*prog)(int done, int total))
         e[i].used = table[i].used && table[i].nsect != 0;
         e[i].start = table[i].start;
         e[i].sects = table[i].nsect;
-        e[i].idx = (u8)i;
+        e[i].idx = (u16)i;
     }
     int moves = fs_plan(e, FS_NFILES, FS_DATA);
     if (!moves) return 0;

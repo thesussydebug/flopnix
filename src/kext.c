@@ -208,7 +208,7 @@ static int peek_header(const u8 *img, u32 len, KextHeader *out)
     if (out->magic != KEXT_MAGIC) return 40;
     int named=0;for(u32 j=0;j<sizeof out->name;j++)if(!out->name[j]){named=1;break;}
     if(!named)return 40;
-    if (out->api_version > KAPI_VERSION) return 43;
+    if (out->api_version < 39 || out->api_version > KAPI_VERSION) return 43;
     if (out->kind != KEXT_KIND_KERNEL && out->kind != KEXT_KIND_APP) return 40;
     return 0;
 }

@@ -16,3 +16,10 @@ typedef struct {
 enum { NH_IDLE, NH_PREFLIGHT, NH_ARP, NH_CONNECT, NH_RESPONSE, NH_COMPLETE };
 typedef struct { u32 stage; int result; } NetHttpDiag;
 typedef struct { u32 abi; void (*read)(NetHttpDiag *out); } NetHttpDiagOps;
+
+#define NET_HTTP_FORM_ABI 1u
+typedef struct {
+    u32 abi;
+    int (*post)(u32 ip,u16 port,const char *host,const char *path,const char *body,
+                int (*sink)(const u8 *,int,void *),void *ctx,u32 timeout,NetHttpInfo *info);
+} NetHttpFormOps;
