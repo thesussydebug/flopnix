@@ -30,9 +30,16 @@ static __attribute__((noinline)) int view_load(BrView *v,const char *url,const c
     Transfer d;api->memset(&d,0,sizeof d);char requested[TW_URL],localpath[TW_URL];TwUrl u;tw_copy(requested,TW_URL,url,tw_len(url));int n=0;while(requested[n]&&requested[n]!='#')n++;tw_copy(localpath,TW_URL,requested,n);int local=tw_local(localpath,localpath);
     if(body&&local)return 0;if(!local&&!tw_url(requested,&u))return 0;
     if(!(local?read_local(localpath,&d):(allocate(&d)&&fetch(requested,&u,&d,body)))){release(&d);return 0;}
-    int mode=local?1:br_mode(&u,&d.info,d.data,(int)d.len);if(mode<0){say("This frame response is a file. Use Download to save it.");release(&d);return 0;}
-    BrView *next=api->kmalloc(sizeof *next);if(!next){release(&d);return 0;}api->memset(next,0,sizeof *next);next->parent=v->parent;next->depth=v->depth;next->post=body!=0;next->doc=api->kmalloc(sizeof *next->doc);next->layout=api->kmalloc(sizeof *next->layout);BrCss *css=api->kmalloc(sizeof *css);
-    if(!next->doc||!next->layout||!css){view_free(next);api->kfree(next);api->kfree(css);release(&d);return 0;}next->layout->width=0;tw_copy(next->url,TW_URL,requested,tw_len(requested));view_render(next,(const char *)d.data,mode,css);api->kfree(css);release(&d);
+    BrView *next;
+    for(int hops=0;;hops++){
+        int mode=local?1:br_mode(&u,&d.info,d.data,(int)d.len);if(mode<0){say("This frame response is a file. Use Download to save it.");release(&d);return 0;}
+        br_text_fix(d.data,d.len);
+        next=api->kmalloc(sizeof *next);if(!next){release(&d);return 0;}api->memset(next,0,sizeof *next);next->parent=v->parent;next->depth=v->depth;next->post=body!=0;next->doc=api->kmalloc(sizeof *next->doc);next->layout=api->kmalloc(sizeof *next->layout);BrCss *css=api->kmalloc(sizeof *css);
+        if(!next->doc||!next->layout||!css){view_free(next);api->kfree(next);api->kfree(css);release(&d);return 0;}next->layout->width=0;tw_copy(next->url,TW_URL,requested,tw_len(requested));view_render(next,(const char *)d.data,mode,css);api->kfree(css);
+        if(closing||follow_refresh(next->doc,hops,requested,localpath,&local,&u,&d)<=0)break;
+        view_free(next);api->kfree(next);body=0;
+    }
+    release(&d);
     if(closing){view_free(next);api->kfree(next);return 0;}formatting=1;nav_serial++;view_free(v);api->memcpy(v,next,sizeof *v);api->kfree(next);view_reparent(v);formatting=0;return 1;
 }
 static __attribute__((noinline)) void view_render(BrView *v,const char *source,int mode,BrCss *css)
@@ -84,7 +91,7 @@ static void view_draw(BrView *v,int x,int y,int w,int h,BrClip clip)
     for(int i=0;i<v->layout->count;i++){
         BrBox *b=&v->layout->box[i];int xx=x+b->x,yy=y+b->y-v->scroll;if(yy+b->h<=clip.y||yy>=clip.y+clip.h)continue;
         if(b->object<=-2){const BrCell *c=&v->doc->cell[-2-b->object];view_fill(clip,xx,yy,b->w,b->h,c->style.bg);if(v->doc->table[c->table].border)view_border(clip,xx,yy,b->w,b->h,c->style.fg);continue;}
-        if(b->object<0){for(int p=b->start;p<b->end;p++){int ri=br_run_at(v->doc,p);BrStyle st=v->doc->runs?v->doc->run[ri].style:(BrStyle){0,15,0,0};int link=v->doc->runs?v->doc->run[ri].link:0,px=xx+(p-b->start)*8;if(active_view==v&&link&&link==selected+1){st.fg=C_WHITE;st.bg=C_NAVY;}view_fill(clip,px,yy,8,16,st.bg);view_char(clip,px,yy,v->doc->page.text[p],st.fg);if(st.flags&1)view_char(clip,px+1,yy,v->doc->page.text[p],st.fg);if(st.flags&2)view_fill(clip,px,yy+14,8,1,st.fg);}continue;}
+        if(b->object<0){for(int p=b->start;p<b->end;p++){int ri=br_run_at(v->doc,p);BrStyle st=v->doc->runs?v->doc->run[ri].style:(BrStyle){0,15,0,0};int link=v->doc->runs?v->doc->run[ri].link:0,px=xx+(p-b->start)*8;if(active_view==v&&link&&link==selected+1){st.fg=C_WHITE;st.bg=C_NAVY;}st.fg=(u8)br_contrast(st.fg,st.bg);view_fill(clip,px,yy,8,16,st.bg);view_char(clip,px,yy,v->doc->page.text[p],st.fg);if(st.flags&1)view_char(clip,px+1,yy,v->doc->page.text[p],st.fg);if(st.flags&2)view_fill(clip,px,yy+14,8,1,st.fg);}continue;}
         BrObject *o=&v->doc->object[b->object];BrMedia *m=&v->media[b->object];
         if(o->kind==BR_TABLE){view_fill(clip,xx,yy,b->w,b->h,o->style.bg);if(v->doc->table[o->ref].border)view_border(clip,xx,yy,b->w,b->h,o->style.fg);}
         else if(o->kind==BR_CONTROL)view_control(v,o->ref,clip,xx,yy,b->w,b->h);

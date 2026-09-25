@@ -107,6 +107,28 @@ static int read_local(const char *path,Transfer *d)
     d->data=file.data;d->len=file.size;d->cap=file.capacity-1;
     api->mem_track("Browser response",d->data,d->cap+1);return 1;
 }
+static int target_url(const char *url,char *requested,char *localpath,int *local,TwUrl *u)
+{
+    int fragment=0;while(url[fragment]&&url[fragment]!='#')fragment++;if(!tw_copy(localpath,TW_URL,url,fragment))return 0;
+    *local=tw_local(localpath,requested);if(*local){api->strlcpy(localpath,requested,TW_URL);int n=tw_len(requested);if(url[fragment]&&n+tw_len(url+fragment)<TW_URL)tw_copy(requested+n,TW_URL-n,url+fragment,tw_len(url+fragment));return 1;}
+    if(!tw_url(url,u))return 0;api->strlcpy(requested,url,TW_URL);return 1;
+}
+static int refresh_next(const BrPage *doc,const char *requested,char *next)
+{
+    if(!doc||!doc->refresh[0]||doc->refresh_delay>1)return 0;
+    int n=0,m=0;while(requested[n]&&requested[n]!='#')n++;while(doc->refresh[m]&&doc->refresh[m]!='#')m++;
+    if(n==m){int i=0;while(i<n&&requested[i]==doc->refresh[i])i++;if(i==n)return 0;}
+    api->strlcpy(next,doc->refresh,TW_URL);return 1;
+}
+static int follow_refresh(const BrPage *doc,int hops,char *requested,char *localpath,int *local,TwUrl *u,Transfer *d)
+{
+    char forward[TW_URL],nreq[TW_URL],nlocal[TW_URL];TwUrl nu;int nl;
+    if(!refresh_next(doc,requested,forward))return 0;
+    if(hops>=4){say("Too many page refreshes. Showing the last page.");return -1;}
+    if(!target_url(forward,nreq,nlocal,&nl,&nu)){say("This page forwards to an unsupported address (possibly HTTPS).");return -1;}
+    if(!(nl?read_local(nlocal,d):fetch(nreq,&nu,d,0)))return -1;
+    api->strlcpy(requested,nreq,TW_URL);api->strlcpy(localpath,nlocal,TW_URL);*local=nl;api->memcpy(u,&nu,sizeof nu);return 1;
+}
 #include "browser_view.inc"
 static void save_picker(void);
 static void choose_again(int result,void *ctx)
@@ -146,18 +168,17 @@ static void offer_save(Transfer *d,const char *url,int html)
 }
 static void visit(const char *url,int target,int download)
 {
-    if(busy||pending.data)return;if(!download&&page&&view_anchor(&root_view,url)){api->gui_dirty();return;}char requested[TW_URL];TwUrl u;
-    char localpath[TW_URL];int fragment=0;while(url[fragment]&&url[fragment]!='#')fragment++;if(!tw_copy(localpath,sizeof localpath,url,fragment))return;
-    int local=tw_local(localpath,requested);if(local){api->strlcpy(localpath,requested,sizeof localpath);int n=tw_len(requested);if(url[fragment]&&n+tw_len(url+fragment)<TW_URL)tw_copy(requested+n,TW_URL-n,url+fragment,tw_len(url+fragment));}
-    if(!local){if(!tw_url(url,&u)){say("Enter HTTP, Gopher, or a local path such as a:page.html or u:/page.htm.");return;}api->strlcpy(requested,url,sizeof requested);}
+    if(busy||pending.data)return;if(!download&&page&&view_anchor(&root_view,url)){api->gui_dirty();return;}char requested[TW_URL],localpath[TW_URL];TwUrl u;int local;
+    if(!target_url(url,requested,localpath,&local,&u)){say("Enter HTTP, Gopher, or a local path such as a:page.html or u:/page.htm.");return;}
     if(!local&&!download&&!u.http&&u.type=='7'&&!tw_contains(u.path,"\t")){
         api->strlcpy(search_url,requested,sizeof search_url);set_address("");searching=focus=1;say("Type your search words, then press Enter.");return;
     }
     Transfer d;if(!allocate(&d))return;busy=1;
-    if(local?read_local(localpath,&d):fetch(requested,&u,&d,0)){
+    if(local?read_local(localpath,&d):fetch(requested,&u,&d,0))for(int hops=0;;hops++){
         int mode=local?1:br_mode(&u,&d.info,d.data,(int)d.len);
         if(download||mode<0){if(!local&&!u.http&&u.type=='0')d.len=br_gopher_text(d.data,d.len);busy=0;offer_save(&d,requested,mode==1);}
         else {
+            br_text_fix(d.data,d.len);
             {
                 BrPage *next=api->kmalloc(sizeof *next);BrCss *css=api->kmalloc(sizeof *css);
                 if(!next||!css){api->kfree(next);api->kfree(css);say("Not enough memory to render. Previous page retained.");release(&d);busy=0;if(closing)dispose();return;}
@@ -167,15 +188,19 @@ static void visit(const char *url,int target,int download)
                 loaded.layout->width=0;tw_copy(loaded.url,TW_URL,requested,tw_len(requested));
                 resource_count=resource_failures=0;document_count=1;view_render(&loaded,(const char *)d.data,mode,css);api->kfree(css);
                 if(closing){view_free(&loaded);release(&d);busy=0;dispose();return;}
+                int forward=follow_refresh(loaded.doc,hops,requested,localpath,&local,&u,&d);
+                if(closing){view_free(&loaded);release(&d);busy=0;dispose();return;}
+                if(forward>0){view_free(&loaded);continue;}
                 if(hpos>=0&&!at_home)history[hpos].scroll=top;
                 int scroll=0;
                 if(target>=0){hpos=target;scroll=history[hpos].scroll;api->strlcpy(history[hpos].url,requested,TW_URL);}
                 else {hcount=hpos+1;if(hcount==8){api->memmove(history,history+1,7*sizeof history[0]);hcount--;}hpos=hcount++;api->strlcpy(history[hpos].url,requested,TW_URL);history[hpos].scroll=0;}
                 formatting=1;nav_serial++;view_free(&root_view);api->memcpy(&root_view,&loaded,sizeof loaded);view_reparent(&root_view);page=root_view.doc;top=scroll;line_cols=0;formatting=0;active_view=&root_view;active_control=-1;
                 set_address(requested);api->strlcpy(current,requested,sizeof current);gopher=!local&&!u.http;links_view=focus=searching=at_home=0;selected=-1;view_anchor(&root_view,requested);
-                api->kfmt(status,sizeof status,"%u bytes, %d links, %d images/frames unavailable.%s",d.len,page->page.links,resource_failures,page->page.clipped?" Display limit reached.":"");
+                if(!forward)api->kfmt(status,sizeof status,"%u bytes, %d links, %d images/frames unavailable.%s",d.len,page->page.links,resource_failures,page->page.clipped?" Display limit reached.":"");
             }
         }
+        break;
     }
     release(&d);busy=0;if(closing)dispose();api->gui_dirty();
 }

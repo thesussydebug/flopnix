@@ -71,7 +71,7 @@ static int br_open_element(BrPage *b,BrParse *p,const char *s,int *pos,int e,int
     if(br_same(tag,"table")||frameset){
         br_break(b);if(p->depth==12||b->tables==BR_TABLES){b->page.clipped=1;return 0;}
         if(p->depth&&b->table[p->table[p->depth-1]].frame)br_cell(b,p,"",0,st);
-        int oi=br_object(b,BR_TABLE,st,0);if(oi<0)return 0;int ti=b->tables++;BrTable *t=&b->table[ti];t->object=oi;t->cols=t->rows=0;t->border=br_attrnum(attrs,n,"border",frameset?1:0,8);t->padding=br_attrnum(attrs,n,"cellpadding",3,16);t->spacing=br_attrnum(attrs,n,"cellspacing",2,12);t->frame=frameset;t->vertical=0;t->sizes[0]=0;
+        int oi=br_object(b,BR_TABLE,st,0);if(oi<0)return 0;int ti=b->tables++;BrTable *t=&b->table[ti];t->object=oi;t->cols=t->rows=0;t->border=br_attrnum(attrs,n,"border",frameset?1:0,8);t->padding=br_attrnum(attrs,n,"cellpadding",3,16);t->spacing=br_attrnum(attrs,n,"cellspacing",2,12);t->frame=frameset;t->vertical=0;t->sizes[0]=0;t->align=st.align;
         t->width=br_attr(attrs,n,"width",v,sizeof v)?br_dimension(v,0,2048):0;
         if(frameset){if(!br_attr(attrs,n,"cols",t->sizes,sizeof t->sizes)){br_attr(attrs,n,"rows",t->sizes,sizeof t->sizes);t->vertical=1;}t->cols=1;}
         b->object[oi].ref=ti;p->table[p->depth]=ti;p->cell[p->depth]=-1;p->row[p->depth]=frameset?0:-1;p->column[p->depth++]=0;return 0;

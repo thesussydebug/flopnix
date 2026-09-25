@@ -1,5 +1,6 @@
 #pragma once
 static int br_redirect(int status){return status==301||status==302||status==303||status==307||status==308;}
+static void br_text_fix(u8 *d,u32 n){for(u32 i=0;i<n;i++)if(!d[i])d[i]=' ';}
 static u32 br_gopher_text(u8 *data,u32 len)
 {
     u32 p=0,out=0;
