@@ -56,11 +56,8 @@ static void push_poll(void)
 {
     if(!push_enabled||!net_ip||!timer_alive||(i32)(ticks-push_next)<0)return;
     push_next=ticks+100;
-    static const u8 broadcast[6]={255,255,255,255,255,255},zero[6]={0};
+    static const u8 broadcast[6]={255,255,255,255,255,255};
     push_send(net_ip|~net_mask,broadcast);
     if(push_peer)push_send(push_peer,push_mac);
-    if(net_gw&&net_gw!=push_peer){
-        u8 mac[6];if(arp_lookup(net_gw,mac))push_send(net_gw,mac);else arp_send(1,zero,net_gw);
-    }
 }
 static const NetUpdateOps push_ops={NET_UPDATE_ABI,push_listen,push_take,push_status};

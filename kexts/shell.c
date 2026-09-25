@@ -9,8 +9,10 @@
 #include "fspath.inc"
 #include "fdchealth.inc"
 #include "ntpcore.inc"
-#include "lz.inc"
+#include "archive_core.inc"
 #include "diskmap.inc"
+#include "fileopen.inc"
+#include "dynbuf.h"
 
 static const Kapi *api;
 
@@ -120,8 +122,7 @@ static void defrag_prog(int done, int total)
     gui_pump();
 }
 
-static u8  wget_buf[48 * 1024];
-static int wget_n, wget_tofile, wget_over;
+typedef struct { DynBuf buffer; u32 length; int tofile, error; } WgetData;
 
 static u32 kupd_n;
 static int kupd_over;
@@ -136,12 +137,16 @@ static int kupd_sink(const u8 *chunk, int len, void *ctx)
 
 static int wget_sink(const u8 *chunk, int len, void *ctx)
 {
-    (void)ctx;
-    if (wget_tofile) {
-        int room = (int)sizeof wget_buf - wget_n;
-        int take = len < room ? len : room;
-        for (int i = 0; i < take; i++) wget_buf[wget_n++] = chunk[i];
-        if (take < len) { wget_over = 1; return 0; }
+    WgetData *d = ctx;
+    if (len < 0) { d->error = 1; return 0; }
+    if (d->tofile) {
+        u32 limit = api->iobuf_size;
+        if (d->length > limit || (u32)len > limit - d->length) { d->error = 1; return 0; }
+        if (!db_reserve(api, &d->buffer, d->length + (u32)len, 1, 1024, limit, "Shell download")) {
+            d->error = 2; return 0;
+        }
+        if (len) memcpy((u8 *)d->buffer.data + d->length, chunk, (u32)len);
+        d->length += (u32)len;
     } else {
         for (int i = 0; i < len; i++) tputc((char)chunk[i]);
     }
@@ -175,25 +180,26 @@ static void do_wget(const char *args)
          ip & 0xFF, (ip >> 8) & 0xFF, (ip >> 16) & 0xFF, ip >> 24, port);
     tprint(msg);
 
-    wget_n = 0; wget_over = 0; wget_tofile = have_save;
-    int st = net_http_get(ip, port, host, path, wget_sink, 0, 500);
-    if (st == -2)      { tprint("wget: no network device\n"); return; }
-    if (st == -3)      { tprint("wget: cannot reach that address\n"); return; }
-    if (st == -4)      { tprint("\nwget: download cut short - not saved\n"); return; }
-    if (st == -1)      { tprint("wget: no response (timed out)\n"); return; }
-    if (wget_over)     { tprint("\nwget: response too large for the buffer\n"); return; }
-
-    if (have_save) {
+    WgetData download = {0}; download.tofile = have_save;
+    int st = net_http_get(ip, port, host, path, wget_sink, &download, 500);
+    if (download.error == 2) tprint("\nwget: not enough memory - not saved\n");
+    else if (download.error) tprint("\nwget: response exceeds disk capacity - not saved\n");
+    else if (st == -2) tprint("wget: no network device\n");
+    else if (st == -3) tprint("wget: cannot reach that address\n");
+    else if (st == -4) tprint("\nwget: download cut short - not saved\n");
+    else if (st == -1) tprint("wget: no response (timed out)\n");
+    else if (have_save) {
         char norm[64];
         resolve(save, norm, sizeof norm);
-        int w = fs_write(norm, wget_buf, (u32)wget_n);
+        int w = fs_write(norm, download.buffer.data, download.length);
         if (w == -2)      tprint("wget: disk full\n");
         else if (w < 0)   tprint("wget: write error\n");
-        else { kfmt(msg, sizeof msg, "HTTP %d - saved %d bytes to %s\n", st, wget_n, norm); tprint(msg); }
+        else { kfmt(msg, sizeof msg, "HTTP %d - saved %u bytes to %s\n", st, download.length, norm); tprint(msg); }
     } else {
         kfmt(msg, sizeof msg, "\n-- HTTP %d --\n", st);
         tprint(msg);
     }
+    db_free(api, &download.buffer);
 }
 
 static void do_fetch(void)
@@ -368,9 +374,10 @@ static void open_path(const char *args,int create)
             continue;
         }
         if(create&&!drive&&!fs_exists(path)&&fs_write(path,(const u8 *)"",0)){tprint("Could not create the file.\n");continue;}
-        int n=path_read(drive,path,iobuf,IOBUF_SZ);
-        if(n<0){tprint("Could not read the file.\n");continue;}
-        if(opener_dispatch(drive?leaf:path,drive?path:0,iobuf,n))tprint("No compatible app could open the file.\n");
+        FileData file;int r=fo_load(api,drive,path,0,&file,0);
+        if(r){tprint(fo_error(r));tprint(".\n");continue;}
+        if(opener_dispatch(drive?leaf:path,drive?path:0,file.data,(int)file.size))tprint("No compatible app could open the file.\n");
+        fo_release(api,&file);
     }
 }
 
@@ -674,6 +681,89 @@ static void do_disk(const char *arg)
 
 #include "shellfilters.inc"
 
+static void sh_archive(const char *args, int packing)
+{
+    char src[SC_MAX], dst[SC_MAX], buf[128];
+    u32 size; int is_dir;
+    resolve(args, src, sizeof src);
+    if (!src[0]) { tprint("bad path\n"); return; }
+    if (!path_info(0, src, &size, &is_dir) || is_dir) { tprint("no such file\n"); return; }
+    if (size > AR_CAP - 36 - LZ_HDR) { tprint("file too big\n"); return; }
+    const char *leaf = src;
+    for (const char *p = src; *p; p++) if (*p == '/') leaf = p + 1;
+    int prefix = (int)(leaf - src);
+    if (packing && (!ar_name(leaf) || strlen(src) + 4 >= FS_NAMELEN)) {
+        tprint("pack: name too long or invalid for a .fpa archive\n"); return;
+    }
+    u8 *data = api->kmalloc(size + 1), *out = 0;
+    if (!data) { tprint("not enough memory\n"); return; }
+    int n = fs_read(src, data, size + 1);
+    if (n < 0 || (u32)n != size) { tprint("could not read the complete file\n"); goto done; }
+    gui_pump();
+    if (packing) {
+        u32 cap = size + 36 + LZ_HDR;
+        out = api->kmalloc(cap);
+        if (!out) { tprint("not enough memory\n"); goto done; }
+        u32 packed = lz_pack(data, size, out + 36, cap - 36);
+        if (!packed) { tprint("pack: too big\n"); goto done; }
+        ar_empty(out); out[4] = 1;
+        memset(out + 8, 0, 24); strlcpy((char *)out + 8, leaf, 24);
+        lz_put32(out + 32, packed);
+        kfmt(dst, sizeof dst, "%s.fpa", src);
+        gui_pump();
+        if (fs_write(dst, out, packed + 36)) { tprint("write error (disk full?)\n"); goto done; }
+        kfmt(buf, sizeof buf, "%s -> %s  %u -> %u bytes (%u%%)\n",
+             src, dst, size, packed + 36, size ? (packed + 36) * 100 / size : 100);
+        tprint(buf);
+    } else {
+        ArEntry entries[AR_FILES];
+        int count = ar_index(data, size, entries), legacy = count < 0;
+        if (legacy) {
+            if (size < LZ_HDR || data[0] != 'P' || data[1] != 'Z' || data[2] != '1' || data[3]) {
+                tprint("unpack: not a .fpa or .pz file (or corrupt)\n"); goto done;
+            }
+            entries[0].offset = 0; entries[0].packed = size; entries[0].raw = lz_get32(data + 4);
+            int len = (int)strlen(leaf);
+            strlcpy(entries[0].name, leaf, sizeof entries[0].name);
+            if (len > 3 && !strcasecmp(leaf + len - 3, ".pz")) entries[0].name[len - 3] = 0;
+            else { strlcpy(entries[0].name, "unpacked", sizeof entries[0].name); prefix = 0; }
+            count = 1;
+        }
+        u32 needed = 1;
+        for (int i = 0; i < count; i++) {
+            if (prefix + strlen(entries[i].name) >= FS_NAMELEN || entries[i].raw > AR_CAP) {
+                tprint("unpack: file or destination path too large\n"); goto done;
+            }
+            memcpy(dst, src, (u32)prefix); strlcpy(dst + prefix, entries[i].name, sizeof dst - prefix);
+            if (!legacy && fs_exists(dst)) {
+                tprint("unpack: destination already exists: "); tprint(dst); tputc('\n'); goto done;
+            }
+            if (entries[i].raw > needed) needed = entries[i].raw;
+        }
+        out = api->kmalloc(needed);
+        if (!out) { tprint("not enough memory\n"); goto done; }
+        for (int i = 0; i < count; i++) {
+            if (lz_unpack(data + entries[i].offset, entries[i].packed, out, needed) != (int)entries[i].raw) {
+                tprint("unpack: corrupt archive\n"); goto done;
+            }
+        }
+        for (int i = 0; i < count; i++) {
+            lz_unpack(data + entries[i].offset, entries[i].packed, out, needed);
+            memcpy(dst, src, (u32)prefix); strlcpy(dst + prefix, entries[i].name, sizeof dst - prefix);
+            gui_pump();
+            if ((!legacy && fs_exists(dst)) || fs_write(dst, out, entries[i].raw)) {
+                kfmt(buf, sizeof buf, "unpack: %d of %d files extracted; could not write %s\n", i, count, dst);
+                tprint(buf); goto done;
+            }
+            kfmt(buf, sizeof buf, "%s -> %s  %u bytes\n", src, dst, entries[i].raw); tprint(buf);
+        }
+        kfmt(buf, sizeof buf, "unpack: %d files extracted\n", count); tprint(buf);
+    }
+done:
+    if (out) api->kfree(out);
+    api->kfree(data);
+}
+
 static void sh_exec(char *cmd)
 {
     while (*cmd == ' ') cmd++;
@@ -700,7 +790,7 @@ static void sh_exec(char *cmd)
     if (!strcmp(cargs, "/help") || !strcmp(cargs, "-h") || !strcmp(cargs, "--help")) {
         const char *u = cmd_usage(c0);
         if (!u) u = sh_usage(c0);
-        tprint(u ? u : "no arguments (or try 'help')");
+        tprint(u ? u : "No help available. Type help to list commands.");
         tputc('\n');
         return;
     }
@@ -715,27 +805,27 @@ static void sh_exec(char *cmd)
     if(sf_exec(c0,cargs))return;
 
     if (!strcmp(cmd, "help")) {
-        tprint("files: ls map cat rm cp mv touch hexdump wc head tail\n");
-        tprint("       grep find sort uniq strings crc32 cmp stat edit open\n");
-        tprint("       echo pack unpack\n");
-        tprint("filters: -h for options; > file writes, >> file appends\n");
-        tprint("dirs:  cd pwd tree mkdir rmdir du\n");
-        tprint("disk:  disk [scan|seek|map]  defrag fscan bootsec\n");
-        tprint("usb:   uls ucat ucp urm usb\n");
-        tprint("net:   ifconfig [ip]  ping <ip|host>  dns <host>\n");
-        tprint("       wget <url>  ntp [+/-H:MM]  netdiag lspci\n");
-        tprint("       debugnet panicnet faultnet - remote diagnostics\n");
-        tprint("       remote [on [port]|off|status] - help remote for startup\n");
-        tprint("fun:   matrix rainbow beep\n");
-        tprint("cfg:   set [video|mouse|net ...]  confsec [raw]\n");
-        tprint("sys:   uname free df uptime date cal fetch clear cls ver\n");
-        tprint("       whoami dmesg ps kill calc history threads\n");
-        tprint("       kext kupdate settings about reboot shutdown\n");
-        tprint("       bios testram bench\n");
-        tprint("debug: peek - read memory; poke - write memory\n");
-        tprint("       ring3 - user-mode test; crash - panic test (halts!)\n");
-        tprint("help:  help <command> for usage; <command> -h also works\n");
-        tprint("PgUp/PgDn or wheel to scroll\n");
+        tprint("Type help <command> for details, e.g. help ls.\n");
+        tprint("Files:    ls cp mv rm touch open edit stat find\n");
+        tprint("          pack unpack\n");
+        tprint("Folders:  cd pwd tree mkdir rmdir du\n");
+        tprint("Text:     cat head tail grep sort uniq wc echo\n");
+        tprint("          strings hexdump crc32 cmp\n");
+        tprint("Disks:    df disk map defrag fscan bootsec\n");
+        tprint("USB:      usb uls ucat ucp urm\n");
+        tprint("Network:  ifconfig ping dns wget ntp netdiag remote\n");
+        tprint("          debugnet - send crash and fault reports\n");
+        tprint("System:   uname ver fetch free uptime date cal whoami\n");
+        tprint("          dmesg ps kill threads history calc about\n");
+        tprint("Setup:    set settings confsec kext kupdate\n");
+        tprint("Screen:   clear cls\n");
+        tprint("Power:    reboot shutdown\n");
+        tprint("Checks:   bios lspci testram bench ring3\n");
+        tprint("Debug:    peek - read memory; poke - write memory\n");
+        tprint("          crash - test a panic (stops the system)\n");
+        tprint("Fun:      matrix rainbow beep\n");
+        tprint("Text filters: > file saves; >> file appends.\n");
+        tprint("Try <command> -h too. PgUp/PgDn or wheel scrolls.\n");
     } else if (!strcmp(cmd, "set") || !strncmp(cmd, "set ", 4)) {
         static const char *vnames[5] = { "?", "640x480", "800x600", "1024x768", "vga" };
         const char *a = cmd[3] ? cmd + 4 : "";
@@ -857,36 +947,8 @@ static void sh_exec(char *cmd)
         int packing = cmd[0] == 'p';
         const char *a = cmd + (packing ? 5 : 7);
         while (*a == ' ') a++;
-        if (!*a) { tprint("usage: pack <file> | unpack <file.pz>\n"); return; }
-        char src[SC_MAX];
-        resolve(a, src, sizeof src);
-        u32 half = (u32)IOBUF_SZ / 2;
-        int n = fs_read(src, iobuf, half);
-        if (n < 0) { tprint("no such file\n"); return; }
-        u8 *out = iobuf + half;
-        gui_pump();
-        char dst[SC_MAX];
-        int rn;
-        if (packing) {
-            rn = (int)lz_pack(iobuf, (u32)n, out, half);
-            if (rn <= 0) { tprint("pack: too big\n"); return; }
-            kfmt(dst, sizeof dst, "%s.pz", src);
-        } else {
-            rn = lz_unpack(iobuf, (u32)n, out, half);
-            if (rn < 0) { tprint("unpack: not a .pz file (or corrupt)\n"); return; }
-            int L = (int)strlen(src);
-            strlcpy(dst, src, sizeof dst);
-            if (L > 3 && !strcmp(src + L - 3, ".pz")) dst[L - 3] = 0;
-            else strlcpy(dst, "unpacked", sizeof dst);
-        }
-        gui_pump();
-        if (fs_write(dst, out, (u32)rn) != 0) { tprint("write error (disk full?)\n"); return; }
-        if (packing)
-            kfmt(buf, sizeof buf, "%s -> %s  %d -> %d bytes (%d%%)\n",
-                 src, dst, n, rn, n ? rn * 100 / n : 100);
-        else
-            kfmt(buf, sizeof buf, "%s -> %s  %d -> %d bytes\n", src, dst, n, rn);
-        tprint(buf);
+        if (!*a) { tprint("usage: pack <file> | unpack <file.fpa|file.pz>\n"); return; }
+        sh_archive(a, packing);
     } else if (!strcmp(cmd, "date")) {
         int h, m, s, D, M, Y;
         rtc_read(&h, &m, &s, &D, &M, &Y);

@@ -69,7 +69,7 @@ void ring3_init(void)
     klog("ring3: gdt 7 entries, tss loaded, syscall gate int 80h (dpl 3)\n");
 }
 
-int ring3_active(void) { return r3_ready; }
+int ring3_active(void) { return r3_ready && paging_active(); }
 
 typedef struct { u32 edi, esi, ebp, esp, ebx, edx, ecx, eax; } Regs;
 
@@ -107,9 +107,13 @@ int ring3_fault(u32 vec, u32 err)
     fj_long(&r3_exit, 2);
 }
 
-static void enter_user(u32 eip, u32 esp)
+static __attribute__((noreturn)) void enter_user(u32 eip, u32 esp)
 {
     __asm__ volatile(
+        "movw %w2, %%ds\n\t"
+        "movw %w2, %%es\n\t"
+        "movw %w2, %%fs\n\t"
+        "movw %w2, %%gs\n\t"
         "pushl %2\n\t"
         "pushl %1\n\t"
         "pushl %3\n\t"
@@ -119,6 +123,7 @@ static void enter_user(u32 eip, u32 esp)
         :: "r"(eip), "r"(esp), "r"(SEL_USER(SEL_UDATA)), "r"(R3_EFLAGS),
            "r"(SEL_USER(SEL_UCODE))
         : "memory");
+    __builtin_unreachable();
 }
 
 static void reload_kernel_segments(void)
@@ -162,12 +167,12 @@ static void put32(u8 *p, u32 v) { p[0] = v; p[1] = v >> 8; p[2] = v >> 16; p[3] 
 
 static u32 run_payload(const u8 *code, u32 len, int *faulted)
 {
+    preempt_disable();
     memset(user_area, 0, sizeof user_area);
     memcpy(user_area, code, len);
 
     paging_set_user((u32)user_area, UPAGES, 1);
 
-    preempt_disable();
     r3_running = 1;
     r3_result = 0;
     int how = fj_set(&r3_exit);
@@ -177,14 +182,15 @@ static u32 run_payload(const u8 *code, u32 len, int *faulted)
     reload_kernel_segments();
     paging_set_user((u32)user_area, UPAGES, 0);
     r3_running = 0;
+    u32 result = r3_result;
     preempt_enable();
     if (faulted) *faulted = (how == 2);
-    return r3_result;
+    return result;
 }
 
 u32 ring3_selftest(int what)
 {
-    if (!r3_ready) return 0;
+    if (!ring3_active() || r3_running) return 0;
     int faulted = 0;
     u32 r;
     switch (what) {

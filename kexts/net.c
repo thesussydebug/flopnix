@@ -255,6 +255,7 @@ static void tul_link(PhyState *p)
 
     (void)tul_mii(1);
     phy_decode(tul_mii(1), tul_mii(4), tul_mii(5), tul_mii(0), p);
+    if (!p->present) phy_admtek_decode(inl(tul_io + 0xFC), p);
 }
 
 static void tul_init(void)
@@ -1126,6 +1127,9 @@ static void handle_frame(u8 *fr, u16 len)
             if(dpt==KU_PUSH_PORT&&ip->dst==net_ip&&
                (((u16)udp[0]<<8)|udp[1])==KU_PUSH_PORT)
                 push_receive(ip->src,fr+6,udp+8,ul-8);
+            else if(dpt==DN_PORT&&ip->dst==net_ip&&
+                    (((u16)udp[0]<<8)|udp[1])==DN_PORT)
+                dn_receive(ip->src,fr+6,udp+8,ul-8);
             else if (dpt == 68 && udp[0] == 0 && udp[1] == 67)
                 dhcp_recv(udp + 8, ul - 8);
             else if (dpt == DNS_SPORT && ip->dst == net_ip && ip->src == dns_expected && udp[0] == 0 && udp[1] == 53) {
@@ -1274,6 +1278,7 @@ void net_poll(void)
 {
     u32 f=net_irq_save();
     net_poll_inner();
+    dn_poll();
     faultnet_poll();
     push_poll();
     pm_cache();
@@ -1460,8 +1465,8 @@ static void cmd_netdiag(const char *args)
                   inl(T_CSR(0)), inl(T_CSR(5)), inl(T_CSR(6)));
         pr(b);
         if (tul_admtek) {
-            kfmt(b, sizeof b, "  mii    bmcr %04x bmsr %04x anar %04x anlpar %04x\n",
-                      tul_mii(0), tul_mii(1), tul_mii(4), tul_mii(5));
+            kfmt(b, sizeof b, "  mii    bmcr %04x bmsr %04x anar %04x anlpar %04x; opr %08x\n",
+                      tul_mii(0), tul_mii(1), tul_mii(4), tul_mii(5), inl(tul_io + 0xFC));
             pr(b);
         }
         kfmt(b, sizeof b, "  rings  rx slot %d/%d, tx slot %d\n",
@@ -1511,11 +1516,10 @@ int kext_entry(const Kapi *k)
     api->register_service("net.http",&http_ops);
     api->register_service("net.http.diag",&http_diag_ops);
     api->register_service("net.update",&push_ops);
-    api->register_cmd("debugnet","debugnet <PC-IP> [port] | off - send crash diagnostics",cmd_panicnet);
-    api->register_cmd("panicnet","panicnet <PC-IP> [port] | off - inspect a stopped kernel",cmd_panicnet);
+    api->register_service("net.debug",&dn_ops);
+    u32 automatic=0;api->config_get("debugnet.auto",&automatic);dn_set_auto(automatic==1);
+    api->register_cmd("debugnet","debugnet auto | <PC-IP> [port] | status | test | off - send crash reports",cmd_debugnet);
     api->register_cmd("netdiag", "netdiag - report NIC, link and traffic state",
                       cmd_netdiag);
-    api->register_cmd("faultnet", "faultnet <PC-IP> [port] | off | test - send fault reports",
-                      cmd_faultnet);
     return 0;
 }

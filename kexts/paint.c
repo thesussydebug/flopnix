@@ -66,6 +66,7 @@ enum { T_PEN, T_LINE, T_RECT, T_BOX, T_OVAL, T_DISC, T_FILL, T_TEXT,
 typedef struct {
     u8 *canvas;
     DynBuf storage;
+    DynBuf zoom_row;
     int  cw, ch;
     u8   col; int lx, ly;
     int  mode;
@@ -130,7 +131,7 @@ static void paint_reset(int inst)
     active[inst]=1;
     Paint *p = &paints[inst];
     p->modified=p->pending=0;
-    if (!db_reserve(api, &p->storage, (u32)pdefw*pdefh, 1, 4096, PCW_MAX*PCH_MAX, "Paint canvas")) {
+    if (!db_reserve(api, &p->storage, (u32)pdefw*pdefh, 1, 4096, (u32)pdefw*pdefh, "Paint canvas")) {
         p->cw=p->ch=0; p->zoom=1;
         strlcpy(p->msg,"Not enough memory. Close and reopen Paint.",sizeof p->msg); return;
     }
@@ -154,10 +155,12 @@ static void paint_reset(int inst)
 
 static int undo_snap(Paint *p)
 {
-    if (!db_reserve(api,&undo_storage,(u32)p->cw*p->ch,1,4096,PCW_MAX*PCH_MAX,"Paint undo")) {
+    u32 size=(u32)p->cw*p->ch;
+    if (!db_reserve(api,&undo_storage,size,1,4096,size,"Paint undo")) {
         strlcpy(p->msg,"Not enough memory for undo. Picture unchanged.",sizeof p->msg); return 0;
     }
-    memcpy(undo_buf, p->canvas, (u32)p->cw * p->ch);
+    db_trim(api,&undo_storage,size,1);
+    memcpy(undo_buf, p->canvas, size);
     undo_inst = (int)(p - paints);
     undo_w = p->cw;
     undo_h = p->ch;
@@ -170,8 +173,11 @@ static int undo_swap(Paint *p)
     if (undo_inst != (int)(p - paints) || undo_w != p->cw || undo_h != p->ch)
         return 0;
 
-    u32 n = (u32)p->cw * p->ch;
-    for(u32 i=0;i<n;i++){u8 c=p->canvas[i];p->canvas[i]=undo_buf[i];undo_buf[i]=c;}
+    DynBuf previous=p->storage;
+    p->storage=undo_storage;undo_storage=previous;
+    p->canvas=p->storage.data;
+    api->mem_track("Paint canvas",p->canvas,p->storage.capacity);
+    api->mem_track("Paint undo",undo_buf,undo_storage.capacity);
     p->modified=1;
     return 1;
 }
@@ -180,7 +186,7 @@ static int paint_set_size(Paint *p, int nw, int nh)
 {
     if (nw == p->cw && nh == p->ch) return 1;
     if(nw<1||nh<1||nw>PCW_MAX||nh>PCH_MAX)return 0;
-    if (!db_reserve(api,&p->storage,(u32)nw*nh,1,4096,PCW_MAX*PCH_MAX,"Paint canvas")) {
+    if (!db_reserve(api,&p->storage,(u32)nw*nh,1,4096,(u32)nw*nh,"Paint canvas")) {
         strlcpy(p->msg,"Not enough memory to resize.",sizeof p->msg); return 0;
     }
     p->canvas=p->storage.data;
@@ -196,7 +202,7 @@ static int paint_set_size(Paint *p, int nw, int nh)
     p->ch = nh;
     p->modified=1;
     db_trim(api,&p->storage,(u32)nw*nh,1);p->canvas=p->storage.data;
-    undo_inst = -1;
+    db_free(api,&undo_storage);undo_inst = -1;
     return 1;
 }
 
@@ -223,11 +229,32 @@ static void plot_screen(void *ctx, int x, int y, u8 col)
     }
 }
 
+static void plot_span(PlotFn plot, void *ctx, int x0, int x1, int y, u8 col)
+{
+    if(plot==plot_canvas){
+        Paint *p=ctx;
+        if(y<0||y>=p->ch)return;
+        if(x0<0)x0=0;
+        if(x1>=p->cw)x1=p->cw-1;
+        if(x0<=x1)memset(p->canvas+y*p->cw+x0,col,x1-x0+1);
+    }else if(plot==plot_screen){
+        ScreenCtx *s=ctx;
+        y=(y-s->sy)*s->zoom;
+        if(y<0||y>=s->h)return;
+        int left=(x0-s->sx)*s->zoom,right=(x1-s->sx+1)*s->zoom;
+        if(left<0)left=0;
+        if(right>s->w)right=s->w;
+        int h=s->h-y;if(h>s->zoom)h=s->zoom;
+        if(left<right)fill_rect(s->ox+left,s->oy+y,right-left,h,col);
+    }else for(int x=x0;x<=x1;x++)plot(ctx,x,y,col);
+}
+
 static void dab(PlotFn plot, void *ctx, int x, int y, u8 col, int size)
 {
+    if(size==1){plot(ctx,x,y,col);return;}
     int r = size / 2;
     for (int j = -r; j <= r; j++)
-        for (int i = -r; i <= r; i++) plot(ctx, x + i, y + j, col);
+        plot_span(plot,ctx,x-r,x+r,y+j,col);
 }
 
 static void ras_line(PlotFn plot, void *ctx, int x0, int y0, int x1, int y1,
@@ -266,7 +293,7 @@ static void ras_box(PlotFn plot, void *ctx, int x0, int y0, int x1, int y1, u8 c
 {
     norm_box(&x0, &y0, &x1, &y1);
     for (int y = y0; y <= y1; y++)
-        for (int x = x0; x <= x1; x++) plot(ctx, x, y, col);
+        plot_span(plot,ctx,x0,x1,y,col);
 }
 
 static int ell_halfw(int rx, int ry, int dy)
@@ -307,7 +334,7 @@ static void ras_disc(PlotFn plot, void *ctx, int x0, int y0, int x1, int y1, u8 
     int rx = (x1 - x0) / 2, ry = (y1 - y0) / 2;
     for (int dy = -ry; dy <= ry; dy++) {
         int w = ell_halfw(rx, ry, dy);
-        for (int x = cx - w; x <= cx + w; x++) plot(ctx, x, cy + dy, col);
+        plot_span(plot,ctx,cx-w,cx+w,cy+dy,col);
     }
 }
 
@@ -330,7 +357,7 @@ static void ras_fill(Paint *p, int sx, int sy, u8 col)
         int l = x, r = x;
         while (l > 0 && row[l - 1] == target) l--;
         while (r < p->cw - 1 && row[r + 1] == target) r++;
-        for (int i = l; i <= r; i++) row[i] = col;
+        memset(row+l,col,r-l+1);
 
         for (int dy = -1; dy <= 1; dy += 2) {
             int ny = y + dy;
@@ -373,7 +400,7 @@ static u32 paint_build_bmp(Paint *p, u8 *data)
     int rowsz = (p->cw + 3) & ~3;
     u32 imgsz = (u32)rowsz * p->ch;
     u32 fsz = BMPHDR + imgsz;
-    memset(data, 0, fsz);
+    memset(data, 0, BMPHDR);
     data[0] = 'B'; data[1] = 'M';
     put32(data + 2, fsz);
     put32(data + 10, BMPHDR);
@@ -395,6 +422,7 @@ static u32 paint_build_bmp(Paint *p, u8 *data)
         u8 *dst = data + BMPHDR + (u32)f * rowsz;
         int img = p->ch - 1 - f;
         memcpy(dst, p->canvas + img * p->cw, p->cw);
+        if(rowsz>p->cw)memset(dst+p->cw,0,rowsz-p->cw);
     }
     return fsz;
 }
@@ -456,19 +484,22 @@ static int paint_parse_bmp(Paint *p, const u8 *bm, int n)
         }
     }
     int nw=w, nh=h;
-    if(!db_reserve(api,&p->storage,(u32)nw*nh,1,4096,PCW_MAX*PCH_MAX,"Paint canvas"))return -1;
+    if(!db_reserve(api,&p->storage,(u32)nw*nh,1,4096,(u32)nw*nh,"Paint canvas"))return -1;
     p->canvas=p->storage.data;p->cw=nw;p->ch=nh;
-    memset(p->canvas, C_WHITE, (u32)p->cw*p->ch);
-    for (int y = 0; y < p->ch && y < h; y++) {
+    for (int y = 0; y < h; y++) {
         int src = topdown ? y : (h - 1 - y);
-        if (off + (u32)(src + 1) * rowsz > (u32)n) continue;
         const u8 *row = bm + off + (u32)src * rowsz;
-        for (int x = 0; x < p->cw && x < w; x++) {
-            if (bpp == 8) p->canvas[y * p->cw + x] = map[row[x]];
-            else { const u8 *px = row + x * 3; p->canvas[y * p->cw + x] = palette_nearest(px[2], px[1], px[0]); }
+        u8 *dst=p->canvas+y*w;
+        if(bpp==8){
+            for(int x=0;x<w;x++)dst[x]=map[row[x]];
+        }else{
+            for(int x=0;x<w;x++){
+                const u8 *px=row+x*3;dst[x]=palette_nearest(px[2],px[1],px[0]);
+            }
         }
     }
-    undo_inst = -1;
+    db_trim(api,&p->storage,(u32)w*h,1);p->canvas=p->storage.data;
+    db_free(api,&undo_storage);undo_inst = -1;
     p->ox=p->oy=0;p->dragging=0;p->lx=p->tx=-1;p->text[0]=0;
     return 0;
 }
@@ -583,6 +614,7 @@ static void paint_perform(Paint *p, int action)
         strlcpy(p->msg, "Picture flipped. Ctrl+Z to undo.", sizeof p->msg); break;
     case A_ZOOM1: case A_ZOOM2: case A_ZOOM4:
         p->zoom = 1 << (action - A_ZOOM1); view_clamp(p);
+        if(p->zoom==1)db_free(api,&p->zoom_row);
         strlcpy(p->msg, "Arrows or mouse wheel to pan", sizeof p->msg); break;
     case A_SIZE: p->mode = PM_SIZE; break;
     case A_CUSTOM: paint_custom(p); break;
@@ -772,7 +804,7 @@ static void paint_mouse(int inst, int lx, int ly, int ev, int cw, int ch)
         p->dragging = 1;
     } else if (ev == EV_DRAG && p->dragging) {
         p->bx = qx; p->by = qy;
-        api->gui_dirty();
+        api->win_redraw(paint_type,inst);
     } else if (ev == EV_RELEASE && p->dragging) {
         p->dragging=0;
         if(!undo_snap(p))return;
@@ -877,6 +909,7 @@ static void paint_close(int inst)
     if(size_owner==&paints[inst])size_finish(0);
     active[inst]=0;
     db_free(api,&paints[inst].storage);paints[inst].canvas=0;
+    db_free(api,&paints[inst].zoom_row);
     if(undo_inst==inst){db_free(api,&undo_storage);undo_inst=-1;}
     for(int i=0;i<PAINT_INST;i++)if(active[i])return;
     if(icon_cache){api->kfree(icon_cache);icon_cache=0;}
@@ -889,7 +922,10 @@ static void paint_draw(Win *w, int cx, int cy, int cw, int ch)
     if(!p->canvas){draw_text_clip(cx+8,cy+12,p->msg,C_RED,cw-16);return;}
     p->vw = cw - LEFT_W - 4; p->vh = ch - TOP_H - SW_H - 8;
     view_clamp(p);
-    fill_rect(cx, cy, cw, ch, C_FACE);
+    fill_rect(cx, cy, cw, TOP_H+2, C_FACE);
+    fill_rect(cx,cy+TOP_H+2,LEFT_W-2,ch-TOP_H-SW_H-2,C_FACE);
+    fill_rect(cx+cw-2,cy+TOP_H+2,2,ch-TOP_H-SW_H-2,C_FACE);
+    fill_rect(cx,cy+ch-SW_H-2,cw,SW_H+2,C_FACE);
     menu_shade(api,cx,cy,cw,TOP_H-1,0);
     hline(cx, cy + TOP_H - 1, cw, C_SHAD);
     static const char *const labels[3] = { "File", "Edit", "View" };
@@ -914,18 +950,29 @@ static void paint_draw(Win *w, int cx, int cy, int cw, int ch)
     }
 
     int ox = cx + LEFT_W, oy = cy + TOP_H + 4;
-    fill_rect(ox - 2, oy - 2, p->vw + 4, p->vh + 4, C_SHAD);
-    fill_rect(ox, oy, p->vw, p->vh, C_G0 + 2);
+    fill_rect(ox-2,oy-2,p->vw+4,2,C_SHAD);
+    fill_rect(ox-2,oy+p->vh,p->vw+4,2,C_SHAD);
+    fill_rect(ox-2,oy,2,p->vh,C_SHAD);
+    fill_rect(ox+p->vw,oy,2,p->vh,C_SHAD);
     int bw = (p->cw - p->ox) * p->zoom, bh = (p->ch - p->oy) * p->zoom;
     if (bw > p->vw) bw = p->vw;
     if (bh > p->vh) bh = p->vh;
+    if(bw<p->vw)fill_rect(ox+bw,oy,p->vw-bw,bh,C_G0+2);
+    if(bh<p->vh)fill_rect(ox,oy+bh,p->vw,p->vh-bh,C_G0+2);
     if (p->zoom == 1) blit(ox, oy, bw, bh, p->canvas + p->oy * p->cw + p->ox, p->cw);
     else {
-
+        u8 *scaled=0;
+        if(bw>0&&db_reserve(api,&p->zoom_row,bw,1,bw,bw,"Paint zoom row"))scaled=p->zoom_row.data;
         for (int y = 0; y < bh; y += p->zoom) {
             int dh = bh - y; if (dh > p->zoom) dh = p->zoom;
             const u8 *row = p->canvas + (p->oy + y / p->zoom) * p->cw + p->ox;
-            for (int x = 0; x < bw;) {
+            if(scaled){
+                int x=0;
+                if(p->zoom==2)for(;x+1<bw;x+=2){u8 c=*row++;scaled[x]=scaled[x+1]=c;}
+                else for(;x+3<bw;x+=4){u8 c=*row++;scaled[x]=scaled[x+1]=scaled[x+2]=scaled[x+3]=c;}
+                if(x<bw){u8 c=*row;for(;x<bw;x++)scaled[x]=c;}
+                blit(ox,oy+y,bw,dh,scaled,0);
+            }else for (int x = 0; x < bw;) {
                 int end = x + p->zoom;
                 u8 col = row[x / p->zoom];
                 while (end < bw && row[end / p->zoom] == col) end += p->zoom;

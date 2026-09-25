@@ -5,6 +5,7 @@
 #include "foldercopy.inc"
 #include "shpath.h"
 #include "fileops.inc"
+#include "fileopen.inc"
 #include "gdi.h"
 #include "delprompt.inc"
 #include "listkeep.inc"
@@ -583,43 +584,32 @@ static void open_row(int i)
         nav_to(1, "", np);
         return;
     }
-    if (r->size >= 0x7FFFFFFFu) {
-        strlcpy(F->fm_msg, "file is too large to open", sizeof F->fm_msg);
-        return;
-    }
-    u32 capacity = r->size + 1;
-    u8 *data = capacity <= IOBUF_SZ ? iobuf : api->kmalloc(capacity);
-    if (!data) {
-        strlcpy(F->fm_msg, "not enough memory to open file", sizeof F->fm_msg);
-        return;
-    }
-    if (data != iobuf) api->mem_track("Files open buffer", data, capacity);
     api->buffer_lock();
-
     api->busy_set("Opening", r->name, -1);
+    FileData file;
     if (F->cur_drive == 0) {
-        int n = fs_read(r->name, data, capacity);
-        if (n < 0 || (u32)n != r->size) strlcpy(F->fm_msg, "could not read complete file", sizeof F->fm_msg);
-        else if (opener_dispatch(r->name, 0, data, n) != 0)
+        int rc=fo_read(api,0,r->name,r->size,0,&file);
+        if(rc)strlcpy(F->fm_msg,fo_error(rc),sizeof F->fm_msg);
+        else if (opener_dispatch(r->name, 0, file.data, (int)file.size) != 0)
             strlcpy(F->fm_msg, "no app for this file", sizeof F->fm_msg);
     } else {
         char full[192];
         int pl = strlen(F->cur_path);
         if (pl > 1) kfmt(full, sizeof full, "%s/%s", F->cur_path, r->name);
         else kfmt(full, sizeof full, "/%s", r->name);
-        int len = fat_read(full, data, capacity);
-        if (len < 0 || (u32)len != r->size) strlcpy(F->fm_msg, "could not read complete file", sizeof F->fm_msg);
+        int rc=fo_read(api,1,full,r->size,0,&file);
+        if(rc)strlcpy(F->fm_msg,fo_error(rc),sizeof F->fm_msg);
         else {
             char nm[64], fp[192];
             strlcpy(nm, r->name, sizeof nm);
             strlcpy(fp, full, sizeof fp);
-            if (opener_dispatch(nm, fp, data, len) != 0)
+            if (opener_dispatch(nm, fp, file.data, (int)file.size) != 0)
                 strlcpy(F->fm_msg, "no app for this file", sizeof F->fm_msg);
         }
     }
+    fo_release(api,&file);
     api->busy_end();
     api->buffer_unlock();
-    if (data != iobuf) api->kfree(data);
 }
 
 static void begin_rename(void);

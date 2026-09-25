@@ -3,11 +3,22 @@
 #include "paging.inc"
 #include "kextspace.inc"
 
-static u32 page_dir[PG_NPDE]  __attribute__((aligned(4096)));
-static u32 page_tab0[PG_NPTE] __attribute__((aligned(4096)));
-static u32 page_tab1[PG_NPTE] __attribute__((aligned(4096)));
-static u32 arena_tab[PG_NPTE] __attribute__((aligned(4096)));
-static u32 kext_tab[PG_NPTE]  __attribute__((aligned(4096)));
+static struct {
+    u32 dir[PG_NPDE], tab0[PG_NPTE], tab1[PG_NPTE];
+    u32 arena[PG_NPTE], kext[PG_NPTE];
+} page_tables __attribute__((aligned(4096)));
+_Static_assert(sizeof page_tables == 5 * PG_4K, "kernel page-table layout");
+_Static_assert(__alignof__(page_tables) == PG_4K &&
+    __builtin_offsetof(__typeof__(page_tables), tab0) == PG_4K &&
+    __builtin_offsetof(__typeof__(page_tables), tab1) == 2 * PG_4K &&
+    __builtin_offsetof(__typeof__(page_tables), arena) == 3 * PG_4K &&
+    __builtin_offsetof(__typeof__(page_tables), kext) == 4 * PG_4K,
+    "kernel page-table alignment");
+#define page_dir page_tables.dir
+#define page_tab0 page_tables.tab0
+#define page_tab1 page_tables.tab1
+#define arena_tab page_tables.arena
+#define kext_tab page_tables.kext
 static u32 *arena_pt;
 static u32 arena_slot;
 
@@ -118,32 +129,37 @@ void paging_map_kext(u32 phys, u32 len)
     paging_flush();
 }
 
-static u32 kext_pd[KEXT_PD_MAX][PG_NPDE] __attribute__((aligned(4096)));
-static u32 kext_pt[KEXT_PD_MAX][PG_NPTE] __attribute__((aligned(4096)));
-static u8  pd_live[KEXT_PD_MAX];
+static u32 *kext_pd[KEXT_PD_MAX];
+static void *pd_alloc[KEXT_PD_MAX];
 static int pd_current = -1;
 
 int paging_space_create(int slot, u32 phys, u32 len)
 {
-    if (!paging_on || slot < 0 || slot >= KEXT_PD_MAX) return 0;
-    u32 pages = (len + 0xFFF) >> 12;
-    if (pages > PG_NPTE) pages = PG_NPTE;
+    if (!paging_on || slot < 0 || slot >= KEXT_PD_MAX || kext_pd[slot] ||
+        !len || len > PG_4M || (phys & (PG_4K - 1)) || phys > 0u - len) return 0;
+    void *alloc = kmalloc(3 * PG_4K - 1);
+    if (!alloc) return 0;
+    if ((u32)alloc > 0xFFFFFFFFu - (3 * PG_4K - 1)) { kfree(alloc); return 0; }
+    u32 *pd = (u32 *)(((u32)alloc + PG_4K - 1) & ~(PG_4K - 1));
+    u32 *pt = pd + PG_NPDE;
+    u32 pages = (len + PG_4K - 1) / PG_4K;
 
-    for (u32 i = 0; i < PG_NPDE; i++) kext_pd[slot][i] = page_dir[i];
+    for (u32 i = 0; i < PG_NPDE; i++) pd[i] = page_dir[i];
 
-    for (int s = 0; s < KEXT_PD_MAX; s++) kext_pd[slot][ks_space_pde(s)] = 0;
+    for (int s = 0; s < KEXT_PD_MAX; s++) pd[ks_space_pde(s)] = 0;
 
     for (u32 i = 0; i < PG_NPTE; i++)
-        kext_pt[slot][i] = i < pages ? pte_4k(phys + (i << 12), PG_RW) : 0;
-    kext_pd[slot][ks_space_pde(slot)] = pde_table((u32)kext_pt[slot], PG_RW);
-    pd_live[slot] = 1;
+        pt[i] = i < pages ? pte_4k(phys + (i << 12), PG_RW) : 0;
+    pd[ks_space_pde(slot)] = pde_table((u32)pt, PG_RW);
+    pd_alloc[slot] = alloc;
+    kext_pd[slot] = pd;
     return 1;
 }
 
 void paging_space_switch(int slot)
 {
     if (!paging_on) return;
-    if (slot >= KEXT_PD_MAX || (slot >= 0 && !pd_live[slot])) slot = -1;
+    if (slot >= KEXT_PD_MAX || (slot >= 0 && !kext_pd[slot])) slot = -1;
     if (slot == pd_current) return;
     pd_current = slot;
     u32 cr3 = slot < 0 ? (u32)page_dir : (u32)kext_pd[slot];
@@ -155,13 +171,13 @@ void paging_space_drop(int slot)
 {
     if(slot<0||slot>=KEXT_PD_MAX)return;
     if(pd_current==slot)paging_space_switch(-1);
-    memset(kext_pt[slot],0,sizeof kext_pt[slot]);pd_live[slot]=0;
+    void *alloc=pd_alloc[slot];pd_alloc[slot]=0;kext_pd[slot]=0;kfree(alloc);
 }
 
 void paging_space_sync(void)
 {
     for (int s = 0; s < KEXT_PD_MAX; s++) {
-        if (!pd_live[s]) continue;
+        if (!kext_pd[s]) continue;
         for (u32 i = 0; i < PG_NPDE; i++) {
             if (i >= ks_space_pde(0) && i < ks_space_pde(0) + KEXT_PD_MAX) continue;
             kext_pd[s][i] = page_dir[i];

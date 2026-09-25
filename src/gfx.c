@@ -147,7 +147,7 @@ static void set_palette(void)
     }
 }
 
-void gfx_init(void)
+__attribute__((minsize)) void gfx_init(void)
 {
     if (BOOTINFO->vbe == 2) {
         vb_scheme = vb_find_scheme();

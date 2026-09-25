@@ -1,10 +1,11 @@
 #include "kapi.h"
 #include "debug.h"
+#include "debugnet.h"
 
 static const Kapi *api;
 static const DebugCore *core;
 static DebugOps ops;
-static int appid,focus,capture_busy,stop_pending;
+static int appid,focus,toprow,capture_busy,stop_pending;
 static char capture_status[88],capture_name[20];
 static u8 *capture_buf;
 static u32 capture_bank;
@@ -12,7 +13,13 @@ static u32 fill[2],bank,packets,dropped,file_size,file_number,usb_gen,epoch,epoc
 static u32 alloc_count,fs_count,disk_count,guard_bad;
 static char alloc_line[2][88],fs_line[2][112],disk_line[4][112];
 static const char *labels[]={"Capture network to USB (.pcap)","Log memory allocation failures",
-    "Show all disk activity","Check stack guards","Show filesystem errors","Poison freed memory","Automatic Remote"};
+    "Show all disk activity","Check stack guards","Show filesystem errors","Poison freed memory","Automatic Remote",
+    "Show device changes","Highlight redraw regions","Check heap integrity","Show input backlog","Show slow handlers","Find crash receiver"};
+static const u32 row_flags[]={DBG_NET,DBG_ALLOC,DBG_DISK,DBG_STACK,DBG_FS,DBG_POISON,0,
+    DBG_DEVICE,DBG_REDRAW,DBG_HEAP,DBG_BACKLOG,DBG_SLOW,0};
+#define SAVED_FLAGS (DBG_DEVICE|DBG_BACKLOG)
+#define VISIBLE_ROWS 7
+static int view_rows=VISIBLE_ROWS;
 #define ROWS ((int)(sizeof labels/sizeof labels[0]))
 #define ROW_H 22
 #define CAP_BANK 524288u
@@ -20,6 +27,10 @@ static const char *labels[]={"Capture network to USB (.pcap)","Log memory alloca
 
 static u32 lock(void){u32 f;__asm__ volatile("pushfl; popl %0; cli":"=r"(f)::"memory");return f;}
 static void unlock(u32 f){__asm__ volatile("pushl %0; popfl"::"r"(f):"memory","cc");}
+#include "debugheap.inc"
+#include "debugredraw.inc"
+#include "debugdiag.inc"
+
 static void put32(u8 *p,u32 n){p[0]=n;p[1]=n>>8;p[2]=n>>16;p[3]=n>>24;}
 static u32 now_epoch(void)
 {
@@ -42,8 +53,13 @@ static int capture_file(const char *name)
 }
 static void event(u32 kind,const char *name,u32 a,u32 b,int result)
 {
+    if(kind==DBG_SLOW&&a<10)return;
     u32 f=lock();char line[112];
-    if(kind&DBG_ALLOC){
+    if(kind==DBG_SLOW){
+        static const char *names[]={"key","mouse","wheel","callback","drop"};
+        api->kfmt(slow_line[slow_count++%2],sizeof slow_line[0],"%s: %s %ums",
+            name?name:"App",b<5?names[b]:"handler",a*10);
+    }else if(kind&DBG_ALLOC){
         api->kfmt(alloc_line[alloc_count++%2],88,"%s: %u bytes @%08x T%d",name?name:"alloc",a,b,result);
     }else{
         if(!result&&(b&0x80000000u)&&capture_file(name)){unlock(f);return;}
@@ -137,25 +153,40 @@ static void capture_toggle(void)
     }
     capture_busy=0;api->gui_dirty();
 }
-static int automatic_remote(void)
+static int saved_on(const char *key)
 {
-    u32 value=0;return api->config_get("remote.auto",&value)&&value==1;
+    u32 value=0;return api->config_get(key,&value)&&value==1;
 }
 static void toggle(int row)
 {
-    if(row==ROWS-1){
-        int value=!automatic_remote();
-        api->notify(api->config_set("remote.auto",(u32)value)?
-            (value?"Automatic Remote saved: on at next boot.":"Automatic Remote saved: off at next boot."):
-            "Cannot save Automatic Remote. Check the boot floppy.");
-        api->gui_dirty();return;
+    if(row==6||row==ROWS-1){
+        const char *key=row==6?"remote.auto":"debugnet.auto";
+        int value=!saved_on(key);
+        if(!api->config_set(key,(u32)value))api->notify("Cannot save debug setting. Check the boot floppy.");
+        else if(row==6)api->notify(value?"Automatic Remote saved: on at next boot.":"Automatic Remote saved: off at next boot.");
+        else{
+            const NetDebugOps *net=api->service_get("net.debug");
+            if(net&&net->abi==NET_DEBUG_ABI)net->set_auto(value);
+            api->notify(value?"Find crash receiver saved: on.":"Find crash receiver saved: off.");
+        }
+    }else if(row==0)capture_toggle();
+    else{
+        u32 bit=row_flags[row],next=ops.flags^bit;
+        if((bit&SAVED_FLAGS)&&!api->config_set("debug.flags",next&SAVED_FLAGS)){
+            api->notify("Cannot save debug setting. Check the boot floppy.");return;
+        }
+        u32 f=lock();ops.flags^=bit;
+        if(bit==DBG_DEVICE)device_valid=0;
+        if(bit==DBG_HEAP){heap_status=-3;heap_bad=0;diag_tick=*api->ticks-100;}
+        if(bit==DBG_SLOW){slow_count=0;slow_active[0]=slow_line[0][0]=slow_line[1][0]=0;}
+        unlock(f);
     }
-    if(row==0)capture_toggle();else{u32 f=lock();ops.flags^=1u<<row;unlock(f);}
     api->gui_dirty();
 }
 static void poll(void *ctx)
 {
     (void)ctx;
+    diagnostics_poll();
     if(ops.flags&DBG_STACK){u32 bad=core->guards();if(bad!=guard_bad){guard_bad=bad;api->gui_dirty();}}
     if((ops.flags&DBG_NET)&&!capture_busy){
         u32 f=lock();if(capture_busy){unlock(f);return;}capture_busy=1;unlock(f);
@@ -168,28 +199,53 @@ static void shutdown(void)
 {
     if((ops.flags&DBG_NET)&&!capture_busy)capture_toggle();
 }
-static void foreground(void)
+static int debug_overlap(int x,int y,int width,int height)
 {
+    for(int i=0;i<api->win_max();i++){
+        const Win *w=api->win_slot(i);
+        if(w&&w->type==appid&&x<w->x+w->w&&x+width>w->x&&y<w->y+w->h&&y+height>w->y)return 1;
+    }
+    return 0;
+}
+static void foreground(int win)
+{
+    if(win==-2){redraw_restore();return;}
     if(!ops.flags)return;
     int marker_x=*api->screen_w-52,marker_y=*api->screen_h-52;
-    api->fill_rect(marker_x,marker_y,48,20,C_BLACK);
-    api->draw_text(marker_x+4,marker_y+2,"DEBUG",C_YELLOW);
-    if(!(ops.flags&(DBG_ALLOC|DBG_DISK|DBG_STACK|DBG_FS)))return;
+    if(!debug_overlap(marker_x,marker_y,48,20)){
+        api->fill_rect(marker_x,marker_y,48,20,C_BLACK);
+        api->draw_text(marker_x+4,marker_y+2,"DEBUG",C_YELLOW);
+    }
+    if(!(ops.flags&(DBG_ALLOC|DBG_DISK|DBG_STACK|DBG_FS|DBG_DEVICE|DBG_HEAP|DBG_BACKLOG|DBG_SLOW))){
+        if(ops.flags&DBG_REDRAW)redraw_outline(win);return;
+    }
     int width=*api->screen_w-8;if(width>504)width=504;
     int x=*api->screen_w-width-4,y=4;char s[88];
-    int rows=0;if(ops.flags&DBG_ALLOC)rows+=3;if(ops.flags&DBG_DISK)rows+=5;
-    if(ops.flags&DBG_STACK)rows++;if(ops.flags&DBG_FS)rows+=3;
+    int rows=0;
+    for(u32 bit=DBG_ALLOC;bit<=DBG_BACKLOG;bit<<=1)
+        if((bit&(DBG_ALLOC|DBG_DISK|DBG_STACK|DBG_FS|DBG_DEVICE|DBG_HEAP|DBG_BACKLOG))&&(ops.flags&bit))rows++;
+    if(ops.flags&DBG_SLOW)rows+=2;
+    int spare=(*api->screen_h-48)/16-rows;if(spare<0)spare=0;
+    int details[5]={0},limits[5]={2,4,2,4,2};
+    u32 kinds[5]={DBG_ALLOC,DBG_DISK,DBG_FS,DBG_DEVICE,DBG_SLOW};
+    for(int i=0;i<5;i++)if(ops.flags&kinds[i]){
+        details[i]=spare<limits[i]?spare:limits[i];spare-=details[i];rows+=details[i];
+    }
+    if(debug_overlap(x,y,width,rows*16+8)){
+        if(ops.flags&DBG_REDRAW)redraw_outline(win);return;
+    }
+    api->set_clip(0,0,*api->screen_w,*api->screen_h-32);
     api->fill_rect(x,y,width,rows*16+8,C_BLACK);x+=4;y+=4;
 #define LINE(t,c) do{api->draw_text_clip(x,y,t,c,width-8);y+=16;}while(0)
     if(ops.flags&DBG_ALLOC){
         api->kfmt(s,sizeof s,"Allocation failures: %u",alloc_count);LINE(s,C_WHITE);
-        for(u32 i=alloc_count>2?alloc_count-2:0;i<alloc_count;i++)LINE(alloc_line[i%2],C_YELLOW);
-        if(alloc_count<2)y+=(2-alloc_count)*16;
+        for(u32 i=alloc_count>(u32)details[0]?alloc_count-details[0]:0;i<alloc_count;i++)LINE(alloc_line[i%2],C_YELLOW);
+        if(alloc_count<(u32)details[0])y+=(details[0]-alloc_count)*16;
     }
     if(ops.flags&DBG_DISK){
         api->kfmt(s,sizeof s,"Disk activity: %u",disk_count);LINE(s,C_WHITE);
-        for(u32 i=disk_count>4?disk_count-4:0;i<disk_count;i++)LINE(disk_line[i%4],C_WHITE);
-        if(disk_count<4)y+=(4-disk_count)*16;
+        for(u32 i=disk_count>(u32)details[1]?disk_count-details[1]:0;i<disk_count;i++)LINE(disk_line[i%4],C_WHITE);
+        if(disk_count<(u32)details[1])y+=(details[1]-disk_count)*16;
     }
     if(ops.flags&DBG_STACK){
         if(guard_bad)api->kfmt(s,sizeof s,"Stack guard FAILED: worker mask %02x",guard_bad);
@@ -198,36 +254,75 @@ static void foreground(void)
     }
     if(ops.flags&DBG_FS){
         api->kfmt(s,sizeof s,"Filesystem errors: %u",fs_count);LINE(s,C_WHITE);
-        for(u32 i=fs_count>2?fs_count-2:0;i<fs_count;i++)LINE(fs_line[i%2],C_YELLOW);
+        for(u32 i=fs_count>(u32)details[2]?fs_count-details[2]:0;i<fs_count;i++)LINE(fs_line[i%2],C_YELLOW);
+        if(fs_count<(u32)details[2])y+=(details[2]-fs_count)*16;
     }
+    if(ops.flags&DBG_DEVICE){
+        api->kfmt(s,sizeof s,"Device changes: %u (1s samples)",device_count);LINE(s,C_WHITE);
+        for(u32 i=device_count>(u32)details[3]?device_count-details[3]:0;i<device_count;i++)LINE(device_line[i%4],C_YELLOW);
+        if(device_count<(u32)details[3])y+=(details[3]-device_count)*16;
+    }
+    if(ops.flags&DBG_HEAP){
+        heap_message(s,sizeof s);LINE(s,heap_status>0?C_RED:heap_status?C_YELLOW:C_BGREEN);
+    }
+    if(ops.flags&DBG_BACKLOG){
+        api->kfmt(s,sizeof s,"Input backlog: %u  peak %u  dropped %u",queue_depth,queue_peak,queue_dropped);LINE(s,C_WHITE);
+    }
+    if(ops.flags&DBG_SLOW){
+        api->kfmt(s,sizeof s,"Slow handlers (100ms+): %u done",slow_count);LINE(s,C_WHITE);
+        LINE(slow_active[0]?slow_active:"No handler over 100ms",C_YELLOW);
+        for(u32 i=slow_count>(u32)details[4]?slow_count-details[4]:0;i<slow_count;i++)LINE(slow_line[i%2],C_YELLOW);
+    }
+    api->clear_clip();
+    if(ops.flags&DBG_REDRAW)redraw_outline(win);
 #undef LINE
 }
 static void size(int inst,int *w,int *h){(void)inst;*w=352;*h=198+ROW_H;}
+static void keep_focus(void);
 static void draw(Win *w,int x,int y,int cw,int ch)
 {
-    (void)w;(void)ch;
-    for(int i=0;i<ROWS;i++){
-        int yy=y+8+i*ROW_H;api->rect(x+8,yy,14,14,i==focus?C_NAVY:C_BLACK);
-        if(i==ROWS-1?automatic_remote():(ops.flags&(1u<<i)))api->draw_text(x+11,yy,"x",C_BLACK);
-        api->draw_text_clip(x+30,yy,labels[i],C_BLACK,cw-38);
+    (void)w;view_rows=(ch-64)/ROW_H;
+    if(view_rows<1)view_rows=1;if(view_rows>VISIBLE_ROWS)view_rows=VISIBLE_ROWS;
+    keep_focus();
+    for(int i=toprow;i<ROWS&&i<toprow+view_rows;i++){
+        int yy=y+8+(i-toprow)*ROW_H;api->rect(x+8,yy,14,14,i==focus?C_NAVY:C_BLACK);
+        if(i==6?saved_on("remote.auto"):i==ROWS-1?saved_on("debugnet.auto"):(ops.flags&row_flags[i]))api->draw_text(x+11,yy,"x",C_BLACK);
+        api->draw_text_clip(x+30,yy,labels[i],C_BLACK,cw-54);
     }
+    api->draw_char(x+cw-16,y+8,0x1e,toprow?C_BLACK:C_GRAY);
+    api->draw_char(x+cw-16,y+8+(view_rows-1)*ROW_H,0x1f,toprow+view_rows<ROWS?C_BLACK:C_GRAY);
     char s[88];api->kfmt(s,sizeof s,"U:%s",capture_name);
     if(capture_name[0]){
-        api->draw_text_clip(x+8,y+140+ROW_H,s,C_BLACK,cw-16);
+        api->draw_text_clip(x+8,y+8+view_rows*ROW_H,s,C_BLACK,cw-16);
         api->kfmt(s,sizeof s,"Packets %u  lost %u",packets,dropped);
-        api->draw_text_clip(x+8,y+158+ROW_H,s,C_BLACK,cw-16);
+        api->draw_text_clip(x+8,y+26+view_rows*ROW_H,s,C_BLACK,cw-16);
     }
-    api->draw_text_clip(x+8,y+176+ROW_H,capture_status,C_MAROON,cw-16);
+    api->draw_text_clip(x+8,y+44+view_rows*ROW_H,capture_status,C_MAROON,cw-16);
+}
+static void keep_focus(void)
+{
+    if(focus<toprow)toprow=focus;
+    if(focus>=toprow+view_rows)toprow=focus-view_rows+1;
 }
 static void key(int inst,int k)
 {
     (void)inst;if(k==K_UP)focus=(focus+ROWS-1)%ROWS;else if(k==K_DOWN||k=='\t')focus=(focus+1)%ROWS;
     else if(k==' '||k=='\n')toggle(focus);
+    keep_focus();api->gui_dirty();
+}
+static void wheel(int inst,int dz)
+{
+    (void)inst;toprow-=dz;
+    if(toprow<0)toprow=0;if(toprow>ROWS-view_rows)toprow=ROWS-view_rows;
+    if(focus<toprow)focus=toprow;if(focus>=toprow+view_rows)focus=toprow+view_rows-1;
+    api->gui_dirty();
 }
 static void mouse(int inst,int x,int y,int ev,int cw,int ch)
 {
-    (void)inst;(void)cw;(void)ch;
-    if(ev==EV_PRESS&&x>=8&&x<344&&y>=8&&y<8+ROWS*ROW_H){focus=(y-8)/ROW_H;toggle(focus);}
+    (void)inst;(void)ch;
+    if(ev!=EV_PRESS||y<8||y>=8+view_rows*ROW_H)return;
+    if(x>=cw-24&&x<cw){wheel(0,y<8+view_rows*ROW_H/2?1:-1);return;}
+    if(x>=8&&x<cw-24){focus=toprow+(y-8)/ROW_H;toggle(focus);}
 }
 static int hotkey(int k)
 {
@@ -239,6 +334,7 @@ static void snapshot(char *out,u32 cap)
         *api->ticks,ops.flags,alloc_count,alloc_line[0],alloc_line[1],fs_count,fs_line[0],fs_line[1],
         disk_count,disk_line[0],disk_line[1],disk_line[2],disk_line[3],guard_bad,
         capture_name,capture_status,packets,dropped,file_size,fill[0],fill[1],bank,capture_bank);
+    u32 n=api->strlen(out);if(n<cap)diagnostics_snapshot(out+n,cap-n);
 }
 const KextHeader kext_header={KEXT_MAGIC,KAPI_VERSION,KEXT_KIND_KERNEL,0,"Debug"};
 int kext_entry(const Kapi *k)
@@ -246,8 +342,10 @@ int kext_entry(const Kapi *k)
     if(k->version<KAPI_VERSION)return 1;
     api=k;core=k->service_get("debug.core");if(!core||core->abi!=DEBUG_ABI)return 1;
     static const AppDesc d={.title="Debug",.max_inst=1,.in_menu=0,.draw=draw,
-        .key=key,.mouse=mouse,.client_size=size,.live_draw=APP_INDEPENDENT};
+        .key=key,.mouse=mouse,.wheel=wheel,.client_size=size,.live_draw=APP_INDEPENDENT};
     appid=api->register_app(&d);if(appid<0)return 1;
+    u32 saved=0;api->config_get("debug.flags",&saved);ops.flags=saved&SAVED_FLAGS;
+    diag_tick=*api->ticks-100;
     ops.abi=DEBUG_ABI;ops.event=event;ops.draw=foreground;ops.packet=packet;ops.snapshot=snapshot;
     if(api->register_service("debug",&ops)||api->register_key_hook(hotkey)||api->timer_add(5,poll,0)<0)return 1;
     api->register_shutdown(shutdown);core->bind(&ops);return 0;

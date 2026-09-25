@@ -668,9 +668,24 @@ isr%1:
 
 isr_common:
     pushad
-    push esp
+    mov eax, esp
+    push ds
+    push es
+    push fs
+    push gs
+    mov dx, 0x10
+    mov ds, dx
+    mov es, dx
+    mov fs, dx
+    mov gs, dx
+    cld
+    push eax
     call isr_dispatch
     add esp, 4
+    pop gs
+    pop fs
+    pop es
+    pop ds
     popad
     add esp, 8
     iretd
@@ -693,9 +708,24 @@ extern syscall_dispatch
 global isr128
 isr128:
     pushad
-    push esp
+    mov eax, esp
+    push ds
+    push es
+    push fs
+    push gs
+    mov dx, 0x10
+    mov ds, dx
+    mov es, dx
+    mov fs, dx
+    mov gs, dx
+    cld
+    push eax
     call syscall_dispatch
     add esp, 4
+    pop gs
+    pop fs
+    pop es
+    pop ds
     popad
     iretd
 

@@ -19,16 +19,20 @@ static int mounted;
 static Mutex fs_mutex=MUTEX_INIT;
 #include "fscache.inc"
 
-static int flush_table(void)
+static u32 entry_sectors(const FsEnt *e)
 {
-    u8 sec[512];
-    memset(sec, 0, 512);
-    *(u32 *)sec = FS_MAGIC;
-    *(u32 *)(sec + 4) = FS_VER;
-    *(u32 *)(sec + 8) = sizeof(FsEnt);
-    if (fdc_write(FS_SUPER, sec) != 0) return 0;
-    for (int i = 0; i < FS_TSECT; i++)
-        if (fdc_write(FS_TABLE + i, (u8 *)table + i * 512) != 0) return 0;
+    u32 off = (const u8 *)e - (const u8 *)table;
+    return (1u << (off / 512)) | (1u << ((off + sizeof *e - 1) / 512));
+}
+
+static int flush_table(u32 sectors)
+{
+    for (u32 i = 0; i < FS_TSECT; ) {
+        if (!(sectors & (1u << i))) { i++; continue; }
+        u32 first = i++;
+        while (i < FS_TSECT && (sectors & (1u << i))) i++;
+        if (fdc_write_many(FS_TABLE + first, (u8 *)table + first * 512, i - first)) return 0;
+    }
     return 1;
 }
 
@@ -39,9 +43,9 @@ static void reload_table(void)
     fdc_result_restore(&result);
 }
 
-static int commit_table(void)
+static int commit_table(u32 sectors)
 {
-    if(flush_table())return 1;
+    if(flush_table(sectors))return 1;
     reload_table();return 0;
 }
 
@@ -162,20 +166,20 @@ static int fs_write_locked(const char *name, const u8 *buf, u32 size, int fresh)
     e->size = size;
     e->mtime = rtc_now_dos();
 
-    u8 sec[512];
-    for (int s = 0; s < nsect; s++) {
-        u32 off = s * 512;
-        u32 n = size - off < 512 ? size - off : 512;
-        memset(sec, 0, 512);
-        memcpy(sec, buf + off, n);
-        if (fdc_write(e->start + s, sec) != 0) {
-
-            if (existed) *e = saved;
-            else e->used = 0;
-            return -1;
-        }
+    u32 full = size / 512;
+    int failed = full && fdc_write_many(e->start, buf, full);
+    if (!failed && (size % 512 || !size)) {
+        u8 sec[512];
+        memset(sec, 0, sizeof sec);
+        if (size % 512) memcpy(sec, buf + full * 512, size % 512);
+        failed = fdc_write(e->start + full, sec);
     }
-    return commit_table() ? 0 : -1;
+    if (failed) {
+        if (existed) *e = saved;
+        else e->used = 0;
+        return -1;
+    }
+    return commit_table(entry_sectors(e)) ? 0 : -1;
 }
 
 static int fs_delete_locked(const char *name)
@@ -209,7 +213,7 @@ static int fs_mkdir_locked(const char *name)
     e->nsect = 0;
     e->start = 0;
     e->mtime = rtc_now_dos();
-    return commit_table() ? 0 : -1;
+    return commit_table(entry_sectors(e)) ? 0 : -1;
 }
 
 int fs_is_dir(const char *name)
@@ -225,7 +229,7 @@ static int fs_touch_locked(const char *name)
     FsEnt *e = find(name);
     if (!e) return -1;
     e->mtime = rtc_now_dos();
-    return commit_table() ? 0 : FS_EIO;
+    return commit_table(entry_sectors(e)) ? 0 : FS_EIO;
 }
 
 static int fs_rename_locked(const char *oldname, const char *newname)
@@ -240,7 +244,7 @@ static int fs_rename_locked(const char *oldname, const char *newname)
     while (newname[l]) l++;
     if (l >= FS_NAMELEN) return -1;
     strlcpy(e->name, newname, FS_NAMELEN);
-    return commit_table() ? 0 : -1;
+    return commit_table(entry_sectors(e)) ? 0 : -1;
 }
 
 static int fs_rename_dir_locked(const char *olddir, const char *newdir)
@@ -265,17 +269,21 @@ static int fs_rename_dir_locked(const char *olddir, const char *newdir)
     }
     if (!hits) return -1;
 
+    u32 sectors = 0;
     for (int i = 0; i < FS_NFILES; i++) {
         if (!table[i].used) continue;
         if (!strcmp(table[i].name, olddir)) {
             strlcpy(table[i].name, newdir, FS_NAMELEN);
+            sectors |= entry_sectors(&table[i]);
             continue;
         }
         if (!fs_under(table[i].name, olddir)) continue;
-        if (fs_rejoin(table[i].name, olddir, newdir, nn, FS_NAMELEN))
+        if (fs_rejoin(table[i].name, olddir, newdir, nn, FS_NAMELEN)) {
             strlcpy(table[i].name, nn, FS_NAMELEN);
+            sectors |= entry_sectors(&table[i]);
+        }
     }
-    return commit_table() ? 0 : -1;
+    return commit_table(sectors) ? 0 : -1;
 }
 
 int fs_dir_count(const char *dir)
@@ -340,7 +348,7 @@ static int fs_defrag_locked(void (*prog)(int done, int total))
         table[e[i].idx].start = e[i].nstart;
 
         int fl = 0;
-        for (int t = 0; t < 3 && !(fl = flush_table()); t++) gui_pump();
+        for (int t = 0; t < 3 && !(fl = flush_table(entry_sectors(&table[e[i].idx]))); t++) gui_pump();
         if (!fl) {
 
             klog("defrag: table flush failed after moving ");

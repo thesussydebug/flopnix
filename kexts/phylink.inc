@@ -36,6 +36,17 @@ static inline void phy_decode(u16 bmsr, u16 anar, u16 anlpar, u16 bmcr,
 
 }
 
+static inline void phy_admtek_decode(u32 opr, PhyState *p)
+{
+    p->present = 0; p->up = 0; p->autoneg_done = 0; p->full = 0; p->mbps = 0;
+    if (opr == 0xFFFFFFFFu || (opr & 7) != 7) return;
+    p->present = 1;
+    if (!(opr & 0x20000000u)) return;
+    p->up = p->autoneg_done = 1;
+    p->mbps = (opr & 0x80000000u) ? 100 : 10;
+    p->full = (opr & 0x40000000u) ? 1 : 0;
+}
+
 static inline u32 tul_csr6(int full_duplex, int running)
 {
     u32 v = 0x00040000u;

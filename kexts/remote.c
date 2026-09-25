@@ -10,12 +10,14 @@ static const ShellStreamOps *shell;
 static const KextFileOps *files;
 static ShellStream stream;
 static Telnet telnet;
-static char line[1100],target[FS_NAMELEN];
+static char line[1100],target[256];
 static u32 session,activity,upload_size,upload_crc,upload_got;
 static u8 *upload;
 static u8 output[128];
 static int enabled,machine,used,overflow,output_n,io_failed,servicing,stop_requested;
 static u16 port=23;
+static int upload_managed;
+static void managed_commit(void);
 
 #define ticks (*api->ticks)
 
@@ -43,7 +45,7 @@ static void raw(const u8 *data,int length)
 static void text(const char *s){raw((const u8 *)s,(int)api->strlen(s));}
 static void upload_clear(void)
 {
-    api->kfree(upload);upload=0;upload_size=upload_got=0;target[0]=0;
+    api->kfree(upload);upload=0;upload_size=upload_got=0;target[0]=0;upload_managed=0;
 }
 static void reset(void)
 {
@@ -71,7 +73,7 @@ static void flush(void)
 static void emit(char c,void *ctx)
 {
     (void)ctx;
-    if(machine){output[output_n++]=(u8)c;if(output_n==(int)sizeof output)flush();}
+    if(machine){output[output_n++]=(u8)c;if(output_n==(int)sizeof output||c=='\n')flush();}
     else{
         u8 b[2]={(u8)c,0};int n=1;
         if(c=='\n'){b[0]='\r';b[1]='\n';n=2;}
@@ -144,6 +146,7 @@ static void data(const char *s)
 }
 static void commit(void)
 {
+    if(upload_managed){managed_commit();return;}
     KextHeader header;
     if(!upload||upload_got!=upload_size||remote_crc(upload,upload_size)!=upload_crc){
         upload_clear();error("Incomplete upload or checksum mismatch; file unchanged");return;
@@ -177,6 +180,8 @@ static void get(const char *path)
     for(u32 i=0;i<size&&!io_failed;i+=512){u32 take=size-i;if(take>512)take=512;hexline("@data ",buf+i,(int)take);}
     api->kfree(buf);done(0);
 }
+#include "management.inc"
+
 static void command(void)
 {
     line[used]=0;
@@ -187,7 +192,8 @@ static void command(void)
         if(!api->strncmp(line,"@exec ",6)){
             if(upload)error("Upload active; commit or abort first");
             else{int r=shell->run(&stream,line+6);if(r==-2)text("@error Shell is busy; retry\r\n");done(r);}
-        }else if(!api->strncmp(line,"@put ",5))put(line+5);
+        }else if(!api->strncmp(line,"@manage ",8))managed_command(line+8);
+        else if(!api->strncmp(line,"@put ",5))put(line+5);
         else if(!api->strncmp(line,"@data ",6))data(line+6);
         else if(!api->strcmp(line,"@commit"))commit();
         else if(!api->strcmp(line,"@abort")){upload_clear();done(0);}

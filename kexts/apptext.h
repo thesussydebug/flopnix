@@ -2,7 +2,11 @@
 
 static int at_replace(TextEdit *t, const char *s, int n, int (*grow)(TextEdit *, int))
 {
-    int need = t->len - (te_end(t) - te_start(t)) + n;
+    int a=te_start(t),b=te_end(t);
+    if(n<0||a<0||b>t->len)return -1;
+    int kept=t->len-(b-a);
+    if(n>0x7FFFFFFF-kept)return -1;
+    int need=kept+n;
     if (need >= t->cap && (!grow || !grow(t, need))) return -1;
     return te_replace(t, s, n);
 }

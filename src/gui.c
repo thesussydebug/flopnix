@@ -5,6 +5,7 @@
 #include "winfit.inc"
 #include "winhit.inc"
 #include "framegate.inc"
+#include "cursorbuf.inc"
 #include "hangwatch.inc"
 #include "atsw.inc"
 #include "bmpw.inc"
@@ -120,9 +121,11 @@ static struct {char title[24],msg[44];int on,frac;} progress[MAXWIN];
 void app_local_progress(const char *title,const char *msg,int frac)
 {
     int i=app_current_window();if(i<0)return;
+    if(!title&&!progress[i].on)return;
     progress[i].on=title!=0;progress[i].frac=frac;
     strlcpy(progress[i].title,title?title:"",sizeof progress[i].title);
-    strlcpy(progress[i].msg,msg?msg:"",sizeof progress[i].msg);gui_dirty=1;
+    strlcpy(progress[i].msg,msg?msg:"",sizeof progress[i].msg);
+    win_redraw(wins[i].type,wins[i].inst);
 }
 
 #define MENUW  136
@@ -274,12 +277,27 @@ int control_state(int x, int y, int w, int h)
 }
 
 static int win_find(int type,int inst);
-void win_redraw(int type, int inst)
+static void win_repaint(int i)
 {
-    int i = win_find(type,inst);
     if (i < 0) return;
+    if(nz&&i!=zord[nz-1]){
+        Win *w=&wins[i],*top=&wins[zord[nz-1]];
+        if(top->x<=w->x&&top->y<=w->y&&top->x+top->w>=w->x+w->w&&top->y+top->h>=w->y+w->h)return;
+    }
     if (gui_dirty == 1 || (gui_dirty == 2 && redraw_window != i)) gui_dirty = 1;
     else { redraw_window = i; gui_dirty = 2; }
+}
+
+void win_redraw(int type, int inst)
+{
+    int i=win_find(type,inst);
+    if(i>=0)win_images[i].dirty=1;
+    win_repaint(i);
+}
+void gui_invalidate(void)
+{
+    for(int i=0;i<MAXWIN;i++)win_images[i].dirty=1;
+    gui_dirty=1;
 }
 
 static void win_raise(int i)
@@ -391,7 +409,16 @@ void present(void)
 
 static u8 close_pending[MAXWIN];
 
-void win_close(int i)
+int win_request_close(int i)
+{
+    if(i<0||i>=MAXWIN||!wins[i].used)return 0;
+    Win *w=&wins[i];const AppDesc *d=app_desc(w->type);
+    if(d&&(d->live_draw&APP_CLOSE_REQUEST))app_key(w,K_CLOSE_REQUEST);
+    else win_close(i);
+    return 1;
+}
+
+__attribute__((minsize)) void win_close(int i)
 {
 
     if(i<0||i>=MAXWIN||!wins[i].used)return;
@@ -405,6 +432,7 @@ void win_close(int i)
         }
     app_free(wins[i].type, wins[i].inst);
     wins[i].used = 0;
+    gui_dirty = 1;
 
     overlay_drop_owner(app_type_owner(wins[i].type));
 
@@ -438,7 +466,7 @@ static const char *type_title(int t)
     return d ? d->title : "?";
 }
 
-int win_open(int type)
+__attribute__((minsize)) int win_open(int type)
 {
     if (app_multi(type) <= 1) {
         for (int i = 0; i < MAXWIN; i++)
@@ -488,6 +516,29 @@ int win_open(int type)
         ktrace(tm);
     }
     return inst;
+}
+
+static u8 launch_queue[MAXWIN];
+static int launch_head,launch_count;
+
+static void gui_launch(int type)
+{
+    if(type<0||type>=app_count())return;
+    u32 f=irq_save();
+    int queued=launch_count<MAXWIN;
+    if(queued){launch_queue[(launch_head+launch_count)%MAXWIN]=(u8)type;launch_count++;}
+    irq_restore(f);
+    if(!queued)fault_show_banner("E42 - App launch queue is full. Try again.");
+}
+
+int gui_launch_pending(void)
+{
+    if(busy_update||kupd_critical)return 0;
+    u32 f=irq_save();
+    if(!launch_count){irq_restore(f);return 0;}
+    int type=launch_queue[launch_head];launch_head=(launch_head+1)%MAXWIN;launch_count--;
+    irq_restore(f);
+    win_open(type);return 1;
 }
 
 static void update_clock(void)
@@ -590,7 +641,7 @@ void gui_tick(void)
         last = ticks;
         gui_blink ^= 1;
         update_clock();
-        gui_dirty = 1;
+        gui_invalidate();
     }
     if (!ss_active && CFG->ss_enable &&
         (u32)(ticks - last_input) > (u32)CFG->ss_secs * 100) {
@@ -610,7 +661,7 @@ void gui_tick(void)
             gui_dirty = 1;
         }
     } else if (apps_animating() || anim_claims) {
-        if ((u32)(ticks - lasta) >= 3) { lasta = ticks; gui_dirty = 1; }
+        if ((u32)(ticks - lasta) >= 3) { lasta = ticks; gui_invalidate(); }
     }
 }
 
@@ -679,7 +730,7 @@ void gui_wheel(int dz)
     if(busy_update||kupd_critical)return;
     if (input_dismiss()) return;
     int f = focused();
-    if (f >= 0) { app_wheel(&wins[f], dz); gui_dirty = 1; }
+    if (f >= 0) { app_wheel(&wins[f], dz); win_redraw(wins[f].type,wins[f].inst); }
 }
 
 static int shot_on_usb;
@@ -690,7 +741,7 @@ static int shot_exists(const char *name, void *ctx)
                        return fat_exists(p) != 0; }
     return fs_exists(name);
 }
-static void screenshot(void)
+static __attribute__((noinline,minsize)) void screenshot(void)
 {
     static u8 pal[256 * 3];
     for (int i = 0; i < 256; i++)
@@ -720,7 +771,7 @@ static void screenshot(void)
     notify(m);
 }
 
-void gui_key(int k)
+__attribute__((minsize)) void gui_key(int k)
 {
     if(busy_update||kupd_critical){if(k==27&&!kupd_critical)esc_latched=1;return;}
     if (input_dismiss()) return;
@@ -752,7 +803,7 @@ void gui_key(int k)
     }
     if(k==20&&(kbd_mods()&2)){
         menu_open=0;open_cat=-1;at_k=-1;
-        win_open(WT_TERM);gui_dirty=1;return;
+        gui_launch(WT_TERM);gui_dirty=1;return;
     }
     if (k == K_MENU) {
         menu_open = !menu_open;
@@ -768,7 +819,7 @@ void gui_key(int k)
         return;
     }
     app_key(&wins[f], k);
-    gui_dirty = 1;
+    win_redraw(wins[f].type,wins[f].inst);
 }
 
 static void dnd_finish(void)
@@ -792,6 +843,7 @@ void gui_mouse(int dx, int dy, u8 btn, u32 when)
 
     pb_main(&pump_btn, btn);
     if (input_dismiss() && (dx || dy || btn)) return;
+    int oldx=mx,oldy=my;
     int sp = CFG->mouse_speed ? CFG->mouse_speed : 2;
     mx += dx * sp / 2;
     my += dy * sp / 2;
@@ -803,7 +855,11 @@ void gui_mouse(int dx, int dy, u8 btn, u32 when)
     mbtn_prev = btn;
     int lpress = (btn & 1) && !(was & 1);
     int rpress = (btn & 2) && !(was & 2);
-    gui_dirty = 1;
+    if(mx==oldx&&my==oldy&&!btn&&!was)return;
+    if(nz>0&&((!btn&&!was)||(btn==1&&was==1&&press_win==zord[nz-1]))&&in(oldx,oldy,wins[zord[nz-1]].x,wins[zord[nz-1]].y,wins[zord[nz-1]].w,wins[zord[nz-1]].h)&&
+       in(mx,my,wins[zord[nz-1]].x,wins[zord[nz-1]].y,wins[zord[nz-1]].w,wins[zord[nz-1]].h))
+        win_repaint(zord[nz-1]);
+    else gui_dirty=1;
 
     if (lpress) {
         press_x = mx; press_y = my;
@@ -916,7 +972,7 @@ void gui_mouse(int dx, int dy, u8 btn, u32 when)
         if (sub >= 0) {
             int t = cat_app(open_cat, sub);
             menu_open = 0; open_cat = -1;
-            if (t >= 0) win_open(t);
+            if (t >= 0) gui_launch(t);
             return;
         }
         int c = topcat_at(mx, my);
@@ -1011,7 +1067,6 @@ static void draw_win(int i, int foc)
     panel(cbx, cby, 16, 16, hov);
     if (hov) fill_rect(cbx + 2, cby + 2, 12, 12, C_RED);
     draw_char(cbx + 4, cby, 'x', hov ? C_WHITE : C_BLACK);
-    fill_rect(CLIX(w), CLIY(w), CLIW(w), CLIH(w), C_FACE);
     set_clip(CLIX(w), CLIY(w), CLIW(w), CLIH(w));
 
     if (app_handler_running(i) && !app_live_draw(w->type)) {
@@ -1110,6 +1165,7 @@ void gui_frame_state(FrameState *s)
 
 void gui_compose(void)
 {
+    static CursorBuf cursor;
     int partial = gui_dirty == 2 && redraw_window >= 0 && nz > 0 &&
         zord[nz-1] == redraw_window && wins[redraw_window].x>=0 && wins[redraw_window].y>=0 &&
         wins[redraw_window].x+wins[redraw_window].w<=SW && wins[redraw_window].y+wins[redraw_window].h<=SH-TBH && !ss_active && !ov_draw && !menu_open &&
@@ -1117,22 +1173,30 @@ void gui_compose(void)
         !(fault_banner[0] && ticks < fault_banner_until);
     gui_dirty = 0;
     clear_clip();
+    cursorbuf_restore(&cursor,BACKBUF,SW);
+    debug_draw(-2);
     if (partial) {
         draw_win(redraw_window,focused()==redraw_window);
-        debug_draw();
+        debug_draw(redraw_window);
+        cursorbuf_save(&cursor,BACKBUF,SW,SW,SH,mx,my);
         draw_cursor(mx,my);
         return;
     }
     if (ss_active) {
         FAULT_GUARD(ss_draw(), { ss_active = 0; });
-        if (ss_active) {debug_draw();return;}
+        if (ss_active) {debug_draw(-1);return;}
     }
     fill_rect(0, 0, SW, SH, C_DESK);
     draw_text(8, 6, OS_NAME " " OS_VER, C_G0 + 6);
     desk_draw();
 
+    WhRect rects[MAXWIN];
+    for(int i=0;i<MAXWIN;i++){
+        rects[i].x=wins[i].x;rects[i].y=wins[i].y;
+        rects[i].w=wins[i].used?wins[i].w:0;rects[i].h=wins[i].h;
+    }
     for (int k = 0; k < nz; k++)
-        draw_win(zord[k], k == nz - 1);
+        if(!wh_covered(zord,nz,rects,k,SW,SH-TBH))draw_win(zord[k], k == nz - 1);
 
     fill_rect(0, SH - TBH, SW, TBH, C_FACE);
     hline(0, SH - TBH, SW, C_LIGHT);
@@ -1224,7 +1288,8 @@ void gui_compose(void)
                            p == k ? C_WHITE : C_BLACK, w - 20);
         }
     }
-    debug_draw();
+    debug_draw(-1);
+    cursorbuf_save(&cursor,BACKBUF,SW,SW,SH,mx,my);
     draw_cursor(mx, my);
 }
 

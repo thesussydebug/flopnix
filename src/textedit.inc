@@ -19,8 +19,11 @@ static inline void te_move(TextEdit *t, int pos, int extend)
 
 static inline int te_replace(TextEdit *t, const char *s, int n)
 {
-    int a = te_start(t), b = te_end(t), len = t->len - (b - a) + n;
-    if (!t->buf || n < 0 || len >= t->cap) return -1;
+    int a=te_start(t),b=te_end(t);
+    if(!t->buf||n<0||a<0||b>t->len)return -1;
+    int kept=t->len-(b-a);
+    if(kept>=t->cap||n>=t->cap-kept)return -1;
+    int len=kept+n;
     if (n == 0 && a == b) return 1;
     if (n > b - a) {
         for (int i = t->len; i >= b; i--) t->buf[i + n - (b - a)] = t->buf[i];

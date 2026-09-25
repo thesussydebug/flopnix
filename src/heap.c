@@ -8,14 +8,10 @@ static void *alloc_failed(u32 n,u32 caller)
 }
 
 #define HEAP_BASE (memory.heap)
-#define HMAGIC    0x48454150u
+#define HMAGIC    DEBUG_HEAP_MAGIC
 
-typedef struct Blk {
-    u32 magic;
-    u32 size;
-    struct Blk *next;
-    u32 free;
-} Blk;
+typedef DebugHeapBlock Blk;
+_Static_assert(sizeof(Blk)==16,"heap block layout");
 
 static Blk *freelist;
 u32 heap_top;
@@ -84,24 +80,31 @@ static void split(Blk *b, u32 n)
     b->size = n;
 }
 
-static int heap_grow(u32 n)
+static u32 heap_expand(u32 need)
 {
-    Blk *last = freelist;
-    while (last->next) last = last->next;
-    int extend = last->free && (u32)(last + 1) + last->size == grow_top;
-    u32 need = extend ? n - last->size : n + sizeof(Blk);
     u32 room = grow_limit - grow_top;
     if (need > room) return 0;
     u32 bytes = (need + 4095u) & ~4095u;
     if (bytes < 65536u) bytes = 65536u;
     if (bytes > room) bytes = room;
+    grow_top += bytes;
+    return bytes;
+}
+
+static int heap_grow(u32 n)
+{
+    Blk *last = freelist;
+    while (last->next) last = last->next;
+    int extend = last->free && (u32)(last + 1) + last->size == grow_top;
+    u32 top = grow_top;
+    u32 bytes = heap_expand(extend ? n - last->size : n + sizeof(Blk));
+    if (!bytes) return 0;
     if (extend) last->size += bytes;
     else {
-        Blk *b = (Blk *)grow_top;
+        Blk *b = (Blk *)top;
         b->magic = HMAGIC; b->size = bytes - sizeof(Blk);
         b->next = 0; b->free = 1; last->next = b;
     }
-    grow_top += bytes;
     return 1;
 }
 
@@ -142,6 +145,16 @@ void *krealloc(void *p, u32 n)
     Blk *b = (Blk *)p - 1;
     if (!heap_contains((u32)b) ||
         b->magic != HMAGIC || b->free) { irq_restore(flags); return alloc_failed(n,(u32)__builtin_return_address(0)); }
+    if (b->size < size) {
+        Blk *last = b;
+        u32 available = b->size;
+        if (b->next && b->next->free && (u8 *)(b + 1) + b->size == (u8 *)b->next) {
+            last = b->next;
+            available += sizeof(Blk) + last->size;
+        }
+        if (available < size && !last->next && (u32)(last + 1) + last->size == grow_top)
+            last->size += heap_expand(size - available);
+    }
     if (b->size < size && b->next && b->next->free &&
         (u8 *)(b + 1) + b->size == (u8 *)b->next &&
         b->size + sizeof(Blk) + b->next->size >= size) {

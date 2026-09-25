@@ -42,8 +42,8 @@ static inline const char *sh_usage(const char *c)
     if (sc_eq(c, "ping"))     return "ping <ip|host>- ICMP echo (resolves names)";
     if (sc_eq(c, "dns"))      return "dns <host>    - resolve a hostname to an IP";
     if (sc_eq(c, "ntp"))      return "ntp [+/-H:MM] - set the clock from the net";
-    if (sc_eq(c, "pack"))     return "pack <file>   - compress to <file>.pz";
-    if (sc_eq(c, "unpack"))   return "unpack <f.pz> - expand a .pz file";
+    if (sc_eq(c, "pack"))     return "pack <file>   - create <file>.fpa archive";
+    if (sc_eq(c, "unpack"))   return "unpack <file> - extract .fpa beside archive (no overwrite); .pz supported";
     if (sc_eq(c, "wget"))     return "wget <url> [f]- fetch http (host or full URL)";
     if (sc_eq(c, "lspci"))    return "lspci         - list PCI devices";
     if (sc_eq(c, "set"))      return "set [video|mouse|net ...] - config";

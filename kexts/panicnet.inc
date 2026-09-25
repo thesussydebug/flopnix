@@ -328,10 +328,53 @@ static void pm_emergency(u32 vec,u32 err,u32 eip,u32 cr2,u32 reason,u32 original
 }
 static void pm_cache(void);
 static const PanicMonitor pm_ops={PANIC_MONITOR_ABI,pm_capture,pm_enter,pm_emergency};
-static void cmd_panicnet(const char *args)
+static int pm_enable(u32 ip,u16 port)
+{
+    pm_core=api->service_get("panic.core");
+    if(!pm_core || pm_core->abi!=PANIC_MONITOR_ABI){api->shell_print("Update the kernel to enable crash reports.\n");return 0;}
+    u32 flags=net_irq_save();
+    pm_ip=0;*pm_core->monitor=0;
+    u32 kb=api->mem_info(MI_TOTAL_KB);
+    pm_ram_end=kb>=0x100000u?0x40000000u:kb*1024u;
+    u32 fb=api->boot_info(BI_LFB_ADDR);
+    if(fb>=0x100000u && fb<pm_ram_end)pm_ram_end=fb;
+    for(u32 i=0;i<1024;i++)pm_pd[i]=(i<<22)|0x83u;
+    pm_port=port;pm_session=api->rand();if(!pm_session)pm_session=1;
+    memset(pm_extra,0,sizeof pm_extra);memset(&pm_original,0,sizeof pm_original);pm_captured=0;pm_next_cache=0;
+    pm_ip=ip;*pm_core->monitor=&pm_ops;
+    fn_ip=ip;fn_port=(u16)(port>1?port-1:FAULTNET_PORT);fn_seen=fn_next=fn_sent=0;fn_left=0;fn_test=1;
+    fn_session=pm_session;fn_state="enabled";pm_cache();
+    net_irq_restore(flags);
+    return 1;
+}
+
+static void pm_disable(void)
+{
+    pm_ip=fn_ip=0;fn_left=fn_test=0;fn_state="off";
+    if(pm_core)*pm_core->monitor=0;
+}
+
+#include "debugnet.inc"
+
+static void cmd_debugnet(const char *args)
 {
     while(*args==' ')args++;
-    if(!strcmp(args,"off")){pm_ip=fn_ip=0;if(pm_core)*pm_core->monitor=0;api->shell_print("Network crash diagnostics: off\n");return;}
+    if(!strcmp(args,"off")){
+        u32 flags=net_irq_save();
+        dn_stop();pm_disable();
+        net_irq_restore(flags);
+        api->shell_print(dn_auto?"Crash reports: off until restart.\n":"Crash reports: off\n");return;
+    }
+    if(!strcmp(args,"auto")){
+        u32 flags=net_irq_save();dn_start();net_irq_restore(flags);
+        args="";
+    }
+    if(!strcmp(args,"status"))args="";
+    if(!strcmp(args,"test")){
+        if(!pm_ip){api->shell_print("Find a manager first: debugnet auto\n");return;}
+        u32 flags=net_irq_save();fn_test=1;fn_next=ticks;net_irq_restore(flags);
+        api->shell_print("Test queued. Check the manager for a connection test.\n");return;
+    }
     if(*args){
         char iptext[20];unsigned n=0,port=PM_PORT;u32 ip=0;
         while(*args && *args!=' ' && n<sizeof iptext-1)iptext[n++]=*args++;
@@ -346,29 +389,24 @@ static void cmd_panicnet(const char *args)
         if(*args || !port || port>65535 || !api->net_parse_ip(iptext,&ip) ||
            !nc_unicast(ip) || (ip&255)==127 || ip==net_ip ||
            (net_mask && (ip&net_mask)==(net_ip&net_mask) &&
-            ((ip&~net_mask)==~net_mask || !(ip&~net_mask)))){
-            api->shell_print("Usage: debugnet <PC-IP> [port] | off\n");return;
+            !nc_host_valid(ip,net_mask))){
+            api->shell_print("Usage: debugnet auto | <PC-IP> [port] | status | test | off\n");return;
         }
-        pm_core=api->service_get("panic.core");
-        if(!pm_core || pm_core->abi!=PANIC_MONITOR_ABI){api->shell_print("Update the kernel to enable crash diagnostics.\n");return;}
-        pm_ip=0;*pm_core->monitor=0;
-        u32 kb=api->mem_info(MI_TOTAL_KB);
-        pm_ram_end=kb>=0x100000u?0x40000000u:kb*1024u;
-        u32 fb=api->boot_info(BI_LFB_ADDR);
-        if(fb>=0x100000u && fb<pm_ram_end)pm_ram_end=fb;
-        for(u32 i=0;i<1024;i++)pm_pd[i]=(i<<22)|0x83u;
-        pm_port=(u16)port;pm_session=api->rand();if(!pm_session)pm_session=1;
-        memset(pm_extra,0,sizeof pm_extra);memset(&pm_original,0,sizeof pm_original);pm_captured=0;pm_next_cache=0;
-        pm_ip=ip;*pm_core->monitor=&pm_ops;
-        fn_ip=ip;fn_port=(u16)(port>1?port-1:7661);fn_seen=fn_next=fn_sent=0;fn_left=0;fn_test=1;
-        fn_session=pm_session;fn_state="enabled";pm_cache();
+        u32 flags=net_irq_save();
+        int enabled=pm_enable(ip,(u16)port);if(enabled)dn_stop();
+        net_irq_restore(flags);if(!enabled)return;
     }
-    if(!pm_ip){api->shell_print("LAN panic monitor: off\n");return;}
+    if(!pm_ip){
+        api->shell_print(dn_search?"Looking for FLOPNIX Manager. Keep its receiver open.\n":
+                        "Crash reports: off. Use debugnet auto to find a manager.\n");return;
+    }
     char b[128];
-    kfmt(b,sizeof b,"Panic inspection -> %u.%u.%u.%u:%u\n",pm_ip&255,(pm_ip>>8)&255,(pm_ip>>16)&255,pm_ip>>24,(unsigned)pm_port);
+    kfmt(b,sizeof b,"Crash reports -> %u.%u.%u.%u:%u\n",pm_ip&255,(pm_ip>>8)&255,(pm_ip>>16)&255,pm_ip>>24,(unsigned)pm_port);
     api->shell_print(b);
-    api->shell_print("App crashes, kernel panics and emergency panics are enabled.\n");
-    api->shell_print("'debugnet off' disables capture. Restart clears this setting.\n");
+    kfmt(b,sizeof b,"%s; %u report packets sent.\n",!net_up()?"waiting for network":net_ip?fn_state:"waiting for network address",fn_sent);
+    api->shell_print(b);
+    api->shell_print(dn_auto?"App and system crashes enabled. Auto-connect is saved.\n":
+                    "App and system crashes enabled for this boot.\n");
 }
 
 static void pm_cache(void)

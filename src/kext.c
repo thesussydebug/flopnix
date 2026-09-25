@@ -406,9 +406,10 @@ int kext_load(const char *name)
 {
 
     char path[FS_NAMELEN];
-    if (!name || strlen(name) >= sizeof path || loading_kext >= 0) return 40;
+    if (!name || strlen(name) >= sizeof path) return 40;
     strlcpy(path, name, sizeof path);
     mtx_lock(&load_mutex);
+    if (loading_kext >= 0) { mtx_unlock(&load_mutex); return 40; }
     for (int i=0;i<nkexts;i++)
         if (kexts[i].status==46 && !strcmp(kexts[i].name,path)) {
             kexts[i].status=0; mtx_unlock(&load_mutex); return 0;
@@ -570,6 +571,7 @@ void kext_boot(void)
     lazy_catalog();
     if (lazy_present("sys/tmp/notes.lst") || lazy_present("notes.lst")) { int nt = app_find("Notes"); if (nt >= 0) app_ensure_loaded(nt); }
     boot_pass(KEXT_KIND_APP, "app");
+    fs_cache_clear();
 
     if (!nkexts) boot_print("extensions: none on disk\n");
 
@@ -958,9 +960,14 @@ int register_service(const char *name, const void *ops)
     return -1;
 }
 
+#include "manager.h"
+extern int win_request_close(int index);
+
 const void *service_get(const char *name)
 {
     if (!name || (graphics_bit(name) & gfx_disabled)) return 0;
+    static const ManagerOps manager={MANAGER_ABI,win_request_close};
+    if(!strcmp(name,"manager.core"))return &manager;
     static const KextFileOps files={KEXT_FILE_ABI,peek_header,fs_replace};
     if(!strcmp(name,"kext.files"))return &files;
     if(!strcmp(name,"shell.stream"))return &shell_stream_ops;
@@ -1095,7 +1102,7 @@ static u16  kapi_inw(u16 p)         { return inw(p); }
 static void kapi_outl(u16 p, u32 v) { outl(p, v); }
 static u32  kapi_inl(u16 p)         { return inl(p); }
 
-static void kapi_dirty(void)        { gui_dirty = 1; }
+static void kapi_dirty(void)        { gui_invalidate(); }
 static u32  kapi_mem_kb(void)       { return BOOTINFO->mem_kb; }
 
 static u32 kapi_boot_info(int what)

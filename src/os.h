@@ -9,7 +9,7 @@ typedef __builtin_va_list va_list;
 #define va_arg(v, t)   __builtin_va_arg(v, t)
 
 #define OS_NAME    "FLOPNIX"
-#define OS_VER     "0.8.7"
+#define OS_VER     "0.8.8"
 #ifndef OS_BUILD_DATE
 #define OS_BUILD_DATE "unknown"
 #endif
@@ -191,7 +191,7 @@ u32 debug_flags(void);
 void debug_event(u32 kind,const char *name,u32 a,u32 b,int result);
 const char *debug_path(int usb,const char *path);
 void debug_disk(int usb,int write,u32 lba,u32 count,int result);
-void debug_draw(void);
+void debug_draw(int win);
 void debug_unwind(void);
 int debug_done(int mode,const char *old,int result);
 #include "sched.inc"
@@ -360,6 +360,7 @@ void app_forget_window(int win);
 void app_local_progress(const char *title,const char *msg,int frac);
 int  app_busy(int win);
 u32  app_q_dropped(void);
+u32  app_q_peak(void);
 int  app_q_depth(void);
 int  thread_overflowed(void);
 void preempt_disable(void);
@@ -529,6 +530,7 @@ void fault_record_hang(const char *who);
 extern int hang_stuck_win;
 void gui_init(void);
 void gui_compose(void);
+void gui_invalidate(void);
 #include "framegate.inc"
 void gui_frame_state(FrameState *s);
 void gui_mouse(int dx, int dy, u8 btn, u32 when);
@@ -560,6 +562,7 @@ void present(void);
 int  present_try(void);
 void present_done(void);
 int  gui_pump(void);
+int  gui_launch_pending(void);
 
 void esc_arm(void);
 int  esc_pending(void);

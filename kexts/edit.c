@@ -2,6 +2,7 @@
 #include "shpath.h"
 #include "clipline.inc"
 #include "buffer_core.inc"
+#include "fileopen.inc"
 #include "gdi.h"
 #include "menushade.h"
 
@@ -96,8 +97,8 @@ typedef struct {
     int  mode, pending;
     int  menu, menu_row;
     u8   src;
-    char fullpath[96];
-    char open_path[96];
+    char fullpath[128];
+    char open_path[128];
     int open_src;
     char fbuf[32];
     int  flen;
@@ -155,11 +156,11 @@ static void ed_reset(void)
 
 static int edit_buffer(u32 needed)
 {
-    if (needed > FS_MAXFILE) return 0;
+    if (needed > FO_LIMIT) { strlcpy(E->msg, "Text is too large; original kept", sizeof E->msg); return 0; }
     if (E->buf && needed <= E->capacity) return 1;
-    u32 cap = buffer_capacity(E->capacity, needed, 1024, FS_MAXFILE);
+    u32 cap = buffer_capacity(E->capacity, needed, 1024, FO_LIMIT);
     char *next = api->krealloc(E->buf, cap + 1);
-    if (!next && cap > needed && E->buf) {
+    if (!next && cap > needed) {
         cap = needed;
         next = api->krealloc(E->buf, cap + 1);
     }
@@ -173,7 +174,7 @@ static int edit_buffer(u32 needed)
 
 static void edit_trim(void)
 {
-    u32 cap = buffer_capacity(0, (u32)E->len, 1024, FS_MAXFILE);
+    u32 cap = E->len < 1024 ? 1024 : (u32)E->len;
     if (!E->buf || cap >= E->capacity) return;
     char *next = api->krealloc(E->buf, cap + 1);
     if (!next) return;
@@ -211,18 +212,12 @@ static void strip_cr(void)
     E->buf[o] = 0;
 }
 
-static void mark_truncated(void)
-{
-    E->ro = 1;
-    strlcpy(E->msg, "First 512 KiB only; read-only", sizeof E->msg);
-}
-
 static int edit_seed(int inst, const char *name, const u8 *d, int n)
 {
     E = &eds[inst];
-    int trunc = 0;
-    if (n > FS_MAXFILE) { n = FS_MAXFILE; trunc = 1; }
-    if (n < 0) n = 0;
+    if (n < 0 || (u32)n > FO_LIMIT || (!d && n)) {
+        strlcpy(E->msg, "Invalid file size; text kept", sizeof E->msg); return -1;
+    }
     if (!edit_buffer((u32)n)) return -1;
     ed_reset();
     memcpy(E->buf, d, n);
@@ -230,46 +225,55 @@ static int edit_seed(int inst, const char *name, const u8 *d, int n)
     strip_cr();
     edit_trim();
     strlcpy(E->name, name, FS_NAMELEN);
-    return trunc;
+    return 0;
 }
 
 static void edit_open_a(int inst, const char *name, const u8 *d, int n)
 {
-    if (edit_seed(inst, name, d, n) > 0) mark_truncated();
+    edit_seed(inst, name, d, n);
 }
 
 static void edit_open_usb(int inst, const char *name, const char *fullpath,
                    const u8 *d, int n)
 {
-    int trunc = edit_seed(inst, name, d, n);
-    if (trunc < 0) return;
+    E=&eds[inst];
+    if (strlen(fullpath) >= sizeof E->fullpath) { strlcpy(E->msg, "File path is too long; text kept", sizeof E->msg); return; }
+    if (edit_seed(inst, name, d, n) < 0) return;
     strlcpy(E->fullpath, fullpath, sizeof E->fullpath);
     E->src = 1;
     E->ro = fat_writable() ? 0 : 1;
-    if (trunc) mark_truncated();
+
+}
+
+static void edit_load_path(int inst, int drive, const char *source)
+{
+    char path[sizeof eds[0].fullpath];
+    E=&eds[inst];
+    if(strlen(source)>=sizeof path){strlcpy(E->msg,"File path is too long; text kept",sizeof E->msg);return;}
+    strlcpy(path,source,sizeof path);
+    FileData file;int r=fo_load(api,drive,path,1,&file,0);
+    E=&eds[inst];
+    if(r){strlcpy(E->msg,fo_error(r),sizeof E->msg);return;}
+    char *previous=E->buf;
+    ed_reset();E->buf=(char *)file.data;E->capacity=file.capacity-1;E->len=(int)file.size;
+    api->kfree(previous);strip_cr();edit_trim();
+    const char *name=path;
+    if(drive){
+        for(const char *p=path;*p;p++)if(*p=='/')name=p+1;
+        strlcpy(E->fullpath,path,sizeof E->fullpath);E->src=1;E->ro=!fat_writable();
+    }
+    strlcpy(E->name,name,sizeof E->name);
+    if(api->mem_track)api->mem_track("Editor text",E->buf,E->capacity+1);
 }
 
 static void edit_load(int inst, const char *name)
 {
-    api->buffer_lock();
-    int n = fs_read(name, iobuf, FS_MAXFILE + 1);
-    E = &eds[inst];
-    if (n < 0) strlcpy(E->msg, "read error; text kept", sizeof E->msg);
-    else edit_open_a(inst, name, iobuf, n);
-    api->buffer_unlock();
+    edit_load_path(inst,0,name);
 }
 
 static void ed_load_usb(const char *fullpath)
 {
-    int inst = (int)(E - eds);
-    api->buffer_lock();
-    int n = fat_read(fullpath, iobuf, FS_MAXFILE + 1);
-    E = &eds[inst];
-    const char *nm = fullpath;
-    for (const char *p = fullpath; *p; p++) if (*p == '/') nm = p + 1;
-    if (n < 0) strlcpy(E->msg, "usb read error; text kept", sizeof E->msg);
-    else edit_open_usb(inst, nm, fullpath, iobuf, n);
-    api->buffer_unlock();
+    edit_load_path((int)(E-eds),1,fullpath);
 }
 
 static int seg_count(int len)
@@ -474,8 +478,8 @@ static void find_next(void)
 {
     if (!E->flen) return;
     for (int off = 1; off <= E->len; off++) {
-        int i = (E->cur + off) % (E->len + 1);
-        if (i + E->flen > E->len) continue;
+        int i = (int)(((u32)E->cur + (u32)off) % ((u32)E->len + 1));
+        if (E->flen > E->len - i) continue;
         int k = 0;
 
         while (k < E->flen && ed_low(E->buf[i + k]) == ed_low(E->fbuf[k])) k++;
@@ -961,6 +965,7 @@ static int edit_opener(const char *name, const char *fullpath,
     E=&eds[inst];
     if(E->pending){api->notify("Finish the current Editor dialog first.");return 0;}
     if(E->mod){
+        if(strlen(fullpath?fullpath:name)>=sizeof E->open_path){strlcpy(E->msg,"File path is too long; text kept",sizeof E->msg);return 0;}
         E->open_src=fullpath!=0;strlcpy(E->open_path,fullpath?fullpath:name,sizeof E->open_path);
         guarded(PA_FILE);return 0;
     }

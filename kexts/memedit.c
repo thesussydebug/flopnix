@@ -5,7 +5,7 @@
 
 static const Kapi *api;
 static const GdiOps *gfx;
-static int my_type = -1;
+static int my_type = -1, timer_id = -1;
 
 #define MAPPED(a) (api->mem_mapped((u32)(a)))
 
@@ -89,12 +89,7 @@ static void follow(int rows, int bpr)
 static void tick_refresh(void *ctx)
 {
     (void)ctx;
-    if (my_type < 0) return;
-    int n = api->win_max();
-    for (int i = 0; i < n; i++) {
-        const Win *w = api->win_slot(i);
-        if (w && w->type == (u8)my_type) { api->gui_dirty(); return; }
-    }
+    api->win_redraw(my_type, 0);
 }
 
 static void me_draw(Win *w, int cx, int cy, int cw, int ch)
@@ -315,6 +310,13 @@ static void me_open(int inst)
     base = cursor = api->mem_info(MI_ARENA_BASE);
     if (!base) base = cursor = 0x400000;
     nibble = ascii_mode = editing_goto = 0;
+    if (timer_id < 0) timer_id = api->timer_add(15, tick_refresh, 0);
+}
+
+static void me_close(int inst)
+{
+    (void)inst;
+    if (timer_id >= 0) { api->timer_del(timer_id); timer_id = -1; }
 }
 
 static void me_csize(int inst, int *w, int *h)
@@ -396,7 +398,7 @@ int kext_entry(const Kapi *k)
     gfx = gdi_bind(k, 11);
     static const AppDesc d = {
         .title = "Memory Editor", .max_inst = 1, .resizable = 1, .in_menu = 1,
-        .open = me_open, .draw = me_draw, .key = me_key, .mouse = me_mouse,
+        .open = me_open, .close = me_close, .draw = me_draw, .key = me_key, .mouse = me_mouse,
         .wheel = me_wheel, .client_size = me_csize, .min_client = me_min,
     };
     my_type = k->register_app(&d);
@@ -404,6 +406,5 @@ int kext_entry(const Kapi *k)
                     cmd_peek);
     k->register_cmd("poke", "poke <addr> <hex byte>... - write memory bytes",
                     cmd_poke);
-    k->timer_add(15, tick_refresh, 0);
     return my_type < 0;
 }

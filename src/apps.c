@@ -1,5 +1,6 @@
 /* Built-in shell commands and terminal output. */
 #include "os.h"
+#include "debug.h"
 #include "shpath.h"
 #include "../kexts/net_wire.inc"
 #include "ramtest.inc"
@@ -23,7 +24,7 @@ static void sh_dispatch(char *cmd);
 #define PROMPT "root@flopnix:~# "
 
 typedef struct {
-    char sb[SBMAX][TCMAX];
+    char (*sb)[TCMAX];
     int  head;
     int  nlines;
     int  cx;
@@ -36,7 +37,7 @@ typedef struct {
     u8 running;
     int  len;
     int  inpx;
-    char hist[THIST][192];
+    char (*hist)[192];
     int  hist_n, hist_pos;
 
     char cwd[SC_MAX];
@@ -67,6 +68,7 @@ static void tnl(void)
 static void tputc(char c)
 {
     if(STREAM){STREAM->putc(c,STREAM->ctx);return;}
+    if(!T||!T->sb)return;
     T->view = 0;
 
     gui_dirty = 1;
@@ -159,15 +161,15 @@ void shell_print(const char *s) { if(!T&&!STREAM)T=term_last;if(T||STREAM)tprint
 void term_clear(void)
 {
     if(STREAM){tprint("\033[2J\033[H");return;}
-    if (!T) return;
-    memset(T->sb, 0, sizeof T->sb);
+    if (!T||!T->sb) return;
+    memset(T->sb, 0, SBMAX*TCMAX);
     T->head = T->cx = T->view = 0;
     T->nlines = 1;
 }
 int term_fx(int mode)
 {
     if(STREAM)return 0;
-    if (!T) return 0;
+    if (!T||!T->sb) return 0;
     if (mode == 1) return T->fx = 1;
     if (mode == 2) return T->rainbow = !T->rainbow;
     return 0;
@@ -354,7 +356,13 @@ static void term_reset(int inst)
 {
     ShellStream *saved=STREAM;STREAM=0;
     T = &terms[inst];term_last=T;
+    void *storage=T->sb;
     memset(T, 0, sizeof *T);
+    T->sb=storage?storage:kmalloc(SBMAX*TCMAX+THIST*192);
+    if(!T->sb){STREAM=saved;return;}
+    T->hist=(void *)(T->sb+SBMAX);
+    memset(T->sb,0,SBMAX*TCMAX+THIST*192);
+    mem_track("Terminal",T->sb,SBMAX*TCMAX+THIST*192);
     T->nlines = 1;
     T->cols = tdcols;
     T->rows = tdrows;
@@ -368,8 +376,17 @@ static void term_reset(int inst)
     STREAM=saved;
 }
 
+static void term_close(int inst)
+{
+    Term *t=&terms[inst];
+    kfree(t->sb);memset(t,0,sizeof *t);
+    if(term_last==t)term_last=0;
+    for(int i=0;i<THR_MAX;i++)if(term_context[i]==t)term_context[i]=0;
+}
+
 static void term_scroll(Term *t, int lines)
 {
+    if(!t->sb)return;
     int maxv = t->nlines - t->rows;
     if (maxv < 0) maxv = 0;
     t->view += lines;
@@ -381,7 +398,7 @@ void term_wheel(int inst, int dz) { term_scroll(&terms[inst], dz * 3); }
 static void term_drop(int inst,int x,int y,const char *type,const char *data)
 {
     (void)x;(void)y;
-    if(!type||!data||(strcmp(type,"file")&&strcmp(type,"file.cut")))return;
+    if(!terms[inst].sb||!type||!data||(strcmp(type,"file")&&strcmp(type,"file.cut")))return;
     win_focus(WT_TERM,inst);
     preempt_disable();
     Term *t=&terms[inst],*saved=T;
@@ -429,6 +446,7 @@ static void term_tab(void)
 static void term_key(int inst, int k)
 {
     T = &terms[inst];term_last=T;
+    if(!T->sb)return;
     if (T->fx) { T->fx = 0; tprompt(); return; }
     if (k == K_UP)   { hist_recall(-1); return; }
     if (k == K_DOWN) { hist_recall(1); return; }
@@ -508,12 +526,12 @@ static void matrix_draw(int cx, int cy, int cols, int rows)
 static void term_draw(Win *w, int cx, int cy, int cw, int ch)
 {
     Term *t = &terms[w->inst];
+    fill_rect(cx, cy, cw, ch, C_TERMBG);
+    if(!t->sb){draw_text_clip(cx+4,cy+4,"Not enough memory. Close and reopen Terminal.",C_RED,cw-8);return;}
     int cols = (cw - 8) / 8, rows = (ch - 8) / 16;
     if (cols > TCMAX) cols = TCMAX; if (cols < 8) cols = 8;
     if (rows > 44) rows = 44; if (rows < 3) rows = 3;
     t->cols = cols; t->rows = rows;
-
-    fill_rect(cx, cy, cw, ch, C_TERMBG);
 
     if (t->fx) { matrix_draw(cx, cy, cols, rows); return; }
 
@@ -607,7 +625,7 @@ int shell_exec(const char *line)
         if (reg_used[WT_TERM][i]) inst = i;
     if (inst < 0) return -1;
     T = &terms[inst];term_last=T;
-    if(T->running)return -1;
+    if(!T->sb||T->running)return -1;
     char buf[192];
     strlcpy(buf, line, sizeof buf);
     in_shell_exec = 1;
@@ -756,13 +774,23 @@ int app_type_owner(int t)
 
 void app_client_size(int t, int inst, int *w, int *h)
 {
-    if (t >= 0 && t < nregs) regs[t].client_size(inst, w, h);
+    if (t >= 0 && t < nregs) {
+        int resident = kext_current();
+        kext_enter(reg_owner[t]);
+        regs[t].client_size(inst, w, h);
+        kext_enter(resident);
+    }
     else { *w = 320; *h = 200; }
 }
 
 void app_min_client(int t, int *w, int *h)
 {
-    if (t >= 0 && t < nregs && regs[t].min_client) regs[t].min_client(w, h);
+    if (t >= 0 && t < nregs && regs[t].min_client) {
+        int resident = kext_current();
+        kext_enter(reg_owner[t]);
+        regs[t].min_client(w, h);
+        kext_enter(resident);
+    }
     else app_client_size(t, 0, w, h);
 }
 
@@ -808,7 +836,7 @@ typedef struct { u8 kind, win; int a, b, c, d, e; } AppEv;
 
 static AppEv aq[AQ_SIZE*2];
 static int aq_n;
-static u32 aq_dropped;
+static u32 aq_dropped,aq_peak;
 static struct { int active,win,type,owner,legacy,kill,cancel; u32 since,prog,io; } jobs[THR_MAX];
 static Mutex buffer_mutex=MUTEX_INIT;
 static Mutex network_mutex=MUTEX_INIT;
@@ -869,6 +897,7 @@ void app_kill_poll(void)
 }
 u32 app_q_dropped(void){return aq_dropped;}
 int app_q_depth(void){return aq_n;}
+u32 app_q_peak(void){return aq_peak;}
 void app_forget_window(int win)
 {
     u32 f=irq_save();
@@ -890,6 +919,7 @@ static int aq_post(u8 kind,int win,int a,int b,int c,int d,int e)
         }
         aq_dropped++;irq_restore(f);return 0;
     }
+    if((u32)aq_n>=aq_peak)aq_peak=aq_n+1;
     AppEv *q=&aq[aq_n++];q->kind=kind;q->win=win;q->a=a;q->b=b;q->c=c;q->d=d;q->e=e;
     irq_restore(f);return 1;
 }
@@ -981,11 +1011,14 @@ void app_worker(void)
         else if(ev.kind==AE_WHEEL)app_wheel_now(w,ev.a);
         else if(ev.kind==AE_MOUSE)app_mouse_now(w,ev.a,ev.b,ev.c,ev.d,ev.e);
         else app_job_now(w,&ev);
+        debug_event(DBG_SLOW,regs[jobs[thr_self].type].title,
+            ticks-jobs[thr_self].since,ev.kind,ev.win);
         kext_enter(-1);
         app_local_progress(0,0,-1);
         if(jobs[thr_self].legacy)app_buffer_unlock();
         jobs[thr_self].active=0;
-        win_close_flush();gui_dirty=1;
+        win_close_flush();
+        if(w->used)win_redraw(w->type,w->inst);
     }
 }
 
@@ -1032,7 +1065,7 @@ void apps_init(void)
 
     static const AppDesc dterm = {
         .title = "Terminal", .max_inst = MAXINST, .resizable = 1, .in_menu = 1,
-        .open = term_reset, .draw = term_draw, .key = term_key,
+        .open = term_reset, .close = term_close, .draw = term_draw, .key = term_key,
         .wheel = term_wheel, .client_size = term_csize, .min_client = term_min, .drop=term_drop,
 
         .live_draw = 1,

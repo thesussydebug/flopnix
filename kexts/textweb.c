@@ -5,6 +5,7 @@
 #include "browser_core.inc"
 #include "browser_transfer.inc"
 #include "buffer_core.inc"
+#include "fileopen.inc"
 #include "shspec.inc"
 #include "ui.inc"
 static const Kapi *api;
@@ -83,21 +84,14 @@ static int fetch(char *url,TwUrl *u,Transfer *d)
     }
     return 0;
 }
+static int local_cancelled(void){return closing||api->esc_pending();}
 static int read_local(const char *path,Transfer *d)
 {
-    d->limit=FS_MAXFILE;
-    say("Reading local file...");api->esc_arm();
-    for(;;){
-        int n=path[0]=='u'?api->fat_read(path+2,d->data,d->cap):api->fs_read(path+2,d->data,d->cap);
-        if(closing||api->esc_pending()){say("Stopped. The previous page is still available.");return 0;}
-        if(n<0){say("Could not read that file. The previous page is still available.");return 0;}
-        if((u32)n>d->limit){say("File exceeds this computer's Browser memory limit.");return 0;}
-        if((u32)n<d->cap){d->len=(u32)n;d->data[n]=0;return 1;}
-        u32 cap=buffer_capacity(d->cap,d->cap+1,4096,d->limit+1);
-        u8 *next=api->krealloc(d->data,cap+1);
-        if(!next){say("Not enough memory to read this file. Previous page retained.");return 0;}
-        d->data=next;d->cap=cap;api->mem_track("Browser response",next,cap+1);
-    }
+    say("Reading local file...");api->esc_arm();release(d);
+    FileData file;int r=fo_load(api,path[0]=='u',path+2,1,&file,local_cancelled);
+    if(r){say(r==FO_CANCELLED?"Stopped. The previous page is still available.":fo_error(r));return 0;}
+    d->data=file.data;d->len=file.size;d->cap=file.capacity-1;d->limit=FO_LIMIT;
+    api->mem_track("Browser response",d->data,d->cap+1);return 1;
 }
 static void save_picker(void);
 static void choose_again(int result,void *ctx)
@@ -211,7 +205,7 @@ static void home(void)
 {
     if(busy||pending.data)return;if(hpos>=0&&!at_home)history[hpos].scroll=top;
     if(!page){page=api->kmalloc(sizeof *page);if(!page){say("Not enough memory to open Browser.");return;}api->mem_track("Browser page",page,sizeof *page);}
-    const char *welcome="Browser\n\nEnter an http:// or gopher:// address, or a local path such as a:page.html or u:/page.htm. Use Open or Ctrl+O to choose a file.\n\nClick a link to open it. Right-click a link to select it for Download; click blank page space to clear the selection.\n\nGopher menus, documents, searches and downloads are supported. The Links button is shown on Gopher pages.\n\nCtrl+L selects the address. Ctrl+C copies page text. Back and Forward revisit pages.\n\nBasic HTML and embedded or inline CSS are supported. HTTPS, scripts, forms, images and external stylesheets are not supported.\n\nDownload limits are up to 128 KiB at 4 MB, 256 KiB at 8 MB, and 1 MiB at 16 MB or more, depending on free memory. Local files can be opened up to 512 KiB. Downloads saved to A: can be up to 512 KiB.";
+    const char *welcome="Browser\n\nEnter an http:// or gopher:// address, or a local path such as a:page.html or u:/page.htm. Use Open or Ctrl+O to choose a file.\n\nClick a link to open it. Right-click a link to select it for Download; click blank page space to clear the selection.\n\nGopher menus, documents, searches and downloads are supported. The Links button is shown on Gopher pages.\n\nCtrl+L selects the address. Ctrl+C copies page text. Back and Forward revisit pages.\n\nBasic HTML and embedded or inline CSS are supported. HTTPS, scripts, forms, images and external stylesheets are not supported.\n\nDownload limits are up to 128 KiB at 4 MB, 256 KiB at 8 MB, and 1 MiB at 16 MB or more, depending on free memory. Local files can be opened as available memory permits. Downloads saved to A: can be up to 512 KiB.";
     br_render(page,welcome,0,"",0);set_address("http://");field.anchor=0;field.caret=field.len;current[0]=0;top=links_view=searching=gopher=0;selected=-1;focus=at_home=1;line_cols=0;say("Enter an address, then press Enter or Go.");
 }
 static void opened(int i){(void)i;alive=1;if(!page)home();}
@@ -244,8 +238,13 @@ static void draw(Win *w,int x,int y,int cw,int ch)
     if(page&&links_view){
         for(int r=0;r<view_rows&&top+r<page->page.links;r++){int i=top+r,yy=y+72+r*16;char line[90];api->kfmt(line,sizeof line,"[%d] %s",i+1,page->page.link[i].label);if(i==selected)api->fill_rect(x+15,yy,cw-45,16,C_NAVY);api->draw_text_clip(x+18,yy,line,i==selected?C_WHITE:C_NAVY,cw-54);}
     }else if(page){
+        int off=row_offset(top);
         for(int row=top;row<top+view_rows&&row<line_count;row++){
-            int off=row_offset(row),n=line_length(row),shift=line_shift(row,cols),yy=y+72+(row-top)*16,run=br_run_at(page,off);
+            int next=row+1<line_count?tw_wrap(page->page.text,off,line_cols):page->page.len,end=next;
+            while(end>off&&(page->page.text[end-1]=='\n'||page->page.text[end-1]==' '))end--;
+            int n=end-off,run=br_run_at(page,off),align=page->runs?page->run[run].style.align:0,space=cols-n;
+            if(space<0)space=0;
+            int shift=align==1?space/2:align==2?space:0,yy=y+72+(row-top)*16;
             for(int c=0;c<n&&c+shift<cols;c++){
                 while(run+1<page->runs&&page->run[run+1].start<=off+c)run++;
                 BrStyle st=page->runs?page->run[run].style:(BrStyle){C_BLACK,C_WHITE,0,0};int link=page->runs?page->run[run].link:0,xx=x+18+(shift+c)*8;
@@ -253,11 +252,12 @@ static void draw(Win *w,int x,int y,int cw,int ch)
                 if(st.bg!=page->background)api->fill_rect(xx,yy,8,16,st.bg);
                 api->draw_char(xx,yy,page->page.text[off+c],st.fg);if(st.flags&1)api->draw_char(xx+1,yy,page->page.text[off+c],st.fg);if(st.flags&2)api->hline(xx,yy+14,8,st.fg);
             }
+            off=next;
         }
     }
     api->draw_sbar(x+cw-27,y+70,height-4,0,total,view_rows,top);ui_status(x,y,cw,ch,status);
 }
-static void scroll_by(int delta){top+=delta;if(top<0)top=0;api->gui_dirty();}
+static void scroll_by(int delta){top+=delta;if(top<0)top=0;api->win_redraw(browser_type,0);}
 static void select_link(void)
 {
     if(!page||!page->page.links)return;selected=(selected+1)%page->page.links;

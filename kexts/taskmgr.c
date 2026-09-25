@@ -4,6 +4,7 @@
 #include "shpath.h"
 #include "sbdrag.inc"
 #include "modsort.inc"
+#include "fileopen.inc"
 
 static const Kapi *api;
 static const GdiOps *gfx;
@@ -94,7 +95,7 @@ static const Win *row_at(int idx, int *id)
     return 0;
 }
 
-static void tm_tick(void *ctx) { (void)ctx; api->gui_dirty(); }
+static void tm_tick(void *ctx) { (void)ctx; api->win_redraw(my_type, 0); }
 
 static void run_task_locked(void)
 {
@@ -112,14 +113,12 @@ static void run_task_locked(void)
         if (rc) { api->kfmt(status,sizeof status,"Could not load module (E%d)",rc); goto done; }
         api->strlcpy(status,api->open_with(rel,0,0,0)==0 ? "Module opened" : "Could not open its window",sizeof status);
     } else {
-        char full[52];
-        if (drive) sh_spec_make(drive,path,full,sizeof full);
-        int n = drive ? api->fat_read(path, api->iobuf, api->iobuf_size)
-                      : api->fs_read(path, api->iobuf, api->iobuf_size);
-        if (n < 0) api->strlcpy(status, "file not found", sizeof status);
-        else if (api->open_with(base, drive ? full : path, api->iobuf, n) != 0)
+        FileData file;int r=fo_load(api,drive,path,0,&file,0);
+        if(r)api->strlcpy(status,fo_error(r),sizeof status);
+        else if (api->open_with(drive?base:path,drive?path:0,file.data,(int)file.size) != 0)
             api->strlcpy(status, "no app opens that file", sizeof status);
         else api->strlcpy(status, "opened", sizeof status);
+        fo_release(api,&file);
     }
 done:
     runlen = 0; runpath[0] = 0; newtask = 0;

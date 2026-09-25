@@ -421,6 +421,7 @@ void kmain(void)
             }
         }
         ts[nts++] = cpu_now();
+        if (gui_launch_pending()) work = 1;
         if (app_q_depth()) thr_yield();
         kext_enter(-1);
         gui_tick();      ts[nts++] = cpu_now();

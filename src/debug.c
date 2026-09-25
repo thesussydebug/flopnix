@@ -12,12 +12,13 @@ static void debug_bind(const DebugOps *ops)
 static void debug_place(int type)
 {
     for(int i=0;i<MAXWIN;i++)if(wins[i].used&&wins[i].type==type){
-        wins[i].x=4;wins[i].y=SH-TBH-wins[i].h-4;
+        wins[i].x=wins[i].w+4<=SW?4:0;wins[i].y=SH-TBH-wins[i].h-4;
         if(wins[i].y<0)wins[i].y=0;gui_dirty=1;
     }
 }
 
-const DebugCore debug_core={DEBUG_ABI,debug_bind,thread_guard_mask,fat_append,debug_place};
+const DebugCore debug_core={DEBUG_ABI,debug_bind,thread_guard_mask,fat_append,debug_place,
+    app_q_depth,app_q_dropped,app_q_peak,app_job_info};
 
 u32 debug_flags(void){return sink?sink->flags:0;}
 
@@ -37,9 +38,9 @@ void debug_disk(int usb,int write,u32 lba,u32 count,int result)
                 count|(usb?0x80000000u:0)|(write?0x40000000u:0),result);
 }
 
-void debug_draw(void)
+void debug_draw(int win)
 {
-    if(sink&&sink->flags){clear_clip();sink->draw();}
+    if(sink&&(sink->flags||win==-2)){clear_clip();sink->draw(win);}
 }
 
 int debug_done(int mode,const char *old,int result)

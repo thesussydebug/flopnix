@@ -11,15 +11,12 @@ static volatile int running;
 static int failed;
 static int phase, shell_wait;
 static volatile int phase_ready;
-static u8 saved_pixels[320 * 200];
 static volatile u8 has_res;
-
-static u8 mbuf_a[16384], mbuf_b[16384];
 
 #define TKS (*api->ticks)
 #define SPAN 50
 
-static u32 measure(int kind)
+static u32 measure(int kind, u8 *scratch)
 {
     volatile u32 acc = 1;
     int x = 0, y = 0, w = 320, h = 200;
@@ -28,22 +25,22 @@ static u32 measure(int kind)
         if (w > 320) w = 320;
         if (h > 200) h = 200;
         if (w <= 0 || h <= 0) { failed = 1; return 0; }
-        api->read_rect(x, y, w, h, saved_pixels, w);
+        api->read_rect(x, y, w, h, scratch, w);
     }
 
-    if (kind == 1) api->memcpy(mbuf_b, mbuf_a, sizeof mbuf_a);
+    if (kind == 1) api->memcpy(scratch + 16384, scratch, 16384);
     u32 start = TKS, last = start, count = 0, stuck = 0;
     do {
         if (kind == 0) {
             for (u32 i = 0; i < 4096; i++) acc += i;
-        } else if (kind == 1) api->memcpy(mbuf_b, mbuf_a, sizeof mbuf_a);
+        } else if (kind == 1) api->memcpy(scratch + 16384, scratch, 16384);
         else api->fill_rect(x, y, w, h, (u8)(count & 15));
         count++;
         u32 now = TKS;
         if (bm_stalled(now, &last, &stuck, 65536)) { failed = 1; break; }
     } while ((u32)(TKS - start) < SPAN);
     u32 elapsed = TKS - start;
-    if (kind == 2) api->blit(x, y, w, h, saved_pixels, w);
+    if (kind == 2) api->blit(x, y, w, h, scratch, w);
     (void)acc;
     if (!elapsed) { failed = 1; return 0; }
     if (kind == 0) return bm_muldiv(count, 409600, elapsed * 1000);
@@ -53,7 +50,14 @@ static u32 measure(int kind)
 
 static u32 median_measure(int kind)
 {
-    u32 a = measure(kind), b = measure(kind), c = measure(kind);
+    u32 bytes = kind == 1 ? 32768u : kind == 2 ? 320u * 200u : 0;
+    u8 *scratch = bytes ? api->kmalloc(bytes) : 0;
+    if (bytes && !scratch) { failed = 2; return 0; }
+    if (scratch) api->mem_track("Benchmark scratch", scratch, bytes);
+    if (kind == 1)
+        for (u32 i = 0; i < 16384; i++) scratch[i] = (u8)(i * 37 + 11);
+    u32 a = measure(kind, scratch), b = measure(kind, scratch), c = measure(kind, scratch);
+    api->kfree(scratch);
     return bm_median(a, b, c);
 }
 
@@ -102,7 +106,6 @@ static void run_all(void)
         return;
     }
     if (phase == 0) {
-        for (u32 i = 0; i < sizeof mbuf_a; i++) mbuf_a[i] = (u8)(i * 37 + 11);
         api->kfmt(res[0], sizeof res[0], "%s | %u MHz (guest)",
                   api->cpu_brand(), api->cpu_mhz());
     }
@@ -114,7 +117,7 @@ static void run_all(void)
     else
         api->kfmt(res[3], sizeof res[3], "Drawing       %u.%02u Mpixels/s", n / 1000, n % 1000 / 10);
     if (failed) {
-        api->strlcpy(res[1], "Measurement interrupted / clock stalled", sizeof res[1]);
+        api->strlcpy(res[1], failed == 2 ? "Not enough memory to run benchmark" : "Measurement interrupted / clock stalled", sizeof res[1]);
         res[2][0] = res[3][0] = 0;
     }
     if (++phase < 3 && !failed) return;
