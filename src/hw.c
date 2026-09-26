@@ -2,6 +2,7 @@
 #include "os.h"
 #include "ring3.inc"
 #include "ms2core.inc"
+#include "inputpost.h"
 
 volatile u32 ticks;
 
@@ -100,6 +101,8 @@ int kbd_cancel_pending(void)
     return esc;
 }
 
+int mouse_ax = -1, mouse_ay;
+
 int mouse_pop(u32 *pk, u32 *when)
 {
     if (mq_h == mq_t) return 0;
@@ -107,7 +110,26 @@ int mouse_pop(u32 *pk, u32 *when)
 
     if (when) *when = mq_time[mq_h & 31];
     mq_h++;
+    mouse_ax = -1;
+    input_synthetic(*pk, &mouse_ax, &mouse_ay);
     return 1;
+}
+
+int input_post(int mouse, u32 value)
+{
+    u32 f = irq_save();
+    int ok;
+    if (mouse) {
+        u32 t = mq_t;
+        ok = t - mq_h < 32;
+        if (ok) { mq[t & 31] = value; mq_time[t & 31] = ticks; mq_t = t + 1; }
+    } else {
+        u32 t = kq_t;
+        ok = t - kq_h < 64;
+        if (ok) { kq[t & 63] = (u8)value; kq_t = t + 1; }
+    }
+    irq_restore(f);
+    return ok;
 }
 
 static u8 mouse_wheel;

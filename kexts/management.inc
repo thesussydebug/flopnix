@@ -1,5 +1,7 @@
 #include "manager.h"
 #include "debug.h"
+#include "inputpost.h"
+#include "screentile.inc"
 
 static u32 managed_expected_size,managed_expected_crc,managed_usb_gen;
 
@@ -370,6 +372,81 @@ static void managed_screen(void)
     }
     managed_blob(buf,size);api->kfree(buf);
 }
+#define FRAME_CHUNK 4096
+static u32 *frame_hash,frame_pal;
+static u8 *frame_out,frame_map[256],frame_rgb[768];
+static int frame_w,frame_h;
+static void frame_reset(void)
+{
+    api->kfree(frame_hash);api->kfree(frame_out);
+    frame_hash=0;frame_out=0;frame_w=frame_h=0;
+}
+static void managed_frame(const char *args)
+{
+    u32 delta;
+    if(!number(&args,&delta,10)||*args||delta>1){error("Invalid frame request");return;}
+    u8 *screen=0;int w=0,h=0,pitch=0;
+    if(!api->surface_lock(&screen,&pitch,&w,&h)||!screen||w<1||h<1||w>1024||h>1024||pitch<w){
+        if(screen)api->surface_unlock();
+        error("Screen unavailable");return;
+    }
+    int tw=(w+ST_TILE-1)/ST_TILE,th=(h+ST_TILE-1)/ST_TILE;
+    if(w!=frame_w||h!=frame_h||!frame_hash){
+        frame_reset();delta=0;
+        frame_hash=api->kmalloc((u32)(tw*th)*4);frame_out=api->kmalloc(FRAME_CHUNK+ST_RECORD+800);
+        if(!frame_hash||!frame_out){frame_reset();api->surface_unlock();error("Not enough memory for the screen view");return;}
+        frame_w=w;frame_h=h;
+    }
+    for(int i=0;i<256;i++)api->palette_rgb(i,frame_rgb+i*3,frame_rgb+i*3+1,frame_rgb+i*3+2);
+    u32 palette=st_hash(frame_rgb,768,768,1);
+    int flags=(delta?0:ST_KEYFRAME)|(!delta||palette!=frame_pal?ST_PALETTE:0);
+    frame_pal=palette;
+    int used=st_header(frame_out,w,h,*api->mouse_x,*api->mouse_y,flags);
+    if(flags&ST_PALETTE){api->memcpy(frame_out+used,frame_rgb,768);used+=768;}
+    for(int ty=0;ty<th&&!io_failed;ty++){
+        int y=ty*ST_TILE,rows=h-y<ST_TILE?h-y:ST_TILE;
+        for(int tx=0;tx<tw;tx++){
+            int x=tx*ST_TILE,cols=w-x<ST_TILE?w-x:ST_TILE,t=ty*tw+tx;
+            const u8 *tile=screen+(u32)y*(u32)pitch+(u32)x;
+            if(used>FRAME_CHUNK){binary(frame_out,used);used=0;}
+            u32 hash=st_hash(tile,pitch,cols,rows);
+            if(delta&&hash==frame_hash[t])continue;
+            frame_hash[t]=hash;
+            used+=st_record(frame_out+used,t,tile,pitch,cols,rows,frame_map);
+        }
+    }
+    api->surface_unlock();
+    used+=st_end(frame_out+used);binary(frame_out,used);done(0);
+}
+static const InputOps *input_core(void)
+{
+    const InputOps *core=api->service_get("input.core");
+    return core&&core->abi==INPUT_ABI&&core->post?core:0;
+}
+static int input_send(const InputOps *core,int mouse,u32 value)
+{
+    for(int tries=0;tries<50;tries++){if(core->post(mouse,value))return 1;api->gui_pump();}
+    return 0;
+}
+static void managed_pointer(const char *args)
+{
+    u32 x,y,buttons,wheel;const InputOps *core=input_core();
+    if(!core){error("Update the kernel to control this screen");return;}
+    if(!number(&args,&x,10)||!number(&args,&y,10)||!number(&args,&buttons,10)||!number(&args,&wheel,10)||
+       *args||x>1023||y>1023||buttons>7||wheel>255){error("Invalid pointer request");return;}
+    if(!input_send(core,1,input_pointer((int)x,(int)y,(int)buttons,(int)wheel))){error("Input queue full; retry");return;}
+    mj("{\"ok\":true}");done(0);
+}
+static void managed_keys(const char *args)
+{
+    const InputOps *core=input_core();int n=(int)api->strlen(args);
+    if(!core){error("Update the kernel to control this screen");return;}
+    if(!n||(n&1)||n>64){error("Invalid key request");return;}
+    for(int i=0;i<n;i++)if(digit(args[i])<0){error("Invalid key request");return;}
+    for(int i=0;i<n;i+=2)
+        if(!input_send(core,0,(u32)(digit(args[i])<<4|digit(args[i+1])))){error("Input queue full; retry");return;}
+    mj("{\"ok\":true}");done(0);
+}
 static void managed_command(const char *args)
 {
     char action[24];int n=0;
@@ -379,11 +456,15 @@ static void managed_command(const char *args)
     if(!api->strcmp(action,"capabilities")&&!*args){
         const ManagerOps *core=api->service_get("manager.core");
         mj("{\"protocol\":1,\"max_file\":524288,\"files\":true,\"apps\":true,\"diagnostics\":true,\"screenshot\":true,\"close\":");
-        mj(core&&core->abi==MANAGER_ABI?"true}":"false}");done(0);
+        mj(core&&core->abi==MANAGER_ABI?"true":"false");
+        mj(",\"screen\":true,\"control\":");mj(input_core()?"true}":"false}");done(0);
     }else if(!api->strcmp(action,"info")&&!*args)managed_info();
     else if(!api->strcmp(action,"apps")&&!*args)managed_apps();
     else if(!api->strcmp(action,"diagnostics")&&!*args)managed_diagnostics();
     else if(!api->strcmp(action,"screenshot")&&!*args)managed_screen();
+    else if(!api->strcmp(action,"frame"))managed_frame(args);
+    else if(!api->strcmp(action,"pointer"))managed_pointer(args);
+    else if(!api->strcmp(action,"keys"))managed_keys(args);
     else if(!api->strcmp(action,"put"))managed_put(args);
     else if(!api->strcmp(action,"mkdir")||!api->strcmp(action,"rename")||!api->strcmp(action,"delete"))managed_mutate(action,args);
     else if(!api->strcmp(action,"launch")||!api->strcmp(action,"focus")||!api->strcmp(action,"close"))managed_app_action(action,args);

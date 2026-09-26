@@ -961,6 +961,7 @@ int register_service(const char *name, const void *ops)
 }
 
 #include "manager.h"
+#include "inputpost.h"
 extern int win_request_close(int index);
 
 const void *service_get(const char *name)
@@ -968,6 +969,8 @@ const void *service_get(const char *name)
     if (!name || (graphics_bit(name) & gfx_disabled)) return 0;
     static const ManagerOps manager={MANAGER_ABI,win_request_close};
     if(!strcmp(name,"manager.core"))return &manager;
+    static const InputOps input={INPUT_ABI,input_post};
+    if(!strcmp(name,"input.core"))return &input;
     static const KextFileOps files={KEXT_FILE_ABI,peek_header,fs_replace};
     if(!strcmp(name,"kext.files"))return &files;
     if(!strcmp(name,"shell.stream"))return &shell_stream_ops;

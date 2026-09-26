@@ -1,7 +1,11 @@
 /* Sends and receives packets with an AMD PCnet adapter. */
 static u16 pc_io, pc_chip;
 typedef struct { u32 addr; u16 count; volatile u16 status; u32 misc, reserved; } PcDesc;
-static PcDesc pc_rx[4] __attribute__((aligned(16)));
+static PcDesc pc_rx_static[4] __attribute__((aligned(16)));
+static PcDesc *pc_rx = pc_rx_static;
+static u8 *pc_rxb;
+static int pc_nrx = 4, pc_log = 2;
+static u16 pc_ien;
 static PcDesc pc_txring[2] __attribute__((aligned(16)));
 static struct __attribute__((packed,aligned(16))) {
     u16 mode; u8 rlen, tlen; u8 mac[6]; u16 reserved;
@@ -29,13 +33,18 @@ static int pc_init(void)
         pc_bset(32, (pc_bcr(32) & ~0x98u) | 0x20);
     pc_bset(9, pc_bcr(9) & ~3u);
     memset(&pc_block, 0, sizeof pc_block);
-    memset(pc_rx, 0, sizeof pc_rx);
+    if (pc_rx == pc_rx_static) {
+        u8 *big = nic_dma_alloc(32 * (sizeof(PcDesc) + 1536), 16);
+        if (big) { pc_rx = (PcDesc *)big; pc_rxb = big + 32 * sizeof(PcDesc); pc_nrx = 32; pc_log = 5; }
+        else pc_rxb = rtl_rx_static;
+    }
+    memset(pc_rx, 0, pc_nrx * sizeof(PcDesc));
     memset(pc_txring, 0, sizeof pc_txring);
-    pc_block.rlen = 2 << 4; pc_block.tlen = 1 << 4;
+    pc_block.rlen = (u8)(pc_log << 4); pc_block.tlen = 1 << 4;
     memcpy(pc_block.mac, net_mac, 6);
     pc_block.rx = (u32)pc_rx; pc_block.tx = (u32)pc_txring;
-    for (int i = 0; i < 4; i++) {
-        pc_rx[i].addr = (u32)(rtl_rx + i * 1536);
+    for (int i = 0; i < pc_nrx; i++) {
+        pc_rx[i].addr = (u32)(pc_rxb + i * 1536);
         pc_rx[i].count = (u16)-1536;
         pc_rx[i].status = 0x8000;
     }
@@ -61,22 +70,22 @@ static void pc_tx(const u8 *frame, u16 len)
     __asm__ volatile("" ::: "memory");
     d->status = 0x8300;
     pc_ti = (pc_ti + 1) & 1;
-    pc_set(0, 8);
+    pc_set(0, 8 | pc_ien);
 }
 static void pc_poll(void)
 {
-    for (int n = 0; n < 4; n++) {
+    for (int n = 0; n < pc_nrx; n++) {
         PcDesc *d = &pc_rx[pc_ri];
         u16 status = d->status;
         if (status & 0x8000) break;
         __asm__ volatile("" ::: "memory");
         int len = (d->misc & 0xfff) - 4;
         if ((status & 0x4300) == 0x0300 && len >= 14 && len <= 1514)
-            handle_frame(rtl_rx + pc_ri * 1536, (u16)len);
+            rx_push(pc_rxb + pc_ri * 1536, (u16)len);
         d->misc = d->reserved = 0; d->count = (u16)-1536;
         __asm__ volatile("" ::: "memory");
         d->status = 0x8000;
-        pc_ri = (pc_ri + 1) & 3;
+        pc_ri = (pc_ri + 1) % pc_nrx;
     }
-    pc_set(0, pc_csr(0) & 0x7f00);
+    pc_set(0, (pc_csr(0) & 0x7f00) | pc_ien);
 }

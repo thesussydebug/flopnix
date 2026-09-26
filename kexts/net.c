@@ -86,6 +86,14 @@ static u32 dns_second;
 #include "net_tcp.inc"
 #include "nicdesc.inc"
 #include "phylink.inc"
+#include "netq.inc"
+#define HSQ 32768
+static RxQueue rxq;
+static DnsCache dnsc;
+static int nic_irq=-1,rx_irq_on,rx_irq_stopped;
+static u32 rx_mss=536,rx_irq_calls,rx_irq_idle,rx_irq_tick,rx_irq_burst,rx_irq_empty;
+static void rx_irq_start(void);
+static u32 rx_slots(void);
 
 static u16 htons16(u16 v) { return (u16)((v << 8) | (v >> 8)); }
 
@@ -112,6 +120,13 @@ static void pci_write(u8 bus, u8 dev, u8 fn, u8 off, u32 v)
 }
 
 static u32 found_pci_id;
+static u8 found_pci_irq;
+static u8 *nic_dma_alloc(u32 size,u32 align)
+{
+    u8 *p=api->kmalloc(size+align);if(!p)return 0;
+    api->mem_track("NIC receive ring",p,size+align);
+    return (u8 *)(((u32)p+align-1)&~(align-1));
+}
 static u16 find_pci_ids(const u32 *ids, int count, int master)
 {
     for (int bus = 0; bus < 256; bus++)
@@ -134,6 +149,7 @@ static u16 find_pci_ids(const u32 *ids, int count, int master)
                             pci_write(bus, dev, fn, 0x0c, v);
                         }
                         found_pci_id = id;
+                        found_pci_irq = (u8)pci_read(bus, dev, fn, 0x3c);
                         return (u16)(bar & ~3u);
                     }
                 }
@@ -155,7 +171,9 @@ static u16 find_rtl8139(void)
     return find_pci_ids(ids, 2, 1);
 }
 
-static u8  rtl_rx[8192 + 16 + 2048] __attribute__((aligned(32)));
+static u8  rtl_rx_static[8192 + 16 + 2048] __attribute__((aligned(32)));
+static u8 *rtl_rx = rtl_rx_static;
+static u32 rtl_ring = 8192;
 static u8  rtl_txb[4][1792] __attribute__((aligned(4)));
 static int rtl_txn;
 static u16 rtl_rxoff;
@@ -167,10 +185,14 @@ static void rtl_init(void)
     for (int i = 0; i < 100000 && (inb(rio + 0x37) & 0x10); i++) ;
     for (int i = 0; i < 6; i++) net_mac[i] = inb(rio + i);
     outb(rio + 0x37, 0x0C);
+    if (rtl_rx == rtl_rx_static) {
+        u8 *big = nic_dma_alloc(32768 + 16 + 2048, 32);
+        if (big) { rtl_rx = big; rtl_ring = 32768; }
+    }
     outl(rio + 0x30, (u32)rtl_rx);
-    outw(rio + 0x3C, 0);
+    outw(rio + 0x3C, rx_irq_on ? 0x0051 : 0);
 
-    outl(rio + 0x44, (7u << 13) | (7u << 8) | 0x80 | 0x0A);
+    outl(rio + 0x44, (7u << 13) | (7u << 8) | 0x80 | 0x0A | (rtl_ring == 32768 ? 2u << 11 : 0));
     outl(rio + 0x40, 0x03000700);
     outw(rio + 0x3E, 0xFFFF);
     rtl_rxoff = 0;
@@ -191,6 +213,15 @@ static void rtl_tx(const u8 *fr, u16 len)
 }
 
 static void handle_frame(u8 *fr, u16 len);
+static void rx_push(u8 *frame, u16 len)
+{
+    if (!rxq.buf) { handle_frame(frame, len); return; }
+    if (len > RXQ_FRAME) return;
+    u8 *slot = rxq_slot(&rxq);
+    if (!slot) return;
+    memcpy(slot, frame, len);
+    rxq_commit(&rxq, len);
+}
 
 #include "pcnet.inc"
 
@@ -198,7 +229,7 @@ static u32 diag_rx, diag_tx;
 
 static void rtl_poll_hw(void)
 {
-    for (int guard = 0; guard < 8 && !(inb(rio + 0x37) & 0x01); guard++) {
+    for (int guard = 0; guard < 64 && !(inb(rio + 0x37) & 0x01); guard++) {
         u8 *p = rtl_rx + rtl_rxoff;
         u16 st   = (u16)(p[0] | ((u16)p[1] << 8));
         u16 rlen = (u16)(p[2] | ((u16)p[3] << 8));
@@ -206,9 +237,9 @@ static void rtl_poll_hw(void)
             rtl_init();
             return;
         }
-        handle_frame(p + 4, rlen - 4);
+        rx_push(p + 4, rlen - 4);
         rtl_rxoff = (u16)((rtl_rxoff + 4 + rlen + 3) & ~3u);
-        if (rtl_rxoff >= 8192) rtl_rxoff -= 8192;
+        if (rtl_rxoff >= rtl_ring) rtl_rxoff = (u16)(rtl_rxoff - rtl_ring);
         outw(rio + 0x38, (u16)(rtl_rxoff - 16));
         outw(rio + 0x3E, 0x01);
     }
@@ -216,11 +247,15 @@ static void rtl_poll_hw(void)
 
 #define T_CSR(n) (tul_io + (n) * 8)
 #define TUL_NRX 8
+#define TUL_BIG 32
 
 typedef struct { volatile u32 status, length, buffer1, buffer2; } TulDesc;
-static TulDesc tul_rxd[TUL_NRX] __attribute__((aligned(16)));
+static TulDesc tul_rxd_static[TUL_NRX] __attribute__((aligned(16)));
 static TulDesc tul_txd[2]       __attribute__((aligned(16)));
-static u8  tul_rxb[TUL_NRX][1600] __attribute__((aligned(4)));
+static u8  tul_rxb_static[TUL_NRX][1600] __attribute__((aligned(4)));
+static TulDesc *tul_rxd = tul_rxd_static;
+static u8 *tul_rxb = &tul_rxb_static[0][0];
+static int tul_nrx = TUL_NRX;
 static u8  tul_txb[2][1600]       __attribute__((aligned(4)));
 static u16 tul_io;
 static int tul_rxi, tul_txi;
@@ -289,9 +324,13 @@ static void tul_init(void)
         outl(tul_io + 0xB0, 0);
     }
 
-    for (int i = 0; i < TUL_NRX; i++) {
-        tul_rxd[i].length  = td_rx_buf(1536, i == TUL_NRX - 1);
-        tul_rxd[i].buffer1 = (u32)tul_rxb[i];
+    if (tul_rxd == tul_rxd_static) {
+        u8 *big = nic_dma_alloc(TUL_BIG * (sizeof(TulDesc) + 1600), 16);
+        if (big) { tul_rxd = (TulDesc *)big; tul_rxb = big + TUL_BIG * sizeof(TulDesc); tul_nrx = TUL_BIG; }
+    }
+    for (int i = 0; i < tul_nrx; i++) {
+        tul_rxd[i].length  = td_rx_buf(1536, i == tul_nrx - 1);
+        tul_rxd[i].buffer1 = (u32)(tul_rxb + i * 1600);
         tul_rxd[i].buffer2 = 0;
         tul_rxd[i].status  = TD_OWN;
     }
@@ -354,13 +393,13 @@ static void tul_tx(const u8 *fr, u16 len)
 
 static void tul_poll_hw(void)
 {
-    for (int guard = 0; guard < TUL_NRX; guard++) {
+    for (int guard = 0; guard < tul_nrx; guard++) {
         u32 st = tul_rxd[tul_rxi].status;
         if (st & TD_OWN) break;
         if (td_rx_ok(st))
-            handle_frame(tul_rxb[tul_rxi], (u16)td_rx_len(st));
+            rx_push(tul_rxb + tul_rxi * 1600, (u16)td_rx_len(st));
         tul_rxd[tul_rxi].status = TD_OWN;
-        tul_rxi = (tul_rxi + 1) % TUL_NRX;
+        tul_rxi = (tul_rxi + 1) % tul_nrx;
         outl(T_CSR(2), 1);
     }
 }
@@ -485,22 +524,28 @@ void net_init(void)
     net_dhcp_ok = 0;
 
     np_load(CFG, &prefs);
+    dns_cache_init(&dnsc);
+    rx_mss = tcp_mss_for_mtu(prefs.mtu);
+    if (!rxq.buf) {
+        u8 *store = api->kmalloc(RXQ_N * RXQ_FRAME);
+        if (store) { api->mem_track("NIC receive queue", store, RXQ_N * RXQ_FRAME); rxq_init(&rxq, store); }
+    }
     nic_kind = NIC_NONE; io = rio = tul_io = pc_io = 0;
     io = (!prefs.adapter || prefs.adapter == 1) ? find_ne2k_pci() : 0;
     ne_is_pci = io != 0;
-    if (io) nic_kind = NIC_NE2K;
+    if (io) { nic_kind = NIC_NE2K; nic_irq = found_pci_irq; }
     if (!nic_kind) {
         rio = (!prefs.adapter || prefs.adapter == 2) ? find_rtl8139() : 0;
-        if (rio) nic_kind = NIC_RTL8139;
+        if (rio) { nic_kind = NIC_RTL8139; nic_irq = found_pci_irq; }
     }
     if (!nic_kind) {
         tul_io = (!prefs.adapter || prefs.adapter == 3) ? find_tulip() : 0;
-        if (tul_io) nic_kind = NIC_TULIP;
+        if (tul_io) { nic_kind = NIC_TULIP; nic_irq = found_pci_irq; }
     }
     if (!nic_kind) {
         static const u32 ids[] = {0x20001022};
         pc_io = (!prefs.adapter || prefs.adapter == 4) ? find_pci_ids(ids, 1, 1) : 0;
-        if (pc_io && pc_init()) nic_kind = NIC_PCNET;
+        if (pc_io && pc_init()) { nic_kind = NIC_PCNET; nic_irq = found_pci_irq; }
     }
     if (!nic_kind && (!prefs.adapter || prefs.adapter == 5)) {
 
@@ -513,6 +558,7 @@ void net_init(void)
     else if (nic_kind == NIC_RTL8139) rtl_init();
     else if (nic_kind == NIC_TULIP) tul_init();
     else if (nic_kind != NIC_PCNET) return;
+    rx_irq_start();
 
     if (CFG->net_mode == 1) {
         if (!nc_validate(CFG->ip, CFG->mask, CFG->gw, prefs.dns, prefs.dns2)) {
@@ -709,6 +755,8 @@ static u32 net_dns_resolve_locked(const char *name, u32 timeout)
 {
     u32 ip;
     if (nw_ip_parse(name, &ip)) return ip;
+    ip = dns_cache_get(&dnsc, name, ticks);
+    if (ip) return ip;
     if (nic_kind == NIC_NONE || !timer_alive || !net_ip || (!net_dns_srv && !dns_second)) return 0;
     net_cancel = 0; dns_answer = 0;
     u32 started = ticks;
@@ -732,6 +780,7 @@ static u32 net_dns_resolve_locked(const char *name, u32 timeout)
         if (dns_answer) break;
     }
     dns_expected = 0;
+    dns_cache_put(&dnsc, name, dns_answer, ticks, 30000);
     return dns_answer;
 }
 static u32 net_dns_resolve(const char *name,u32 timeout){api->network_lock();u32 result=net_dns_resolve_locked(name,timeout);api->network_unlock();return result;}
@@ -747,11 +796,13 @@ static u32 txq_seq;
 static void (*tcp_deliver)(const u8 *d, int n);
 static volatile int tcp_event;
 static volatile u32 hs_read,hs_write;
+static struct { u32 ip, since; u16 port; u8 open; char host[128]; } ka;
 
 static void tcp_out(int flags, u32 seq, const u8 *pay, int plen)
 {
-    u8 seg[820];
-    if (plen > (int)sizeof seg - 20) return;
+    u8 seg[824];
+    int hl = (flags & TCP_SYN) ? 24 : 20;
+    if (plen > (int)sizeof seg - hl) return;
     seg[0] = (u8)(tcp_lport >> 8); seg[1] = (u8)tcp_lport;
     seg[2] = (u8)(tcp_rport >> 8); seg[3] = (u8)tcp_rport;
     seg[4] = (u8)(seq >> 24); seg[5] = (u8)(seq >> 16);
@@ -759,17 +810,18 @@ static void tcp_out(int flags, u32 seq, const u8 *pay, int plen)
     u32 ack = (flags & TCP_ACK) ? tcb.rcv_nxt : 0;
     seg[8] = (u8)(ack >> 24); seg[9] = (u8)(ack >> 16);
     seg[10] = (u8)(ack >> 8); seg[11] = (u8)ack;
-    seg[12] = 0x50;
+    seg[12] = (u8)(hl << 2);
     seg[13] = (u8)flags;
-    u32 window=8192-(hs_write-hs_read);
-    if(window>8192)window=0;
+    u32 used = hs_write - hs_read;
+    u32 window = tcp_rx_window(used > HSQ ? 0 : HSQ - used, rx_slots(), rx_mss);
     seg[14]=(u8)(window>>8);seg[15]=(u8)window;
     seg[16] = seg[17] = 0;
     seg[18] = seg[19] = 0;
-    if (plen) memcpy(seg + 20, pay, plen);
-    u16 c = nw_tcp_csum(net_ip, tcp_rip, seg, 20 + plen);
+    if (hl == 24) { seg[20] = 2; seg[21] = 4; seg[22] = (u8)(rx_mss >> 8); seg[23] = (u8)rx_mss; }
+    if (plen) memcpy(seg + hl, pay, plen);
+    u16 c = nw_tcp_csum(net_ip, tcp_rip, seg, hl + plen);
     seg[16] = (u8)(c >> 8); seg[17] = (u8)c;
-    ip_send(tcp_rip, tcp_rmac, 6, seg, (u16)(20 + plen));
+    ip_send(tcp_rip, tcp_rmac, 6, seg, (u16)(hl + plen));
 }
 
 static void tcp_act(int a, const u8 *pay, int off, int len)
@@ -787,8 +839,16 @@ static void tcp_act(int a, const u8 *pay, int off, int len)
     tcp_event |= a & (TA_CONNECTED | TA_CLOSED | TA_ERROR);
 }
 
+static void ka_drop(void)
+{
+    if (ka.open && tcb.state != TS_CLOSED && tcb.state != TS_TIME_WAIT) tcp_out(TCP_RST | TCP_ACK, tcb.snd_nxt, 0, 0);
+    if (ka.open) tcb.state = TS_CLOSED;
+    ka.open = 0;
+}
+
 static void tcp_pump(void)
 {
+    if (ka.open && (tcb.state != TS_ESTAB || (u32)(ticks - ka.since) > 500)) ka_drop();
     if (tcb.state == TS_CLOSED || tcb.state == TS_TIME_WAIT) return;
     int a = tcp_tick(&tcb, ticks);
     if (a) tcp_act(a, 0, 0, 0);
@@ -799,7 +859,8 @@ static void tcp_pump(void)
 static int (*hs_sink)(const u8 *, int, void *);
 static void *hs_ctx;
 static HttpReader hs_http;
-static int hs_raw,hs_abort;
+static int hs_raw,hs_abort,hs_info_sent;
+static NetHttpInfo *hs_info;
 static u32 hs_got;
 static volatile u8 tcp_busy;
 #include "netpush.inc"
@@ -812,8 +873,8 @@ static void http_queue(const u8 *d,int n)
 {
     if(hs_abort)return;
     u32 w=hs_write;
-    if(n<0||(u32)n>8192-(w-hs_read)){hs_abort=1;return;}
-    for(int i=0;i<n;i++)hs_queue[(w+(u32)i)&8191]=d[i];
+    if(n<0||(u32)n>HSQ-(w-hs_read)){hs_abort=1;return;}
+    for(int i=0;i<n;i++)hs_queue[(w+(u32)i)&(HSQ-1)]=d[i];
     __asm__ volatile("" ::: "memory");hs_write=w+(u32)n;
 }
 static void http_drain(void)
@@ -821,10 +882,11 @@ static void http_drain(void)
     u8 chunk[512];u32 before=hs_read;
     while(hs_read!=hs_write&&!hs_abort){
         u32 r=hs_read,n=hs_write-r;if(n>sizeof chunk)n=sizeof chunk;
-        for(u32 i=0;i<n;i++)chunk[i]=hs_queue[(r+i)&8191];
+        for(u32 i=0;i<n;i++)chunk[i]=hs_queue[(r+i)&(HSQ-1)];
         __asm__ volatile("" ::: "memory");hs_read=r+n;
         if(hs_raw){if(hs_sink&&!hs_sink(chunk,(int)n,hs_ctx))hs_abort=1;}
         else if(!hr_feed(&hs_http,chunk,(int)n,hs_sink,hs_ctx))hs_abort=1;
+        if(hs_info&&!hs_info_sent&&!hs_raw&&hs_http.state){memcpy(hs_info,&hs_http.info,sizeof *hs_info);hs_info_sent=1;}
     }
 
     u32 flags=net_irq_save();
@@ -850,8 +912,8 @@ static int net_transfer_locked(u32 ip, u16 port, const char *host,
     if(held)return -5;
     int result=-3;
     http_diag.stage=NH_PREFLIGHT;http_diag.result=0;
-    hs_queue=api->kmalloc(8192);if(!hs_queue){http_diag.result=-4;tcp_busy=0;return -4;}
-    api->mem_track("HTTP receive queue",hs_queue,8192);
+    hs_queue=api->kmalloc(HSQ);if(!hs_queue){http_diag.result=-4;tcp_busy=0;return -4;}
+    api->mem_track("HTTP receive queue",hs_queue,HSQ);
     static char req[5120];
     if(strlen(path)>500 || (host&&strlen(host)>127)) {result=-1;goto finish;}
     if(host){
@@ -859,30 +921,41 @@ static int net_transfer_locked(u32 ip, u16 port, const char *host,
         for(const char *p=path;*p;p++)if((u8)*p<=32||*p==127){result=-1;goto finish;}
         if(strlen(path)+strlen(host)+200+(body?strlen(body):0)>=sizeof req){result=-1;goto finish;}
         if(body)kfmt(req,sizeof req,"POST %s HTTP/1.1\r\nHost: %s\r\nConnection: close\r\nAccept-Encoding: identity\r\nUser-Agent: FLOPNIX\r\nContent-Type: application/x-www-form-urlencoded\r\nContent-Length: %u\r\n\r\n%s",path,host,strlen(body),body);
-        else kfmt(req,sizeof req,"GET %s HTTP/1.1\r\nHost: %s\r\nConnection: close\r\nAccept-Encoding: identity\r\nUser-Agent: FLOPNIX\r\n\r\n",path,host);
+        else kfmt(req,sizeof req,"GET %s HTTP/1.1\r\nHost: %s\r\nConnection: keep-alive\r\nAccept-Encoding: identity\r\nUser-Agent: FLOPNIX\r\n\r\n",path,host);
     }else strlcpy(req,path,sizeof req);
     net_cancel = 0;
     api->esc_arm();
-    u32 hop = ((ip & net_mask) == (net_ip & net_mask)) ? ip : net_gw;
-    http_diag.stage=NH_ARP;
-    if (!arp_resolve(hop, tcp_rmac, timeout)) goto finish;
-    http_diag.stage=NH_CONNECT;
+    int keep=0;
+    for(int attempt=0;;attempt++){
     u32 critical=net_irq_save();
-    tcp_rip = ip;
-    tcp_rport = port;
-    tcp_lport = (u16)(0xC000 | (ticks & 0x3FFF));
-    if(tcp_lport==nl.port)tcp_lport=(u16)(0xC000|((tcp_lport+1)&0x3FFF));
+    int reuse=!attempt&&host&&!body&&ka.open&&ka.ip==ip&&ka.port==port&&!strcmp(ka.host,host)&&tcb.state==TS_ESTAB;
+    if(!reuse)ka_drop();
+    ka.open=0;
+    net_irq_restore(critical);
+    if(!reuse){
+        u32 hop = ((ip & net_mask) == (net_ip & net_mask)) ? ip : net_gw;
+        http_diag.stage=NH_ARP;
+        if (!arp_resolve(hop, tcp_rmac, timeout)) goto finish;
+        http_diag.stage=NH_CONNECT;
+    }
+    critical=net_irq_save();
+    if(!reuse){
+        tcp_rip = ip;
+        tcp_rport = port;
+        tcp_lport = (u16)(0xC000 | (ticks & 0x3FFF));
+        if(tcp_lport==nl.port)tcp_lport=(u16)(0xC000|((tcp_lport+1)&0x3FFF));
+    }
     hs_sink = sink; hs_ctx = ctx;
-    hr_init(&hs_http);hs_raw=!host;hs_abort=0;
+    hr_init(&hs_http);hs_raw=!host;hs_abort=0;hs_info=info;hs_info_sent=0;
     hs_read=hs_write=0;
     hs_got = 0;
     tcp_deliver = http_deliver;
     tcp_event = 0;
 
-    tcp_act(tcp_open(&tcb, ticks ^ 0x464C4F50u, ticks), 0, 0, 0);
+    if(!reuse)tcp_act(tcp_open(&tcb, ticks ^ 0x464C4F50u, ticks), 0, 0, 0);
     net_irq_restore(critical);
     u32 t0 = ticks;
-    while (!(tcp_event & (TA_CONNECTED | TA_ERROR))) {
+    while (!reuse && !(tcp_event & (TA_CONNECTED | TA_ERROR))) {
         if (net_cancel || (u32)(ticks - t0) > timeout) { tcb.state = TS_CLOSED; goto fail3; }
         net_wait();
     }
@@ -913,6 +986,16 @@ static int net_transfer_locked(u32 ip, u16 port, const char *host,
         net_irq_restore(critical);
     }
     http_drain();
+    if(reuse&&!hs_got&&!net_cancel&&!api->esc_pending()&&(hs_abort||(tcp_event&(TA_CLOSED|TA_ERROR)))){
+        critical=net_irq_save();
+        if(tcb.state!=TS_CLOSED&&tcb.state!=TS_TIME_WAIT)tcp_out(TCP_RST|TCP_ACK,tcb.snd_nxt,0,0);
+        tcb.state=TS_CLOSED;
+        net_irq_restore(critical);
+        continue;
+    }
+    break;
+    }
+    keep=host&&!body&&!hs_abort&&!(tcp_event&(TA_CLOSED|TA_ERROR))&&hr_reusable(&hs_http)&&tcb.state==TS_ESTAB;
 
     if(info)memcpy(info,&hs_http.info,sizeof *info);
     result=hs_abort||(tcp_event&TA_ERROR)||(!hs_raw&&!hr_finish(&hs_http))?(hs_http.error?hs_http.error:-4):hs_raw?0:hs_http.info.status;
@@ -922,11 +1005,14 @@ fail3:
 finish:
     http_diag.result=result;if(result>=0)http_diag.stage=NH_COMPLETE;
     ;u32 finish_flags=net_irq_save();
-    if(tcb.state!=TS_CLOSED&&tcb.state!=TS_TIME_WAIT)tcp_out(TCP_RST|TCP_ACK,tcb.snd_nxt,0,0);
-    tcb.state=TS_CLOSED;
+    if(result>=0&&keep){ka.open=1;ka.ip=ip;ka.port=port;ka.since=ticks;strlcpy(ka.host,host,sizeof ka.host);}
+    else {
+        if(tcb.state!=TS_CLOSED&&tcb.state!=TS_TIME_WAIT)tcp_out(TCP_RST|TCP_ACK,tcb.snd_nxt,0,0);
+        tcb.state=TS_CLOSED;
+    }
     tcp_deliver = 0;
     txq = 0;
-    hs_sink=0;hs_ctx=0;
+    hs_sink=0;hs_ctx=0;hs_info=0;
     net_irq_restore(finish_flags);
     api->kfree(hs_queue);hs_queue=0;tcp_busy=0;
     return result;
@@ -966,6 +1052,7 @@ static void dhcp_clear_address(void)
 {
     net_ip = net_mask = net_gw = net_dns_srv = dns_second = 0;
     net_dhcp_ok = 0;
+    dns_cache_init(&dnsc);
     for (int i = 0; i < 4; i++) arpc[i].valid = 0;
     tcb.state = TS_CLOSED;
     tcp_event |= TA_ERROR;
@@ -1220,21 +1307,9 @@ int net_dhcp(u32 timeout){api->network_lock();int result=net_dhcp_locked(timeout
 
 static void tcp_pump(void);
 
-static void nic_poll(void)
+static void ne2k_pull(void)
 {
-    if (nic_kind == NIC_NONE) return;
-    if (nic_kind == NIC_PCNET) {
-        pc_poll(); return;
-    }
-    if (nic_kind == NIC_RTL8139) {
-        rtl_poll_hw();
-        return;
-    }
-    if (nic_kind == NIC_TULIP) {
-        tul_poll_hw();
-        return;
-    }
-    for (int guard = 0; guard < 8; guard++) {
+    for (int guard = 0; guard < 64; guard++) {
         outb(io + CR, 0x62);
         u8 curr = inb(io + 7);
         outb(io + CR, 0x22);
@@ -1257,20 +1332,124 @@ static void nic_poll(void)
 
         static u8 pkt[1600];
         u16 dlen = plen - 4;
+        u8 *buf = rxq.buf ? (dlen <= RXQ_FRAME ? rxq_slot(&rxq) : 0) : pkt;
         u16 addr = ((u16)next << 8) + 4;
         u16 tail = ((u16)PG_RSTOP << 8) - addr;
-        if (dlen <= tail) {
-            rd_remote(addr, pkt, dlen);
-        } else {
-            rd_remote(addr, pkt, tail);
-            rd_remote((u16)PG_RSTART << 8, pkt + tail, dlen - tail);
+        if (buf && dlen <= tail) {
+            rd_remote(addr, buf, dlen);
+        } else if (buf) {
+            rd_remote(addr, buf, tail);
+            rd_remote((u16)PG_RSTART << 8, buf + tail, dlen - tail);
         }
-        handle_frame(pkt, dlen);
+        if (buf == pkt) handle_frame(pkt, dlen);
+        else if (buf) rxq_commit(&rxq, dlen);
 
         u8 nb = (nextpg == PG_RSTART) ? PG_RSTOP - 1 : nextpg - 1;
         outb(io + BNRY, nb);
         outb(io + ISR, 0x01);
     }
+}
+
+static void nic_pull(void)
+{
+    if (nic_kind == NIC_PCNET) pc_poll();
+    else if (nic_kind == NIC_RTL8139) rtl_poll_hw();
+    else if (nic_kind == NIC_TULIP) tul_poll_hw();
+    else if (nic_kind == NIC_NE2K) ne2k_pull();
+}
+
+static void nic_poll(void)
+{
+    if (nic_kind == NIC_NONE) return;
+    u32 f = net_irq_save();
+    nic_pull();
+    u16 len; u8 *frame;
+    for (int n = 0; n < RXQ_N && (frame = rxq_peek(&rxq, &len)); n++) {
+        handle_frame(frame, len);
+        rxq_pop(&rxq);
+    }
+    net_irq_restore(f);
+}
+
+static void rx_irq_mask(void)
+{
+    if (nic_kind == NIC_TULIP) outl(T_CSR(7), 0);
+    else if (nic_kind == NIC_RTL8139) outw(rio + 0x3C, 0);
+    else if (nic_kind == NIC_PCNET) { pc_ien = 0; pc_set(3, 0x5f00); pc_set(0, 0); }
+    else if (nic_kind == NIC_NE2K) outb(io + IMR, 0);
+}
+
+static void rx_irq_stop(void)
+{
+    if (!rx_irq_on) return;
+    rx_irq_mask();
+    api->irq_unregister(nic_irq);
+    rx_irq_on = 0; rx_irq_stopped = 1;
+}
+
+static int nic_isr_pull(void)
+{
+    if (nic_kind == NIC_TULIP) {
+        u32 st = inl(T_CSR(5)) & 0x0001FFFFu;
+        if (!st) return 0;
+        outl(T_CSR(5), st);
+        tul_poll_hw();
+        if (st & 0x80) outl(T_CSR(2), 1);
+        return 1;
+    }
+    if (nic_kind == NIC_RTL8139) {
+        u16 st = inw(rio + 0x3E);
+        if (!st || st == 0xFFFF) return 0;
+        outw(rio + 0x3E, st);
+        rtl_poll_hw();
+        return 1;
+    }
+    if (nic_kind == NIC_PCNET) {
+        if (!(pc_csr(0) & 0x0080)) return 0;
+        pc_poll();
+        return 1;
+    }
+    if (nic_kind == NIC_NE2K) {
+        u8 st = inb(io + ISR) & 0x11;
+        if (!st) return 0;
+        outb(io + ISR, st);
+        ne2k_pull();
+        return 1;
+    }
+    return 0;
+}
+
+static void nic_isr(void)
+{
+    rx_irq_calls++;
+    if (rx_irq_tick != ticks) { rx_irq_tick = ticks; rx_irq_burst = 0; }
+    if (++rx_irq_burst > 2000) { rx_irq_stop(); return; }
+    if (nic_isr_pull()) { rx_irq_idle = 0; return; }
+    rx_irq_empty++;
+    if (++rx_irq_idle > 5000) rx_irq_stop();
+}
+
+static void rx_irq_start(void)
+{
+    int irq = nic_irq;
+    if (rx_irq_on || !rxq.buf || irq < 3 || irq > 15 || irq == 6 || irq == 8 ||
+        irq == 12 || irq == 13 || (nic_kind == NIC_NE2K && !ne_is_pci)) return;
+    u32 f = net_irq_save();
+    if (api->irq_register(irq, nic_isr) == 0) {
+        rx_irq_on = 1;
+        if (nic_kind == NIC_TULIP) outl(T_CSR(7), 0x000180C0u);
+        else if (nic_kind == NIC_RTL8139) outw(rio + 0x3C, 0x0051);
+        else if (nic_kind == NIC_PCNET) { pc_ien = 0x40; pc_set(3, 0x5b00); pc_set(0, 0x40); }
+        else outb(io + IMR, 0x11);
+    }
+    net_irq_restore(f);
+}
+
+static u32 rx_slots(void)
+{
+    u32 slots = nic_kind == NIC_TULIP ? (u32)tul_nrx : nic_kind == NIC_PCNET ? (u32)pc_nrx :
+                nic_kind == NIC_RTL8139 ? rtl_ring / 1600 : (u32)(PG_RSTOP - PG_RSTART) * 256 / 1600;
+    return rxq.buf && slots > RXQ_N ? RXQ_N : slots;
 }
 
 static void net_poll_inner(void)
@@ -1479,12 +1658,17 @@ static void cmd_netdiag(const char *args)
             pr(b);
         }
         kfmt(b, sizeof b, "  rings  rx slot %d/%d, tx slot %d\n",
-                  tul_rxi, TUL_NRX, tul_txi);
+                  tul_rxi, tul_nrx, tul_txi);
         pr(b);
     }
 
     kfmt(b, sizeof b, "  frames rx %u  tx %u  arp entries %u\n",
               (unsigned)diag_rx, (unsigned)diag_tx, (unsigned)arp_count());
+    pr(b);
+    if (rx_irq_on) kfmt(b, sizeof b, "  rx     interrupt IRQ %d, %u calls (%u empty); queue peak %u/%d, %u dropped\n",
+                        nic_irq, rx_irq_calls, rx_irq_empty, rxq.peak, RXQ_N, rxq.drops);
+    else kfmt(b, sizeof b, "  rx     polled%s; %u slots; queue peak %u/%d, %u dropped\n",
+              rx_irq_stopped ? " (interrupts stopped: storm)" : "", rx_slots(), rxq.peak, RXQ_N, rxq.drops);
     pr(b);
     kfmt(b, sizeof b, "  ip     %d.%d.%d.%d  (%s)\n",
               net_ip & 0xFF, (net_ip >> 8) & 0xFF, (net_ip >> 16) & 0xFF,

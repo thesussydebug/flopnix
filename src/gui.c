@@ -25,6 +25,7 @@ int mx, my;
 u8 gui_dirty;
 u8 gui_blink;
 u8 gui_up;
+static u8 bar_dirty;
 
 static char fault_banner[128];
 static u32  fault_banner_until;
@@ -109,8 +110,6 @@ int drag_start(const char *type, const char *data)
 static char clockstr[12];
 static char datestr[12];
 
-#define BORDER 3
-#define TITLEH 18
 #define CLIX(v) ((v)->x + BORDER)
 #define CLIY(v) ((v)->y + BORDER + TITLEH + 1)
 #define CLIW(v) ((v)->w - 2 * BORDER)
@@ -252,7 +251,7 @@ static int tb_btnw(void)
 
 int win_is_focused(Win *w) { int f = focused(); return f >= 0 && &wins[f] == w; }
 
-int win_is_hovered(Win *w)
+static WhRect *win_rects(void)
 {
     static WhRect r[MAXWIN];
     for (int i = 0; i < MAXWIN; i++) {
@@ -260,8 +259,18 @@ int win_is_hovered(Win *w)
         r[i].w = wins[i].used ? wins[i].w : 0;
         r[i].h = wins[i].used ? wins[i].h : 0;
     }
-    int top = wh_top_at(zord, nz, r, mx, my);
+    return r;
+}
+
+int win_is_hovered(Win *w)
+{
+    int top = wh_top_at(zord, nz, win_rects(), mx, my);
     return top >= 0 && &wins[top] == w;
+}
+
+static int hover_at(int x, int y)
+{
+    return wh_hover(zord, nz, win_rects(), x, y, SH - TBH, tb_btnw(), nz, SW - 162);
 }
 
 int control_state(int x, int y, int w, int h)
@@ -401,7 +410,8 @@ void present_done(void) { present_thr = -1; presenting = 0; }
 
 void present(void)
 {
-    if (!present_try()) { gui_dirty = 1; return; }
+    gui_dirty = 1;
+    if (!present_try()) return;
     gui_compose();
     flip();
     present_done();
@@ -637,11 +647,17 @@ void gui_tick(void)
         gui_dirty = 1;
     }
     static u32 last, lasta;
+    static u8 beat;
     if ((u32)(ticks - last) >= 50) {
         last = ticks;
         gui_blink ^= 1;
+        char sec = clockstr[7];
         update_clock();
-        gui_invalidate();
+        if (tick_full(++beat, ov_draw || dnd_on)) gui_dirty = 1;
+        else {
+            if (clockstr[7] != sec) bar_dirty = 1;
+            if (focused() >= 0) win_repaint(zord[nz - 1]);
+        }
     }
     if (!ss_active && CFG->ss_enable &&
         (u32)(ticks - last_input) > (u32)CFG->ss_secs * 100) {
@@ -712,7 +728,7 @@ int gui_pump(void)
     gui_tick();
 
     static u32 pump_last;
-    if (gui_dirty && flip_due(ticks, &pump_last, timer_alive) && present_try()) {
+    if (gui_frame_due() && flip_due(ticks, &pump_last, timer_alive) && present_try()) {
         preempt_disable();
         gui_compose();
         preempt_enable();
@@ -847,6 +863,7 @@ void gui_mouse(int dx, int dy, u8 btn, u32 when)
     int sp = CFG->mouse_speed ? CFG->mouse_speed : 2;
     mx += dx * sp / 2;
     my += dy * sp / 2;
+    if (mouse_ax >= 0) { mx = mouse_ax; my = mouse_ay; }
     if (mx < 0) mx = 0;
     if (my < 0) my = 0;
     if (mx >= SW) mx = SW - 1;
@@ -856,10 +873,13 @@ void gui_mouse(int dx, int dy, u8 btn, u32 when)
     int lpress = (btn & 1) && !(was & 1);
     int rpress = (btn & 2) && !(was & 2);
     if(mx==oldx&&my==oldy&&!btn&&!was)return;
-    if(nz>0&&((!btn&&!was)||(btn==1&&was==1&&press_win==zord[nz-1]))&&in(oldx,oldy,wins[zord[nz-1]].x,wins[zord[nz-1]].y,wins[zord[nz-1]].w,wins[zord[nz-1]].h)&&
-       in(mx,my,wins[zord[nz-1]].x,wins[zord[nz-1]].y,wins[zord[nz-1]].w,wins[zord[nz-1]].h))
-        win_repaint(zord[nz-1]);
-    else gui_dirty=1;
+    int hov=btn||was||menu_open||ov_draw||dnd_on?-1:hover_at(mx,my);
+    if(hov<0||hov!=hover_at(oldx,oldy)){
+        if(nz>0&&((!btn&&!was)||(btn==1&&was==1&&press_win==zord[nz-1]))&&in(oldx,oldy,wins[zord[nz-1]].x,wins[zord[nz-1]].y,wins[zord[nz-1]].w,wins[zord[nz-1]].h)&&
+           in(mx,my,wins[zord[nz-1]].x,wins[zord[nz-1]].y,wins[zord[nz-1]].w,wins[zord[nz-1]].h))
+            win_repaint(zord[nz-1]);
+        else gui_dirty=1;
+    }
 
     if (lpress) {
         press_x = mx; press_y = my;
@@ -1154,50 +1174,8 @@ static void draw_floppy(int x, int y, u8 col)
     bevel(x, y, 60, 54, 0);
 }
 
-void gui_frame_state(FrameState *s)
+static void draw_taskbar(void)
 {
-    s->dirty = gui_dirty;
-    s->mx = mx;
-    s->my = my;
-    s->blink = gui_blink;
-    s->ss = ss_active;
-}
-
-void gui_compose(void)
-{
-    static CursorBuf cursor;
-    int partial = gui_dirty == 2 && redraw_window >= 0 && nz > 0 &&
-        zord[nz-1] == redraw_window && wins[redraw_window].x>=0 && wins[redraw_window].y>=0 &&
-        wins[redraw_window].x+wins[redraw_window].w<=SW && wins[redraw_window].y+wins[redraw_window].h<=SH-TBH && !ss_active && !ov_draw && !menu_open &&
-        !busy_on && !dnd_on && !drect_on && at_k < 0 &&
-        !(fault_banner[0] && ticks < fault_banner_until);
-    gui_dirty = 0;
-    clear_clip();
-    cursorbuf_restore(&cursor,BACKBUF,SW);
-    debug_draw(-2);
-    if (partial) {
-        draw_win(redraw_window,focused()==redraw_window);
-        debug_draw(redraw_window);
-        cursorbuf_save(&cursor,BACKBUF,SW,SW,SH,mx,my);
-        draw_cursor(mx,my);
-        return;
-    }
-    if (ss_active) {
-        FAULT_GUARD(ss_draw(), { ss_active = 0; });
-        if (ss_active) {debug_draw(-1);return;}
-    }
-    fill_rect(0, 0, SW, SH, C_DESK);
-    draw_text(8, 6, OS_NAME " " OS_VER, C_G0 + 6);
-    desk_draw();
-
-    WhRect rects[MAXWIN];
-    for(int i=0;i<MAXWIN;i++){
-        rects[i].x=wins[i].x;rects[i].y=wins[i].y;
-        rects[i].w=wins[i].used?wins[i].w:0;rects[i].h=wins[i].h;
-    }
-    for (int k = 0; k < nz; k++)
-        if(!wh_covered(zord,nz,rects,k,SW,SH-TBH))draw_win(zord[k], k == nz - 1);
-
     fill_rect(0, SH - TBH, SW, TBH, C_FACE);
     hline(0, SH - TBH, SW, C_LIGHT);
     int mhov = menu_open || in(mx, my, 2, SH - TBH + 3, 56, 22);
@@ -1222,6 +1200,59 @@ void gui_compose(void)
     panel(SW - 158, SH - TBH + 3, 156, 22, 1);
     draw_text(SW - 152, SH - TBH + 7, datestr, C_BLACK);
     draw_text(SW - 66, SH - TBH + 7, clockstr, C_BLACK);
+}
+
+static int shown_x, shown_y;
+static u8 shown_blink;
+int gui_frame_due(void)
+{
+    return gui_dirty || bar_dirty || ss_active || mx != shown_x || my != shown_y || gui_blink != shown_blink;
+}
+
+void gui_compose(void)
+{
+    static CursorBuf cursor;
+    int partial = gui_dirty == 2 && redraw_window >= 0 && nz > 0 &&
+        zord[nz-1] == redraw_window && wins[redraw_window].x>=0 && wins[redraw_window].y>=0 &&
+        wins[redraw_window].x+wins[redraw_window].w<=SW && wins[redraw_window].y+wins[redraw_window].h<=SH-TBH && !ss_active && !ov_draw && !menu_open &&
+        !busy_on && !dnd_on && !drect_on && at_k < 0 &&
+        !(fault_banner[0] && ticks < fault_banner_until);
+    int pointer_only = !gui_dirty && !ss_active, bar = bar_dirty, x0 = cursor.x, y0 = cursor.y, h0 = cursor.h;
+    gui_dirty = bar_dirty = 0;
+    shown_x = mx; shown_y = my; shown_blink = gui_blink;
+    clear_clip();
+    cursorbuf_restore(&cursor,BACKBUF,SW);
+    if (pointer_only) {
+        if (bar) draw_taskbar();
+        cursorbuf_save(&cursor,BACKBUF,SW,SW,SH,mx,my);
+        draw_cursor(mx,my);
+        int y1;
+        frame_band(x0, y0, h0, cursor.x, cursor.y, cursor.h, bar ? SH - TBH : SH, SH, &y0, &y1);
+        flip_rows(y0, y1);
+        return;
+    }
+    debug_draw(-2);
+    if (partial) {
+        draw_win(redraw_window,focused()==redraw_window);
+        if (bar) draw_taskbar();
+        debug_draw(redraw_window);
+        cursorbuf_save(&cursor,BACKBUF,SW,SW,SH,mx,my);
+        draw_cursor(mx,my);
+        return;
+    }
+    if (ss_active) {
+        FAULT_GUARD(ss_draw(), { ss_active = 0; });
+        if (ss_active) {debug_draw(-1);return;}
+    }
+    fill_rect(0, 0, SW, SH, C_DESK);
+    draw_text(8, 6, OS_NAME " " OS_VER, C_G0 + 6);
+    desk_draw();
+
+    WhRect *rects = win_rects();
+    for (int k = 0; k < nz; k++)
+        if(!wh_covered(zord,nz,rects,k,SW,SH-TBH))draw_win(zord[k], k == nz - 1);
+
+    draw_taskbar();
 
     if (menu_open) draw_menu();
     if (ov_draw) {
@@ -1295,7 +1326,7 @@ void gui_compose(void)
 
 void busy_set(const char *title, const char *msg, int frac256)
 {
-    if(app_current_window()>=0){app_local_progress(title,msg,frac256);gui_pump();return;}
+    if(app_current_window()>=0){app_note_io();app_local_progress(title,msg,frac256);gui_pump();return;}
     strlcpy(busy_title, title, sizeof busy_title);
     strlcpy(busy_msg, msg, sizeof busy_msg);
     busy_frac = frac256;

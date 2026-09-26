@@ -4,7 +4,7 @@
 enum { NL_IDLE, NL_SYN, NL_OPEN, NL_FIN };
 static struct {
     u16 port, peer_port, window, mss;
-    u32 ip, local_ip, serial, id, una, next, receive, stamp, activity;
+    u32 ip, local_ip, serial, id, una, next, high, receive, stamp, activity;
     u32 read, received, written, sent;
     u8 mac[6], rx[NL_RX], tx[NL_TX];
     int state, tries, closing, peer_closed;
@@ -42,27 +42,35 @@ static void nl_drop(int reset)
     nl.state=NL_IDLE;nl.id=0;nl.closing=nl.peer_closed=0;
     nl.read=nl.received=nl.written=nl.sent=0;
 }
-static void nl_data(void)
+static void nl_segment(u32 offset,u32 n)
 {
-    u8 data[NL_MSS];u32 n=nl.next-nl.una;
-    if(n>NL_MSS)n=NL_MSS;
-    for(u32 i=0;i<n;i++)data[i]=nl.tx[(nl.sent+i)&(NL_TX-1)];
-    if(n)nl_out(TCP_ACK|TCP_PSH,nl.una,data,(int)n);
+    u8 data[NL_MSS];
+    for(u32 i=0;i<n;i++)data[i]=nl.tx[(nl.sent+offset+i)&(NL_TX-1)];
+    nl_out(TCP_ACK|TCP_PSH,nl.una+offset,data,(int)n);
 }
 static void nl_pump(void)
 {
     if(nl.state==NL_IDLE)return;
     if(net_ip!=nl.local_ip||(u32)(ticks-nl.activity)>60000u){nl_drop(1);return;}
-    if(nl.state==NL_OPEN&&nl.next==nl.una){
-        u32 count=nl.written-nl.sent;
-        if(count&&nl.window){
-            if(count>nl.mss)count=nl.mss;
-            if(count>nl.window)count=nl.window;
-            nl.next+=count;nl.stamp=ticks;nl.tries=0;nl_data();
-        }else if(!count&&nl.closing){
-            nl.state=NL_FIN;nl.next++;nl.stamp=ticks;nl.tries=0;
+    if(nl.state==NL_OPEN){
+        u32 flight=nl.next-nl.una,queued=nl.written-nl.sent;int fresh=!flight;
+        if(flight&&(u32)(ticks-nl.stamp)>100u){
+            nl.stamp=ticks;if(++nl.tries>=8){nl_drop(1);return;}
+            nl.next=nl.una;flight=0;
+        }
+        while(flight<queued&&flight<nl.window){
+            u32 n=queued-flight;
+            if(n>nl.mss)n=nl.mss;
+            if(n>nl.window-flight)n=nl.window-flight;
+            if(fresh){nl.stamp=ticks;nl.tries=0;fresh=0;}
+            nl_segment(flight,n);flight+=n;nl.next+=n;
+            if((i32)(nl.next-nl.high)>0)nl.high=nl.next;
+        }
+        if(flight)return;
+        if(!queued&&nl.closing){
+            nl.state=NL_FIN;nl.next++;nl.high=nl.next;nl.stamp=ticks;nl.tries=0;
             nl_out(TCP_FIN|TCP_ACK,nl.una,0,0);
-        }else if(count&&(u32)(ticks-nl.stamp)>100u){
+        }else if(queued&&(u32)(ticks-nl.stamp)>100u){
             nl.stamp=ticks;nl_out(TCP_ACK,nl.next-1,0,0);
         }
         return;
@@ -71,8 +79,7 @@ static void nl_pump(void)
     nl.stamp=ticks;
     if(++nl.tries>=8){nl_drop(1);return;}
     if(nl.state==NL_SYN)nl_out(TCP_SYN|TCP_ACK,nl.una,0,0);
-    else if(nl.state==NL_FIN)nl_out(TCP_FIN|TCP_ACK,nl.una,0,0);
-    else nl_data();
+    else nl_out(TCP_FIN|TCP_ACK,nl.una,0,0);
 }
 static int nl_input(u32 ip,const u8 *mac,const u8 *p,int length)
 {
@@ -87,7 +94,7 @@ static int nl_input(u32 ip,const u8 *mac,const u8 *p,int length)
         if((flags&(TCP_SYN|TCP_ACK|TCP_RST|TCP_FIN))!=TCP_SYN)return 1;
         nl.ip=ip;nl.local_ip=net_ip;nl.peer_port=peer;memcpy(nl.mac,mac,6);
         nl.receive=seq+1;nl.una=(ticks*1103515245u)^(++nl.serial*2654435761u);
-        nl.next=nl.una+1;nl.state=NL_SYN;nl.stamp=nl.activity=ticks;
+        nl.next=nl.high=nl.una+1;nl.state=NL_SYN;nl.stamp=nl.activity=ticks;
         nl.tries=0;nl.mss=NL_MSS;
         for(int i=20;i<header;){
             int option=p[i++];if(!option)break;if(option==1)continue;
@@ -109,12 +116,15 @@ static int nl_input(u32 ip,const u8 *mac,const u8 *p,int length)
     if((flags&TCP_SYN)||!(flags&TCP_ACK)){nl_out(TCP_ACK,nl.next,0,0);return 1;}
     u32 room=NL_RX-(nl.received-nl.read);
     if((i32)(seq-nl.receive)>0||(i32)(seq+(u32)count-nl.receive)<0||
-       (i32)(ack-nl.next)>0){nl_out(TCP_ACK,nl.next,0,0);return 1;}
+       (i32)(ack-nl.high)>0){nl_out(TCP_ACK,nl.next,0,0);return 1;}
     nl.activity=ticks;
     if(tcp_seq_le(nl.una,ack)){
         nl.window=(u16)(((u16)p[14]<<8)|p[15]);
         if(nl.state==NL_FIN){if(ack==nl.next){nl_drop(0);return 1;}}
-        else if(ack!=nl.una){nl.sent+=ack-nl.una;nl.una=ack;nl.tries=0;nl.stamp=ticks;}
+        else if(ack!=nl.una){
+            nl.sent+=ack-nl.una;nl.una=ack;nl.tries=0;nl.stamp=ticks;
+            if((i32)(nl.next-ack)<0)nl.next=ack;
+        }
     }
     if(nl.state==NL_OPEN&&!nl.peer_closed){
         u32 skip=nl.receive-seq;

@@ -18,6 +18,7 @@ static int enabled,machine,used,overflow,output_n,io_failed,servicing,stop_reque
 static u16 port=23;
 static int upload_managed;
 static void managed_commit(void);
+static void frame_reset(void);
 
 #define ticks (*api->ticks)
 
@@ -49,7 +50,7 @@ static void upload_clear(void)
 }
 static void reset(void)
 {
-    upload_clear();api->memset(line,0,sizeof line);api->memset(&telnet,0,sizeof telnet);
+    upload_clear();frame_reset();api->memset(line,0,sizeof line);api->memset(&telnet,0,sizeof telnet);
     api->memset(&stream,0,sizeof stream);stream.putc=emit;
     used=overflow=machine=output_n=io_failed=0;
 }
@@ -65,6 +66,12 @@ static void hexline(const char *prefix,const u8 *data,int n)
     while(*prefix)encoded[at++]=*prefix++;
     for(int i=0;i<n;i++){encoded[at++]=digits[data[i]>>4];encoded[at++]=digits[data[i]&15];}
     encoded[at++]='\r';encoded[at++]='\n';raw((const u8 *)encoded,at);
+}
+static void binary(const u8 *data,int n)
+{
+    char b[24];int start=0;api->kfmt(b,sizeof b,"@bin %d\r\n",n);text(b);
+    for(int i=0;i<n;i++)if(data[i]==255){raw(data+start,i-start+1);raw(data+i,1);start=i+1;}
+    raw(data+start,n-start);
 }
 static void flush(void)
 {

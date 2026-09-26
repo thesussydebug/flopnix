@@ -5,6 +5,7 @@ typedef struct {
     char header[4096],line[256];
     u32 received,left,trailer;
     int hn,ln,state,error,interim,chunked;
+    u8 http11,close_hdr,keep_hdr;
 } HttpReader;
 static int hr_lower(int c){return c>='A'&&c<='Z'?c+32:c;}
 static int hr_length(const char *s){int n=0;while(s[n])n++;return n;}
@@ -31,6 +32,15 @@ static void hr_init(HttpReader *r)
 {
     u8 *p=(u8 *)r;for(u32 i=0;i<sizeof *r;i++)p[i]=0;
 }
+static int hr_has_token(const char *s,int n,const char *token)
+{
+    int t=hr_length(token);
+    for(int i=0;i+t<=n;i++){
+        if((i&&s[i-1]!=','&&s[i-1]!=' '&&s[i-1]!='\t')||(i+t<n&&s[i+t]!=','&&s[i+t]!=' '&&s[i+t]!='\t'))continue;
+        int k=0;while(k<t&&hr_lower((u8)s[i+k])==token[k])k++;if(k==t)return 1;
+    }
+    return 0;
+}
 static int hr_headers(HttpReader *r)
 {
     char *h=r->header;int end=0;while(end<r->hn&&h[end]!='\r')end++;
@@ -38,7 +48,7 @@ static int hr_headers(HttpReader *r)
     int status=0;for(int i=9;i<12;i++){if(h[i]<'0'||h[i]>'9')return 0;status=status*10+h[i]-'0';}
     if(status<100||(end>12&&h[12]!=' ')||end+1>=r->hn||h[end+1]!='\n')return 0;
     for(int i=12;i<end;i++)if(((u8)h[i]<32&&h[i]!='\t')||h[i]==127)return 0;
-    r->info.status=status;
+    r->info.status=status;r->http11=h[7]=='1';r->close_hdr=r->keep_hdr=0;
     int have_length=0,have_te=0;
     for(int p=end+2;p<r->hn-2;){
         end=p;while(end<r->hn&&h[end]!='\r')end++;
@@ -57,6 +67,9 @@ static int hr_headers(HttpReader *r)
             if(have_te||!hr_equal(h+a,n,"chunked"))return 0;have_te=1;r->chunked=1;
         }else if(hr_equal(h+p,colon-p,"content-type")){
             if(!hr_copy(r->info.type,sizeof r->info.type,h+a,n))return 0;
+        }else if(hr_equal(h+p,colon-p,"connection")){
+            if(hr_has_token(h+a,n,"close"))r->close_hdr=1;
+            if(hr_has_token(h+a,n,"keep-alive"))r->keep_hdr=1;
         }else if(hr_equal(h+p,colon-p,"location")){
             if(!hr_copy(r->info.location,sizeof r->info.location,h+a,n))return 0;
         }else if(hr_equal(h+p,colon-p,"content-encoding")){
@@ -119,3 +132,4 @@ static int hr_feed(HttpReader *r,const u8 *s,int n,int (*sink)(const u8 *,int,vo
     return 1;
 }
 static int hr_finish(const HttpReader *r){return !r->error&&(r->state==7||r->state==2);}
+static int hr_reusable(const HttpReader *r){return r->state==7&&!r->error&&!r->close_hdr&&(r->http11||r->keep_hdr);}

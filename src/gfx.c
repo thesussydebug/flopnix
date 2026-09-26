@@ -563,15 +563,20 @@ void draw_cursor(int x, int y)
     }
 }
 
-void flip(void)
-{
+static int flip_lo, flip_hi;
 
+void flip_rows(int y0, int y1) { flip_lo = y0 < 0 ? 0 : y0; flip_hi = y1 < SH ? y1 : SH; }
+
+__attribute__((minsize)) void flip(void)
+{
+    int lo = flip_lo, hi = flip_hi ? flip_hi : SH;
+    flip_lo = flip_hi = 0;
     if (!shadow_attempted && (BOOTINFO->vbe == 2 || (u32)lfb == 0xa0000) && heap_avail()) {
         shadow_attempted = 1;
         u32 bytes = (u32)SW * SH;
         if (heap_avail() > bytes + 131072u) flip_shadow = kmalloc(bytes);
     }
-    for (int y = 0; y < SH; y++) {
+    for (int y = lo; y < hi; y++) {
         int x = 0, len = SW;
         if (flip_shadow && shadow_valid &&
             !fb_span(BACKBUF + y * SW, flip_shadow + y * SW, SW, &x, &len)) {
@@ -597,7 +602,7 @@ void flip(void)
             }
         }
     }
-    if (flip_shadow) shadow_valid = 1;
+    if (flip_shadow && !lo && hi == SH) shadow_valid = 1;
 }
 
 #include "panicnet.h"

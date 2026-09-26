@@ -2,7 +2,7 @@
 static u32 image_used,image_limit;
 static void *image_alloc(unsigned long size)
 {
-    if(size>image_limit-image_used||size>0x7ffffff0u)return 0;u32 *p=api->kmalloc((u32)size+16);if(!p)return 0;*p=(u32)size;image_used+=(u32)size;return p+4;
+    if(size>image_limit-image_used||size>0x7ffffff0u)return 0;u32 *p=br_malloc((u32)size+16);if(!p)return 0;*p=(u32)size;image_used+=(u32)size;return p+4;
 }
 static void image_free(void *ptr){if(ptr){u32 *p=(u32 *)ptr-4;image_used-=*p;api->kfree(p);}}
 static void *image_realloc(void *ptr,unsigned long size)

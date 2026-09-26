@@ -2,11 +2,13 @@
 #pragma once
 #include "shcwd.inc"
 #define TW_URL 256
-#define TW_TEXT 24576
-#define TW_LINKS 48
+#define TW_TEXT_MAX 262144
+#define TW_LINKS_MAX 1024
 typedef struct { char host[80], path[176]; u16 port; u8 http, type; } TwUrl;
-typedef struct { char url[TW_URL], label[80]; } TwLink;
-typedef struct { char text[TW_TEXT]; TwLink link[TW_LINKS]; int len, links, clipped; } TwPage;
+typedef struct { char url[TW_URL], label[80], target[32]; u8 download; } TwLink;
+typedef struct { char *text; TwLink *link; int len, links, clipped, text_cap, link_cap; } TwPage;
+static void *(*tw_grow)(void *p,u32 size);
+static char tw_blank[1];
 static inline int tw_eq(const char *a,const char *b) { while (*a && *a==*b) {a++;b++;} return *a==*b; }
 static int tw_contains(const char *a,const char *b) {
     for (;*a;a++) {int i=0;while(b[i]&&a[i]==b[i])i++;if(!b[i])return 1;}return 0;
@@ -135,6 +137,25 @@ static int tw_resolve(const char *base,const char *ref,char *out)
     }
     if(o==a)out[o++]='/';while(tmp[p])out[o++]=tmp[p++];out[o]=0;return 1;
 }
+static int tw_room(TwPage *p,int n)
+{
+    if(p->len+n<p->text_cap)return 1;
+    int cap=p->text_cap?p->text_cap:2048;while(cap<=p->len+n&&cap<TW_TEXT_MAX)cap*=2;
+    char *t=p->len+n<cap&&tw_grow?tw_grow(p->text_cap?p->text:0,(u32)cap):0;if(!t)return 0;
+    p->text=t;p->text_cap=cap;return 1;
+}
+static int tw_link_room(TwPage *p)
+{
+    if(p->links<p->link_cap)return 1;if(p->link_cap>=TW_LINKS_MAX||!tw_grow)return 0;
+    int cap=p->link_cap?p->link_cap*2:16;TwLink *l=tw_grow(p->link,(u32)cap*sizeof *l);if(!l)return 0;
+    p->link=l;p->link_cap=cap;return 1;
+}
+static void tw_clear(TwPage *p){p->len=p->links=p->clipped=0;if(!tw_room(p,0)){p->text=tw_blank;p->clipped=1;}p->text[0]=0;}
+static void tw_free(TwPage *p)
+{
+    if(p->text_cap)tw_grow(p->text,0);if(p->link_cap)tw_grow(p->link,0);
+    p->text=0;p->link=0;p->text_cap=p->link_cap=p->len=p->links=0;
+}
 static void tw_put(TwPage *p,int c,int collapse)
 {
     if(c=='\r')return;
@@ -145,17 +166,18 @@ static void tw_put(TwPage *p,int c,int collapse)
         if(p->text[p->len-1]=='\n'||(c==' '&&p->text[p->len-1]==' '))return;
         if(c=='\n'&&p->text[p->len-1]==' ')p->len--;
     }
-    if(p->len>=TW_TEXT-1){p->clipped=1;return;}p->text[p->len++]=(char)c;p->text[p->len]=0;
+    if(!tw_room(p,1)){p->clipped=1;return;}p->text[p->len++]=(char)c;p->text[p->len]=0;
 }
 static void tw_number(TwPage *p,int n)
 {
-    tw_put(p,'[',0);if(n>=10)tw_put(p,'0'+n/10,0);tw_put(p,'0'+n%10,0);tw_put(p,']',0);tw_put(p,' ',0);
+    char d[6];int k=0;do{d[k++]=(char)('0'+n%10);n/=10;}while(n&&k<6);
+    tw_put(p,'[',0);while(k)tw_put(p,d[--k],0);tw_put(p,']',0);tw_put(p,' ',0);
 }
 static int tw_addlink(TwPage *p,const char *url,const char *label,int len)
 {
     TwUrl u;char local[TW_URL];if(!tw_url(url,&u)&&!tw_local(url,local))return -1;
-    if(p->links>=TW_LINKS){p->clipped=1;return -1;}
-    TwLink *l=&p->link[p->links];tw_copy(l->url,TW_URL,url,tw_len(url));
+    if(!tw_link_room(p)){p->clipped=1;return -1;}
+    TwLink *l=&p->link[p->links];tw_copy(l->url,TW_URL,url,tw_len(url));l->target[0]=0;l->download=0;
     if(len>79)len=79;tw_copy(l->label,80,label,len);
     tw_number(p,p->links+1);return p->links++;
 }
@@ -178,7 +200,7 @@ static int tw_entity(const char *s,int *used)
 
 static void tw_render(TwPage *p,const char *s,int mode,const char *base)
 {
-    p->len=p->links=p->clipped=0;p->text[0]=0;
+    tw_clear(p);
     if(mode>=2){
         while(*s){
             const char *end=s;while(*end&&*end!='\n'&&*end!='\r')end++;int n=(int)(end-s);

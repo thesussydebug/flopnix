@@ -8,6 +8,7 @@
 #include "fileopen.inc"
 #include "deskpath.inc"
 #include "desklst.inc"
+#include "deskscan.inc"
 #include "textfield.inc"
 #include "gdi.h"
 #include "bmp.inc"
@@ -20,23 +21,25 @@ static const Kapi *api;
 #define DESK_LST "desktop.lst"
 #define DMAX FS_NFILES
 static char names[DMAX][FS_NAMELEN];
-static int nnames, vis[DMAX], nvis, desk_page;
+static u8 name_dir[DMAX], scan_dir[DMAX], picked[DMAX], pick_stale = 1;
+static short dir_idx[DMAX];
+static int nnames, vis[DMAX], nvis, desk_page, pick_page = -1;
 static u8 loaded, sync_forced;
 static u32 sync_t;
 
 static void lst_touch(void) { sync_forced = 1;api->broadcast("file.changed",""); }
 static void lst_sync(void) {
     if (!loaded || (!sync_forced && (u32)(*api->ticks - sync_t) < 25)) return;
-    sync_forced = 0; sync_t = *api->ticks; nnames = nvis = 0;
-    for (int i = 0; i < FS_NFILES && nnames < DMAX; i++) {
+    sync_forced = 0; sync_t = *api->ticks; nvis = 0;
+    DeskScan s = { names, scan_dir, dir_idx, 0, 0, DMAX, nnames, 0 };
+    for (int i = 0; i < FS_NFILES && s.n < DMAX; i++) {
         FsEnt *e = api->fs_slot(i);
         if (!e || !e->used) continue;
-        char child[FS_NAMELEN];if(!fs_child(e->name,"desktop",child,sizeof child))continue;
-        int have=0;for(int j=0;j<nnames;j++)if(!api->strcmp(names[j],child)){have=1;break;}
-        if(have)continue;
-        api->strlcpy(names[nnames], child, FS_NAMELEN);
-        vis[nvis++] = nnames++;
+        int k = dk_add(&s, e->name, (e->attr & FS_ATTR_DIR) != 0);
+        if (k >= 0) vis[nvis++] = k;
     }
+    if (dk_commit(&s, name_dir)) pick_stale = 1;
+    nnames = s.n;
 }
 static void lst_add(const char *nm) { (void)nm; lst_touch(); }
 static void lst_del(const char *nm) { (void)nm; lst_touch(); }
@@ -161,11 +164,12 @@ static int dsel_has(const char *n)
         if (!api->strcmp(dsel[i], n)) return 1;
     return 0;
 }
-static void dsel_clear(void) { ndsel = 0; }
+static void dsel_clear(void) { ndsel = 0; pick_stale = 1; }
 static void dsel_add(const char *n)
 {
     if (!n || !n[0] || ndsel >= DMAX || dsel_has(n)) return;
     api->strlcpy(dsel[ndsel++], n, FS_NAMELEN);
+    pick_stale = 1;
 }
 static void dsel_remove(const char *n)
 {
@@ -173,10 +177,11 @@ static void dsel_remove(const char *n)
         if (!api->strcmp(dsel[i], n)) {
             for (; i < ndsel - 1; i++) api->strlcpy(dsel[i], dsel[i + 1], FS_NAMELEN);
             ndsel--;
+            pick_stale = 1;
             return;
         }
 }
-static void dsel_single(const char *n) { ndsel = 0; dsel_add(n); }
+static void dsel_single(const char *n) { dsel_clear(); dsel_add(n); }
 static int  sel_all_now(void) { return nvis > 0 && ndsel == nvis; }
 static char lastp_name[FS_NAMELEN];
 static u32  lastp_t;
@@ -203,14 +208,30 @@ static int page_count(void)
     return count;
 }
 
-static const char *icon_name(int n, int *ox, int *oy)
+static int icon_index(int n, int *ox, int *oy)
 {
     page_count();
-    if (n < 0 || n >= page_size() || desk_page*page_size()+n >= nvis) return 0;
+    if (n < 0 || n >= page_size() || desk_page*page_size()+n >= nvis) return -1;
     int rpc = rows_per_col();
     *ox = ICONX + (n / rpc) * CELLW;
     *oy = ICONY + (n % rpc) * CELLH;
-    return names[vis[desk_page*page_size()+n]];
+    return vis[desk_page*page_size()+n];
+}
+
+static const char *icon_name(int n, int *ox, int *oy)
+{
+    int i = icon_index(n, ox, oy);
+    return i < 0 ? 0 : names[i];
+}
+
+static void pick_refresh(void)
+{
+    if (!pick_stale && pick_page == desk_page) return;
+    pick_stale = 0;
+    pick_page = desk_page;
+    int x, y;
+    for (int n = 0, i; (i = icon_index(n, &x, &y)) >= 0; n++)
+        picked[i] = (u8)dsel_has(names[i]);
 }
 
 static const char *icon_at(int x, int y)
@@ -234,9 +255,9 @@ static const char *name_ext(const char *n)
 
 static int desk_isdir(const char *s){return api->fs_is_dir(s)||api->fs_dir_count(s)>0;}
 
-static void icon_pic(int x, int y, const char *name)
+static void icon_pic(int x, int y, const char *name, int dir)
 {
-    if(desk_isdir(name)){
+    if(dir){
         api->fill_rect(x+2,y+3,12,7,C_YELLOW);api->fill_rect(x+2,y+8,28,18,C_YELLOW);
         api->bevel(x+2,y+8,28,18,0);return;
     }
@@ -375,6 +396,7 @@ static void d_draw(void)
     }
     lst_sync();
     int pages=page_count();
+    pick_refresh();
     if(pages>1){
         int px=sw-168;
         api->panel(px,3,160,20,0);
@@ -385,10 +407,11 @@ static void d_draw(void)
     }
     int x, y;
     for (int n = 0; ; n++) {
-        const char *nm = icon_name(n, &x, &y);
-        if (!nm) break;
-        int is_sel = dsel_has(nm);
-        icon_pic(x + (CELLW - 32) / 2, y + 2, nm);
+        int i = icon_index(n, &x, &y);
+        if (i < 0) break;
+        const char *nm = names[i];
+        int is_sel = picked[i];
+        icon_pic(x + (CELLW - 32) / 2, y + 2, nm, name_dir[i]);
         if (ren_name[0] && !api->strcmp(ren_name, nm)) {
 
             int ew = CELLW + 40, ex = x + (CELLW - ew) / 2;
@@ -562,7 +585,9 @@ static int d_key(int k)
         }
         if (ctrl && c == 'a') {
             dsel_clear();
-            for (int i = 0; i < nvis; i++) dsel_add(names[vis[i]]);
+            for (int i = 0; i < nvis && ndsel < DMAX; i++)
+                api->strlcpy(dsel[ndsel++], names[vis[i]], FS_NAMELEN);
+            pick_stale = 1;
             if (nvis) api->strlcpy(sel, names[vis[nvis - 1]], sizeof sel);
             api->gui_dirty();
             return 1;
@@ -807,7 +832,7 @@ static void desk_rename(const DeskJob *job)
     }
     if(!api->strcmp(sel,job->name))api->strlcpy(sel,job->target,sizeof sel);
     for(int i=0;i<ndsel;i++)if(!api->strcmp(dsel[i],job->name))api->strlcpy(dsel[i],job->target,FS_NAMELEN);
-    lst_touch();api->gui_dirty();
+    pick_stale=1;lst_touch();api->gui_dirty();
 }
 static void desk_delete(char *list)
 {
@@ -822,6 +847,8 @@ static void desk_delete(char *list)
 }
 static void desk_poll(void *ctx)
 {
+    static u8 blink;
+    if(ren_name[0]&&*api->gui_blink!=blink){blink=*api->gui_blink;api->gui_dirty();}
     (void)ctx;u32 f=desk_lock();
     if(desk_active||!desk_qcount){desk_unlock(f);return;}
     DeskJob job;api->memcpy(&job,&desk_queue[desk_qhead],sizeof job);desk_qhead=(desk_qhead+1)%DQ_MAX;desk_qcount--;desk_active=1;

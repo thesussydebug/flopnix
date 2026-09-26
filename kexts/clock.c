@@ -86,6 +86,28 @@ static void clock_csize(int inst, int *w, int *h)
     *h = 190;
 }
 
+static int my_type = -1, timer_id = -1, shown_s = -1;
+
+static void clock_tick(void *ctx)
+{
+    (void)ctx;
+    int h, m, s, D, M, Y;
+    api->rtc_read(&h, &m, &s, &D, &M, &Y);
+    if (s != shown_s) { shown_s = s; api->win_redraw(my_type, 0); }
+}
+
+static void clock_open(int inst)
+{
+    (void)inst;
+    if (timer_id < 0) timer_id = api->timer_add(25, clock_tick, 0);
+}
+
+static void clock_close(int inst)
+{
+    (void)inst;
+    if (timer_id >= 0) { api->timer_del(timer_id); timer_id = -1; }
+}
+
 const KextHeader kext_header = {
     KEXT_MAGIC, KAPI_VERSION, KEXT_KIND_APP, 0, "Clock"
 };
@@ -97,7 +119,9 @@ int kext_entry(const Kapi *k)
     g = gdi_bind(k, 11);
     static const AppDesc d = {
         .title = "Clock", .max_inst = 1, .in_menu = 1,
+        .open = clock_open, .close = clock_close,
         .draw = clock_draw, .client_size = clock_csize,
     };
-    return k->register_app(&d) < 0;
+    my_type = k->register_app(&d);
+    return my_type < 0;
 }

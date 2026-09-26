@@ -22,21 +22,21 @@ static int br_resolve(const char *base,const char *ref,char *out)
 static void br_anchor(BrPage *b,const char *s,int n,const char *tag)
 {
     char name[64];if(!br_attr(s,n,"id",name,sizeof name)&&!(br_same(tag,"a")&&br_attr(s,n,"name",name,sizeof name)))return;
-    if(!name[0]||b->anchors==BR_ANCHORS)return;BrAnchor *a=&b->anchor[b->anchors++];tw_copy(a->name,sizeof a->name,name,tw_len(name));a->off=(u16)b->page.len;
+    if(!name[0]||b->anchors==BR_ANCHORS)return;BrAnchor *a=&b->anchor[b->anchors++];tw_copy(a->name,sizeof a->name,name,tw_len(name));a->off=(u32)b->page.len;
 }
 static void br_parse_init(BrParse *p){p->form=-1;p->depth=0;}
 static int br_object(BrPage *b,int kind,BrStyle st,int link)
 {
-    if((st.flags&8)||b->objects==BR_OBJECTS||b->page.len>=TW_TEXT-2){if(!(st.flags&8))b->page.clipped=1;return -1;}
-    int i=b->objects++;BrObject *o=&b->object[i];o->kind=(u8)kind;o->link=(u8)link;o->style=st;o->width=o->height=0;o->ref=-1;o->url[0]=o->label[0]=o->name[0]=0;o->start=(u16)b->page.len;
-    br_run(b,st,link);b->page.text[b->page.len++]=1;b->page.text[b->page.len]=0;o->end=(u16)b->page.len;return i;
+    if((st.flags&8)||b->objects==BR_OBJECTS||!tw_room(&b->page,1)){if(!(st.flags&8))b->page.clipped=1;return -1;}
+    int i=b->objects++;BrObject *o=&b->object[i];o->kind=(u8)kind;o->link=(u16)link;o->style=st;o->width=o->height=0;o->ref=-1;o->url[0]=o->label[0]=o->name[0]=0;o->start=(u32)b->page.len;
+    br_run(b,st,link);b->page.text[b->page.len++]=1;b->page.text[b->page.len]=0;o->end=(u32)b->page.len;return i;
 }
-static void br_endcell(BrPage *b,BrParse *p){if(p->depth&&p->cell[p->depth-1]>=0){b->cell[p->cell[p->depth-1]].end=(u16)b->page.len;p->cell[p->depth-1]=-1;}}
+static void br_endcell(BrPage *b,BrParse *p){if(p->depth&&p->cell[p->depth-1]>=0){b->cell[p->cell[p->depth-1]].end=(u32)b->page.len;p->cell[p->depth-1]=-1;}}
 static int br_cell(BrPage *b,BrParse *p,const char *s,int n,BrStyle st)
 {
     if(!p->depth||b->cells==BR_CELLS){b->page.clipped=1;return -1;}br_endcell(b,p);int d=p->depth-1;BrCell *c=&b->cell[b->cells];
     c->table=p->table[d];c->row=p->row[d];if(c->row<0)c->row=p->row[d]=0;c->col=p->column[d];c->span=br_attrnum(s,n,"colspan",1,8);if(c->span<1)c->span=1;c->rows=br_attrnum(s,n,"rowspan",1,32);if(c->rows<1)c->rows=1;
-    c->start=c->end=(u16)b->page.len;c->style=st;char value[32];c->width=br_attr(s,n,"width",value,sizeof value)?br_dimension(value,0,2048):0;
+    c->start=c->end=(u32)b->page.len;c->style=st;char value[32];c->width=br_attr(s,n,"width",value,sizeof value)?br_dimension(value,0,2048):0;
     p->column[d]+=c->span;BrTable *t=&b->table[c->table];if(p->column[d]>t->cols)t->cols=p->column[d];if(c->row+c->rows>t->rows)t->rows=c->row+c->rows;
     return p->cell[d]=b->cells++;
 }
@@ -44,7 +44,7 @@ static void br_close_element(BrPage *b,BrParse *p,const char *tag)
 {
     if(br_same(tag,"form"))p->form=-1;
     if(br_same(tag,"td")||br_same(tag,"th")||br_same(tag,"tr"))br_endcell(b,p);
-    if((br_same(tag,"table")||br_same(tag,"frameset"))&&p->depth){br_endcell(b,p);int t=p->table[--p->depth];b->object[b->table[t].object].end=(u16)b->page.len;br_break(b);}
+    if((br_same(tag,"table")||br_same(tag,"frameset"))&&p->depth){br_endcell(b,p);int t=p->table[--p->depth];b->object[b->table[t].object].end=(u32)b->page.len;br_break(b);}
 }
 static void br_finish_elements(BrPage *b,BrParse *p){while(p->depth)br_close_element(b,p,"table");}
 static int br_content_end(const char *s,int start,const char *tag,int *after)

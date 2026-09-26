@@ -440,16 +440,7 @@ void kmain(void)
         }
         ts[nts++] = cpu_now();
 
-        int drew = flip_due(ticks, &last_flip, timer_alive);
-        if (drew) {
-            static FrameState fs_last;
-            FrameState fs_now;
-            gui_frame_state(&fs_now);
-            if (!frame_present(&fs_now, &fs_last)) drew = 0;
-
-            else if (!present_try()) drew = 0;
-            else fs_last = fs_now;
-        }
+        int drew = flip_due(ticks, &last_flip, timer_alive) && gui_frame_due() && present_try();
         if (drew) { preempt_disable(); gui_compose(); preempt_enable(); }
         ts[nts++] = cpu_now();
         if (drew) { flip(); present_done(); }
