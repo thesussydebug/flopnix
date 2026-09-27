@@ -18,5 +18,5 @@ SECTIONS
     __bss_end = .;
 
     ASSERT(__load_end  < 0xA0000,  "loaded image (.text/.data) overlaps VGA hole at 0xA0000")
-    ASSERT(__bss_end <= 0x190000, "BSS overlaps compact framebuffer at 0x190000")
+    ASSERT(__bss_end <= 0x170000, "BSS overlaps compact extension arena at 0x170000")
 }

@@ -255,7 +255,7 @@ int kext_entry(const Kapi *k)
     if (k->version < KAPI_VERSION) return 1;
     api = k;
     new_game();
-    static const AppDesc d = {.live_draw=APP_LIVE_DRAW|APP_INDEPENDENT,
+    static const AppDesc d = {.live_draw=APP_LIVE_DRAW|APP_INDEPENDENT|APP_NO_CARET,
         .title = "Minesweeper", .max_inst = 1, .in_menu = 1,
         .open = ms_open, .draw = ms_draw, .mouse = ms_mouse, .key = ms_key,
         .client_size = ms_csize, .category = APP_CAT_GAMES,

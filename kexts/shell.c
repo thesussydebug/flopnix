@@ -442,12 +442,16 @@ static int child_files(const char *dir, int *idx, int max)
     return n;
 }
 
+typedef struct { char subs[16][SC_MAX]; int fidx[FS_NFILES]; } Listing;
+
 static void tree_level(const char *dir, unsigned char *flags, int depth,
                        int *nfile, int *ndir)
 {
     if (depth >= 7) return;
-    char subs[16][SC_MAX];
-    int fidx[FS_NFILES];
+    Listing *L = api->kmalloc(sizeof *L);
+    if (!L) { tprint("tree: out of memory\n"); return; }
+    char (*subs)[SC_MAX] = L->subs;
+    int *fidx = L->fidx;
     int nd = child_dirs(dir, subs, 16);
     int nf = child_files(dir, fidx, FS_NFILES);
     int left = nd + nf;
@@ -474,6 +478,7 @@ static void tree_level(const char *dir, unsigned char *flags, int depth,
         tprint(line);
         (*nfile)++;
     }
+    api->kfree(L);
 }
 
 static void do_tree(const char *root)
@@ -1046,25 +1051,27 @@ static void sh_exec(char *cmd)
         char dir[SC_MAX];
         resolve(cargs, dir, sizeof dir);
 
-        char subs[16][SC_MAX];
-        int fidx[FS_NFILES];
-        int nd = child_dirs(dir, subs, 16);
-        int n  = child_files(dir, fidx, FS_NFILES);
+        Listing *L = api->kmalloc(sizeof *L);
+        if (!L) { tprint("ls: out of memory\n"); return; }
+        int nd = child_dirs(dir, L->subs, 16);
+        int n  = child_files(dir, L->fidx, FS_NFILES);
         for (int i = 0; i < nd; i++) {
-            kfmt(buf, sizeof buf, "  <dir>  %s\n", subs[i]);
+            kfmt(buf, sizeof buf, "  <dir>  %s\n", L->subs[i]);
             tprint(buf);
         }
         for (int i = 0; i < n; i++) {
-            FsEnt *e = fs_slot(fidx[i]);
+            FsEnt *e = fs_slot(L->fidx[i]);
             kfmt(buf, sizeof buf, "%6u  %s\n", e->size, tr_leaf(e->name));
             tprint(buf);
         }
+        api->kfree(L);
         kfmt(buf, sizeof buf, "%d file%s, %d folder%s, %u KB free\n",
              n, n == 1 ? "" : "s", nd, nd == 1 ? "" : "s", fs_free_kb());
         tprint(buf);
     } else if (!strcmp(cmd, "map")) {
         if (!fs_ensure()) { tprint("disk error\n"); return; }
-        int idx[FS_NFILES], m = 0;
+        int *idx = api->kmalloc(FS_NFILES * sizeof *idx), m = 0;
+        if (!idx) { tprint("map: out of memory\n"); return; }
         for (int i = 0; i < FS_NFILES; i++)
             if (fs_slot(i)->used) idx[m++] = i;
         for (int i = 1; i < m; i++) {
@@ -1080,6 +1087,7 @@ static void sh_exec(char *cmd)
             kfmt(buf, sizeof buf, "%5u  %4u  %4u  %s\n", e->start, end, e->nsect, e->name);
             tprint(buf);
         }
+        api->kfree(idx);
         kfmt(buf, sizeof buf, "%d file%s\n", m, m == 1 ? "" : "s");
         tprint(buf);
     } else if (!strncmp(cmd, "rm ", 3)) {

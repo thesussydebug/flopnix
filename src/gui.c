@@ -25,7 +25,8 @@ int mx, my;
 u8 gui_dirty;
 u8 gui_blink;
 u8 gui_up;
-static u8 bar_dirty;
+static u8 bar_dirty, top_dirty;
+static u16 win_dirty;
 
 static char fault_banner[128];
 static u32  fault_banner_until;
@@ -42,9 +43,11 @@ void fault_show_banner(const char *msg)
 
 static u8 mbtn_prev;
 static int drag_win = -1, drag_ox, drag_oy;
+static u8 ghost, ex_n;
+static WhRect gh, ex;
 static int resize_win = -1, resize_ox, resize_oy;
 static int press_win = -1;
-static int press_x, press_y, control_window = -1, redraw_window = -1;
+static int press_x, press_y, control_window = -1;
 static int press_desk;
 static int menu_open;
 
@@ -56,7 +59,7 @@ static int  ov_owner = -1;
 void set_overlay_key(int (*key)(int k)) { ov_key = key; }
 int overlay_modal(void){return ov_mouse!=0;}
 
-void set_overlay(void (*draw)(void), int (*mouse)(int x, int y, int ev))
+__attribute__((minsize)) void set_overlay(void (*draw)(void), int (*mouse)(int x, int y, int ev))
 {
     if(mouse){press_win=-1;press_desk=0;}
     ov_key = 0;
@@ -84,7 +87,7 @@ void overlay_drop_owner(int owner)
 static u8   dnd_on;
 static char dnd_type[16], dnd_data[4096], dnd_label[16];
 int drag_active(void) { return dnd_on; }
-int drag_start(const char *type, const char *data)
+__attribute__((minsize)) int drag_start(const char *type, const char *data)
 {
     if (!type || !data) return -1;
     strlcpy(dnd_type, type, sizeof dnd_type);
@@ -117,7 +120,7 @@ static char datestr[12];
 
 #include "winimage.inc"
 static struct {char title[24],msg[44];int on,frac;} progress[MAXWIN];
-void app_local_progress(const char *title,const char *msg,int frac)
+__attribute__((minsize)) void app_local_progress(const char *title,const char *msg,int frac)
 {
     int i=app_current_window();if(i<0)return;
     if(!title&&!progress[i].on)return;
@@ -190,7 +193,7 @@ static int topitem_y(int y0, int i)
     return y0 + 2 + NCAT * MITEMH + MSEP;
 }
 
-static void submenu_geo(int cat, int *sx, int *sy, int *sw, int *sh)
+__attribute__((minsize)) static void submenu_geo(int cat, int *sx, int *sy, int *sw, int *sh)
 {
     int x0, y0, mh;
     topmenu_geo(&x0, &y0, &mh);
@@ -220,7 +223,7 @@ static int topcat_at(int px, int py)
     return -1;
 }
 
-static int submenu_at(int px, int py)
+__attribute__((minsize)) static int submenu_at(int px, int py)
 {
     if (open_cat < 0) return -1;
     int sx, sy, sw, sh;
@@ -262,9 +265,16 @@ static WhRect *win_rects(void)
     return r;
 }
 
+#define HV_MAX 32
+static WhRect hv_rect[MAXWIN][HV_MAX];
+static u8 hv_n[MAXWIN];
+
+static int top_at(int x, int y) { return wh_top_at(zord, nz, win_rects(), x, y); }
+
 int win_is_hovered(Win *w)
 {
-    int top = wh_top_at(zord, nz, win_rects(), mx, my);
+    if (control_window >= 0) hv_n[control_window] = 255;
+    int top = top_at(mx, my);
     return top >= 0 && &wins[top] == w;
 }
 
@@ -273,15 +283,20 @@ static int hover_at(int x, int y)
     return wh_hover(zord, nz, win_rects(), x, y, SH - TBH, tb_btnw(), nz, SW - 162);
 }
 
-int control_state(int x, int y, int w, int h)
+__attribute__((minsize)) int control_state(int x, int y, int w, int h)
 {
+    int c = control_window;
+    if (c >= 0) {
+        if (hv_n[c] < HV_MAX) hv_rect[c][hv_n[c]++] = (WhRect){x, y, w, h};
+        else hv_n[c] = 255;
+    }
     if (!in(mx,my,x,y,w,h)) return 0;
-    if (control_window >= 0) {
-        Win *v = &wins[control_window];
-        if (ov_draw || menu_open || busy_on || !win_is_hovered(v) ||
+    if (c >= 0) {
+        Win *v = &wins[c];
+        if (ov_draw || menu_open || busy_on || top_at(mx, my) != c ||
             !in(mx,my,CLIX(v),CLIY(v),CLIW(v),CLIH(v))) return 0;
-        if (press_win != control_window) return 1;
-    } else if (control_window != -2) return 0;
+        if (press_win != c) return 1;
+    } else if (c != -2) return 0;
     return 1 | ((mbtn_prev & 1) && in(press_x,press_y,x,y,w,h) ? 2 : 0);
 }
 
@@ -289,12 +304,8 @@ static int win_find(int type,int inst);
 static void win_repaint(int i)
 {
     if (i < 0) return;
-    if(nz&&i!=zord[nz-1]){
-        Win *w=&wins[i],*top=&wins[zord[nz-1]];
-        if(top->x<=w->x&&top->y<=w->y&&top->x+top->w>=w->x+w->w&&top->y+top->h>=w->y+w->h)return;
-    }
-    if (gui_dirty == 1 || (gui_dirty == 2 && redraw_window != i)) gui_dirty = 1;
-    else { redraw_window = i; gui_dirty = 2; }
+    win_dirty |= 1 << i;
+    if (!gui_dirty) gui_dirty = 2;
 }
 
 void win_redraw(int type, int inst)
@@ -456,7 +467,7 @@ void win_close_flush(void)
     for(int i=0;i<MAXWIN;i++)if(close_pending[i]&&!app_handler_running(i)){close_pending[i]=0;win_close(i);gui_dirty=1;}
 }
 
-void win_fit_client(int type, int inst, int cw, int ch)
+__attribute__((minsize)) void win_fit_client(int type, int inst, int cw, int ch)
 {
     for (int i = 0; i < MAXWIN; i++) {
         Win *w = &wins[i];
@@ -531,7 +542,7 @@ __attribute__((minsize)) int win_open(int type)
 static u8 launch_queue[MAXWIN];
 static int launch_head,launch_count;
 
-static void gui_launch(int type)
+__attribute__((minsize)) static void gui_launch(int type)
 {
     if(type<0||type>=app_count())return;
     u32 f=irq_save();
@@ -541,7 +552,7 @@ static void gui_launch(int type)
     if(!queued)fault_show_banner("E42 - App launch queue is full. Try again.");
 }
 
-int gui_launch_pending(void)
+__attribute__((minsize)) int gui_launch_pending(void)
 {
     if(busy_update||kupd_critical)return 0;
     u32 f=irq_save();
@@ -634,7 +645,7 @@ static int input_dismiss(void)
     return 0;
 }
 
-void gui_tick(void)
+__attribute__((minsize)) void gui_tick(void)
 {
 
     if (at_k >= 0 && !(kbd_mods() & 8)) {
@@ -653,10 +664,12 @@ void gui_tick(void)
         gui_blink ^= 1;
         char sec = clockstr[7];
         update_clock();
-        if (tick_full(++beat, ov_draw || dnd_on)) gui_dirty = 1;
+        if (tick_full(++beat)) gui_dirty = 1;
         else {
             if (clockstr[7] != sec) bar_dirty = 1;
-            if (focused() >= 0) win_repaint(zord[nz - 1]);
+            if (focused() >= 0 && !(app_draw_flags(wins[zord[nz - 1]].type) & APP_NO_CARET))
+                win_repaint(zord[nz - 1]);
+            for (int i = 0; i < MAXWIN; i++) if (wins[i].used && app_busy(i)) win_repaint(i);
         }
     }
     if (!ss_active && CFG->ss_enable &&
@@ -676,8 +689,10 @@ void gui_tick(void)
             if (ssy >= SH - SS_H) { ssy = SH - SS_H; ssdy = -ssdy; ss_col = cols[++ci % 6]; }
             gui_dirty = 1;
         }
-    } else if (apps_animating() || anim_claims) {
-        if ((u32)(ticks - lasta) >= 3) { lasta = ticks; gui_invalidate(); }
+    } else if ((u32)(ticks - lasta) >= 3) {
+        lasta = ticks;
+        apps_animate();
+        if (anim_claims) gui_invalidate();
     }
 }
 
@@ -701,7 +716,7 @@ void worker_unwind(int preempt_snap)
     preempt_restore(preempt_snap);
 }
 
-int gui_pump(void)
+__attribute__((minsize)) int gui_pump(void)
 {
     if (!gui_up || pump_inside) return 0;
     pump_inside = 1;
@@ -741,7 +756,7 @@ int gui_pump(void)
     return app_current_window()>=0?app_cancel_pending():esc;
 }
 
-void gui_wheel(int dz)
+__attribute__((minsize)) void gui_wheel(int dz)
 {
     if(busy_update||kupd_critical)return;
     if (input_dismiss()) return;
@@ -838,7 +853,7 @@ __attribute__((minsize)) void gui_key(int k)
     win_redraw(wins[f].type,wins[f].inst);
 }
 
-static void dnd_finish(void)
+__attribute__((minsize)) static void dnd_finish(void)
 {
     if (!dnd_on) return;
     dnd_on = 0;
@@ -853,7 +868,34 @@ static void dnd_finish(void)
     if (my < SH - TBH) desk_drop(mx, my, dnd_type, dnd_data);
 }
 
-void gui_mouse(int dx, int dy, u8 btn, u32 when)
+__attribute__((minsize)) static void hover_moved(int ox, int oy)
+{
+    int o = hover_at(ox, oy), n = hover_at(mx, my);
+    if (wh_bar(o ^ n)) bar_dirty = 1;
+    for (int i = 0; i < MAXWIN; i++) {
+        int a = wh_win(o) == i && (o & WH_CLIENT), b = wh_win(n) == i && (n & WH_CLIENT);
+        if (((o ^ n) >> 4 >> i & 1) ||
+            ((a || b) && (hv_n[i] == 255 ||
+                          hv_crossed(hv_rect[i], hv_n[i], a ? ox : -32768, oy, b ? mx : -32768, my))))
+            win_repaint(i);
+    }
+}
+
+/* Outline mode moves only the frame until release, then repaints what the window left. */
+__attribute__((noinline,minsize)) static void ghost_to(int i, int x, int y, int cw, int ch, u8 btn)
+{
+    Win *w = &wins[i];
+    gh = (WhRect){x, y, cw, ch};
+    ghost = btn & 1;
+    if (ghost) return;
+    if (ex_n) gui_dirty = 1;
+    ex = (WhRect){w->x, w->y, w->w, w->h};
+    ex_n = 1;
+    win_repaint(i);
+    w->x = x; w->y = y; w->w = cw; w->h = ch;
+}
+
+__attribute__((minsize)) void gui_mouse(int dx, int dy, u8 btn, u32 when)
 {
     if(busy_update||kupd_critical){mbtn_prev=btn;return;}
 
@@ -873,13 +915,16 @@ void gui_mouse(int dx, int dy, u8 btn, u32 when)
     int lpress = (btn & 1) && !(was & 1);
     int rpress = (btn & 2) && !(was & 2);
     if(mx==oldx&&my==oldy&&!btn&&!was)return;
-    int hov=btn||was||menu_open||ov_draw||dnd_on?-1:hover_at(mx,my);
-    if(hov<0||hov!=hover_at(oldx,oldy)){
-        if(nz>0&&((!btn&&!was)||(btn==1&&was==1&&press_win==zord[nz-1]))&&in(oldx,oldy,wins[zord[nz-1]].x,wins[zord[nz-1]].y,wins[zord[nz-1]].w,wins[zord[nz-1]].h)&&
-           in(mx,my,wins[zord[nz-1]].x,wins[zord[nz-1]].y,wins[zord[nz-1]].w,wins[zord[nz-1]].h))
-            win_repaint(zord[nz-1]);
+    int top=nz?zord[nz-1]:-1,layer=menu_open||ov_draw||dnd_on;
+    if(drag_win>=0||resize_win>=0);
+    else if(btn||was){
+        Win *t=&wins[top];
+        if(!layer&&top>=0&&!desktop_focus&&(btn|was)==1&&(lpress||press_win==top)&&oldy<SH-TBH&&my<SH-TBH&&
+           in(oldx,oldy,t->x,t->y,t->w,t->h)&&in(mx,my,t->x,t->y,t->w,t->h))
+            win_repaint(top);
         else gui_dirty=1;
     }
+    else if(!layer)hover_moved(oldx,oldy);
 
     if (lpress) {
         press_x = mx; press_y = my;
@@ -916,12 +961,12 @@ void gui_mouse(int dx, int dy, u8 btn, u32 when)
 
     if (drag_win >= 0) {
         Win *w = &wins[drag_win];
-        w->x = mx - drag_ox;
-        w->y = my - drag_oy;
-        if (w->x < -(w->w - 40)) w->x = -(w->w - 40);
-        if (w->x > SW - 40) w->x = SW - 40;
-        if (w->y < 0) w->y = 0;
-        if (w->y > SH - TBH - 20) w->y = SH - TBH - 20;
+        int x = mx - drag_ox, y = my - drag_oy;
+        if (x < -(w->w - 40)) x = -(w->w - 40);
+        if (x > SW - 40) x = SW - 40;
+        if (y < 0) y = 0;
+        if (y > SH - TBH - 20) y = SH - TBH - 20;
+        ghost_to(drag_win, x, y, w->w, w->h, btn);
         if (!(btn & 1)) drag_win = -1;
         return;
     }
@@ -938,8 +983,7 @@ void gui_mouse(int dx, int dy, u8 btn, u32 when)
         if (nh < minh) nh = minh;
         if (w->x + nw > SW) nw = SW - w->x;
         if (w->y + nh > SH - TBH) nh = SH - TBH - w->y;
-        w->w = nw;
-        w->h = nh;
+        ghost_to(resize_win, w->x, w->y, nw, nh, btn);
         if (!(btn & 1)) resize_win = -1;
         return;
     }
@@ -1062,7 +1106,10 @@ void gui_mouse(int dx, int dy, u8 btn, u32 when)
     desk_mouse(mx, my, EV_PRESS);
 }
 
-static void draw_win(int i, int foc)
+static u8 snap_ok = 1;
+static void band_add(int x0, int y0, int x1, int y1);
+static u8 measuring;
+__attribute__((minsize)) static void draw_win(int i, int foc)
 {
     Win *w = &wins[i];
     panel(w->x, w->y, w->w, w->h, 0);
@@ -1088,8 +1135,10 @@ static void draw_win(int i, int foc)
     if (hov) fill_rect(cbx + 2, cby + 2, 12, 12, C_RED);
     draw_char(cbx + 4, cby, 'x', hov ? C_WHITE : C_BLACK);
     set_clip(CLIX(w), CLIY(w), CLIW(w), CLIH(w));
-
-    if (app_handler_running(i) && !app_live_draw(w->type)) {
+    int vw, vh;
+    clip_rect_get(0, 0, &vw, &vh);
+    if (vw <= 0 || vh <= 0) waiting = 0;
+    else if (app_handler_running(i) && !app_live_draw(w->type)) {
         if(!win_image_draw(i)){
         int bw = 150, bh = 30;
         int bx = CLIX(w) + (CLIW(w) - bw) / 2, by = CLIY(w) + (CLIH(w) - bh) / 2;
@@ -1101,10 +1150,11 @@ static void draw_win(int i, int foc)
         }
         }
     } else {
+        hv_n[i] = app_draw_flags(w->type) & APP_POINTER_FREE ? 0 : 255;
         control_window = i;
         app_draw(w, CLIX(w), CLIY(w), CLIW(w), CLIH(w));
         control_window = -1;
-        if(w->used&&!app_live_draw(w->type)&&!app_handler_running(i))win_image_save(i);
+        if(snap_ok&&w->used&&!app_live_draw(w->type)&&!app_handler_running(i))win_image_save(i);
     }
     if(waiting&&CLIW(w)>100){
         int bx=CLIX(w)+4,by=CLIY(w)+CLIH(w)-22,bw=CLIW(w)-8;
@@ -1125,10 +1175,16 @@ static void draw_win(int i, int foc)
     }
 }
 
-static void draw_menu(void)
+__attribute__((minsize)) static void draw_menu(void)
 {
-    int x0, y0, mh;
+    int x0, y0, mh, sx, sy, sw, sh;
     topmenu_geo(&x0, &y0, &mh);
+    band_add(x0, y0, x0 + MENUW, y0 + mh);
+    if (open_cat >= 0) {
+        submenu_geo(open_cat, &sx, &sy, &sw, &sh);
+        band_add(sx, sy, sx + sw, sy + sh);
+    }
+    if (measuring) return;
     panel(x0, y0, MENUW, mh, 0);
     menu_shade(&kapi,x0+2,y0+2,MENUW-4,mh-4,0);
     fill_rect(x0 + 2, y0 + 2, 22, mh - 4, C_TB0 + 4);
@@ -1149,8 +1205,7 @@ static void draw_menu(void)
     draw_text(x0 + 30, ry + 2, "Reboot", rhov ? C_WHITE : C_BLACK);
 
     if (open_cat >= 0) {
-        int sx, sy, sw, sh, n = cat_count(open_cat);
-        submenu_geo(open_cat, &sx, &sy, &sw, &sh);
+        int n = cat_count(open_cat);
         panel(sx, sy, sw, sh, 0);
         menu_shade(&kapi,sx+2,sy+2,sw-4,sh-4,0);
         for (int i = 0; i < n; i++) {
@@ -1174,7 +1229,7 @@ static void draw_floppy(int x, int y, u8 col)
     bevel(x, y, 60, 54, 0);
 }
 
-static void draw_taskbar(void)
+__attribute__((minsize)) static void draw_taskbar(void)
 {
     fill_rect(0, SH - TBH, SW, TBH, C_FACE);
     hline(0, SH - TBH, SW, C_LIGHT);
@@ -1206,66 +1261,130 @@ static int shown_x, shown_y;
 static u8 shown_blink;
 int gui_frame_due(void)
 {
-    return gui_dirty || bar_dirty || ss_active || mx != shown_x || my != shown_y || gui_blink != shown_blink;
+    return gui_dirty || bar_dirty || top_dirty || ss_active || mx != shown_x || my != shown_y || gui_blink != shown_blink;
 }
 
-void gui_compose(void)
+#define SU_MAX 8
+static WhRect su_r[SU_MAX], *su_m;
+static int su_n, su_mn;
+__attribute__((noinline,minsize)) static void band_add(int x0, int y0, int x1, int y1)
 {
-    static CursorBuf cursor;
-    int partial = gui_dirty == 2 && redraw_window >= 0 && nz > 0 &&
-        zord[nz-1] == redraw_window && wins[redraw_window].x>=0 && wins[redraw_window].y>=0 &&
-        wins[redraw_window].x+wins[redraw_window].w<=SW && wins[redraw_window].y+wins[redraw_window].h<=SH-TBH && !ss_active && !ov_draw && !menu_open &&
-        !busy_on && !dnd_on && !drect_on && at_k < 0 &&
-        !(fault_banner[0] && ticks < fault_banner_until);
-    int pointer_only = !gui_dirty && !ss_active, bar = bar_dirty, x0 = cursor.x, y0 = cursor.y, h0 = cursor.h;
-    gui_dirty = bar_dirty = 0;
-    shown_x = mx; shown_y = my; shown_blink = gui_blink;
-    clear_clip();
-    cursorbuf_restore(&cursor,BACKBUF,SW);
-    if (pointer_only) {
-        if (bar) draw_taskbar();
-        cursorbuf_save(&cursor,BACKBUF,SW,SW,SH,mx,my);
-        draw_cursor(mx,my);
-        int y1;
-        frame_band(x0, y0, h0, cursor.x, cursor.y, cursor.h, bar ? SH - TBH : SH, SH, &y0, &y1);
-        flip_rows(y0, y1);
+    if (measuring) {
+        if (x1 > x0 && y1 > y0 && su_mn < SU_MAX) su_m[su_mn++] = (WhRect){x0, y0, x1 - x0, y1 - y0};
         return;
     }
-    debug_draw(-2);
-    if (partial) {
-        draw_win(redraw_window,focused()==redraw_window);
-        if (bar) draw_taskbar();
-        debug_draw(redraw_window);
-        cursorbuf_save(&cursor,BACKBUF,SW,SW,SH,mx,my);
-        draw_cursor(mx,my);
-        return;
+    flip_area(x0, y0, x1, y1);
+}
+
+static int ob0, ob1, ob2, ob3;
+static void ov_track(int x0, int y0, int x1, int y1)
+{
+    if (x0 < ob0) ob0 = x0;
+    if (y0 < ob1) ob1 = y0;
+    if (x1 > ob2) ob2 = x1;
+    if (y1 > ob3) ob3 = y1;
+}
+
+static u8 *su;
+static u32 su_cap;
+static u8 su_ok, no_mem;
+
+/* Copies r inside g between the back buffer and a save buffer that wraps as a g->w x g->h tile. */
+__attribute__((noinline,minsize)) static void su_xfer(u8 *b, const WhRect *g, const WhRect *r, int save)
+{
+    int x0 = r->x > g->x ? r->x : g->x, y0 = r->y > g->y ? r->y : g->y;
+    int x1 = r->x + r->w < g->x + g->w ? r->x + r->w : g->x + g->w;
+    int y1 = r->y + r->h < g->y + g->h ? r->y + r->h : g->y + g->h;
+    if (x0 < 0) x0 = 0;
+    if (y0 < 0) y0 = 0;
+    if (x1 > SW) x1 = SW;
+    if (y1 > SH - TBH) y1 = SH - TBH;
+    if (x0 >= x1 || y0 >= y1) return;
+    int t = x0 % g->w, a = g->w - t < x1 - x0 ? g->w - t : x1 - x0, ry = y0 % g->h;
+    for (int y = y0; y < y1; y++) {
+        u8 *p = BACKBUF + y * SW + x0, *q = b + ry * g->w;
+        if (save) memcpy(q + t, p, a), memcpy(q, p + a, x1 - x0 - a);
+        else memcpy(p, q + t, a), memcpy(p + a, q, x1 - x0 - a);
+        if (++ry == g->h) ry = 0;
     }
-    if (ss_active) {
-        FAULT_GUARD(ss_draw(), { ss_active = 0; });
-        if (ss_active) {debug_draw(-1);return;}
+    if (!save) band_add(x0, y0, x1, y1);
+}
+
+static void su_all(const WhRect *r, int n, int save)
+{
+    u8 *b = su;
+    for (int i = 0; i < n; b += r[i].w * r[i].h, i++) su_xfer(b, &r[i], &r[i], save);
+}
+
+/* Redraws zord[k] where zord[k+1..n-1] leave it visible, saving what falls in sv; 0 if too fragmented. */
+static int draw_visible(int k, int n, const WhRect *sv)
+{
+    WhRect p[16];
+    int i = zord[k], c = wr_visible(zord, n, win_rects(), k, SW, SH - TBH, p, 16);
+    if (c < 0) return 0;
+    Win *w = &wins[i];
+    snap_ok = c == 1 && p[0].x == (w->x < 0 ? 0 : w->x) && p[0].y == (w->y < 0 ? 0 : w->y) &&
+              p[0].x + p[0].w == (w->x + w->w < SW ? w->x + w->w : SW) &&
+              p[0].y + p[0].h == (w->y + w->h < SH - TBH ? w->y + w->h : SH - TBH);
+    while (c--) {
+        clip_bound(p[c].x, p[c].y, p[c].w, p[c].h);
+        draw_win(i, k == nz - 1);
+        if (sv) su_xfer(su, sv, &p[c], 1);
+        band_add(p[c].x, p[c].y, p[c].x + p[c].w, p[c].y + p[c].h);
     }
+    clip_bound(0, 0, SW, SH);
+    snap_ok = 1;
+    return 1;
+}
+
+__attribute__((noinline,minsize)) static void draw_base(int skip)
+{
     fill_rect(0, 0, SW, SH, C_DESK);
     draw_text(8, 6, OS_NAME " " OS_VER, C_G0 + 6);
     desk_draw();
-
     WhRect *rects = win_rects();
-    for (int k = 0; k < nz; k++)
-        if(!wh_covered(zord,nz,rects,k,SW,SH-TBH))draw_win(zord[k], k == nz - 1);
-
+    int n = skip >= 0 ? nz - 1 : nz, cx, cy, cw, ch;
+    clip_rect_get(&cx, &cy, &cw, &ch);
+    for (int k = 0; k < n; k++) {
+        WhRect *r = &rects[zord[k]];
+        if (r->x < cx + cw && r->x + r->w > cx && r->y < cy + ch && r->y + r->h > cy &&
+            !wh_covered(zord,n,rects,k,SW,SH-TBH)) draw_win(zord[k], k == nz - 1);
+    }
     draw_taskbar();
+}
 
+__attribute__((minsize)) static void draw_top(void)
+{
+    for (int i = 0; ghost && i < 4; i++) {
+        int x = gh.x + (i == 3 ? gh.w - 3 : 0), y = gh.y + (i == 1 ? gh.h - 3 : i > 1 ? 3 : 0);
+        int x1 = x + (i < 2 ? gh.w : 3), y1 = y + (i < 2 ? 3 : gh.h - 6);
+        band_add(x, y, x1, y1);
+        if (x < 0) x = 0;
+        if (x1 > SW) x1 = SW;
+        if (y1 > SH - TBH) y1 = SH - TBH;
+        for (; !measuring && y < y1; y++)
+            for (int k = x + ((x + y) & 1); k < x1; k += 2) BACKBUF[y * SW + k] = C_BLACK;
+    }
     if (menu_open) draw_menu();
     if (ov_draw) {
         void (*cur)(void) = ov_draw;
         int resident = kext_current();
+        ob0 = ob1 = 1 << 30; ob2 = ob3 = 0;
+        if (measuring) fill_hook = ov_track;
         kext_enter(ov_owner);
         control_window = -2;
         FAULT_GUARD(cur(), {
             klog("overlay draw handler faulted - overlay closed\n");
             ov_drop();
         });
+        fill_hook = 0;
         kext_enter(resident);
         control_window = -1;
+        if (measuring) {
+            if (ob0 < 0 || ob1 < 0 || ob2 > SW || ob3 > SH - TBH || ob2 <= ob0 || ob3 <= ob1)
+                ob0 = ob1 = 0, ob2 = SW, ob3 = SH - TBH;
+            band_add(ob0, ob1, ob2, ob3);
+        }
     }
 
     if (drect_on && (mbtn_prev & 1)) {
@@ -1280,6 +1399,7 @@ void gui_compose(void)
         if (gx + 110 > SW) gx = SW - 110;
         if (gy + 20 > SH - TBH) gy = SH - TBH - 20;
         panel(gx, gy, 110, 20, 0);
+        band_add(gx, gy, gx + 110, gy + 20);
         fill_rect(gx + 4, gy + 4, 9, 12, C_WHITE);
         hline(gx + 5, gy + 7, 6, C_G0 + 3);
         hline(gx + 5, gy + 10, 6, C_G0 + 3);
@@ -1298,6 +1418,7 @@ void gui_compose(void)
 
         int w = 320, h = 96, x = (SW - w) / 2, y = (SH - h) / 2;
         panel(x, y, w, h, 0);
+        band_add(x, y, x + w, y + h);
         draw_text(x + 16, y + 12, busy_title, C_NAVY);
         draw_text(x + 16, y + 34, busy_msg, C_BLACK);
         if (busy_frac >= 0) {
@@ -1311,6 +1432,7 @@ void gui_compose(void)
         int w = 228, rh = 16, h = nz * rh + 26;
         int x = (SW - w) / 2, y = (SH - TBH - h) / 2;
         panel(x, y, w, h, 0);
+        band_add(x, y, x + w, y + h);
         draw_text(x + 8, y + 4, "Switch to", C_NAVY);
         for (int p = nz - 1, row = 0; p >= 0; p--, row++) {
             int ry = y + 20 + row * rh;
@@ -1319,9 +1441,119 @@ void gui_compose(void)
                            p == k ? C_WHITE : C_BLACK, w - 20);
         }
     }
-    debug_draw(-1);
+}
+
+__attribute__((minsize)) void gui_compose(void)
+{
+    static CursorBuf cursor;
+    int calm = !ss_active && !drect_on && !(fault_banner[0] && ticks < fault_banner_until);
+    if (drag_win < 0 && resize_win < 0) ghost = 0;
+    int layer = menu_open || ov_draw || busy_on || at_k >= 0 || dnd_on || ghost;
+    int stack = calm && layer;
+    int full = gui_dirty == 1 || ss_active || (layer && (!stack || ex_n)), bar = bar_dirty, dirty = win_dirty;
+    int pointer_only = !gui_dirty && !top_dirty && !ss_active && !layer;
+    int x0 = cursor.x, y0 = cursor.y, w0 = cursor.w, h0 = cursor.h;
+    gui_dirty = bar_dirty = top_dirty = 0;
+    win_dirty = 0;
+    shown_x = mx; shown_y = my; shown_blink = gui_blink;
+    clear_clip();
+    cursorbuf_restore(&cursor,BACKBUF,SW);
+    if (pointer_only) {
+        if (bar) draw_taskbar();
+        cursorbuf_save(&cursor,BACKBUF,SW,SW,SH,mx,my);
+        draw_cursor(mx,my);
+        int y1;
+        frame_band(x0, y0, h0, cursor.x, cursor.y, cursor.h, bar ? SH - TBH : SH, SH, &y0, &y1);
+        flip_area(0, y0, SW, y1);
+        return;
+    }
+    if (!stack) {
+        if (su_ok && !full) su_all(su_r, su_n, 0);
+        else if (su_n) full = 1;
+        kfree(su);
+        su = 0; su_cap = su_n = 0; su_ok = no_mem = 0;
+    }
+    debug_draw(-2);
+    if (ss_active) {
+        FAULT_GUARD(ss_draw(), { ss_active = 0; });
+        if (ss_active) {debug_draw(-1);return;}
+    }
+    if (stack && !no_mem) {
+        WhRect nr[SU_MAX];
+        su_m = nr; su_mn = 0; measuring = 1;
+        clip_bound(0, 0, 0, 0);
+        draw_top();
+        clip_bound(0, 0, SW, SH);
+        measuring = 0;
+        int nn = su_mn, n = nz, redo = full || !su_ok, bg = 0;
+        for (int k = 0; k < n; k++) bg |= (dirty >> zord[k]) & 1;
+        u32 need = 0;
+        for (int i = 0; i < nn; i++) need += (u32)nr[i].w * nr[i].h;
+        int keep = !redo && !bg && nn == su_n && !memcmp(su_r, nr, nn * sizeof *nr);
+        int one = !keep && !redo && su_n == 1 && nn == 1 && su_r[0].w == nr[0].w && su_r[0].h == nr[0].h;
+        if (one) {
+            WhRect r[2] = {su_r[0], nr[0]}, p[4];
+            int z[2] = {0, 1};
+            for (int save = 0; save < 2; save++) {
+                int c = wr_visible(z, 2, r, 0, SW, SH - TBH, p, 4);
+                while (c-- > 0) su_xfer(su, r, &p[c], save);
+                r[0] = nr[0]; r[1] = su_r[0];
+            }
+        } else if (!keep && !redo) su_all(su_r, su_n, 0);
+        for (int k = 0; k < n && !redo && !keep; k++)
+            if ((dirty >> zord[k]) & 1) redo = !draw_visible(k, n, one ? nr : 0);
+        if (redo) {
+            flip_area(0, 0, SW, SH);
+            draw_base(-1);
+            one = 0;
+        }
+        if (!one && !keep) {
+            if (need > su_cap) {
+                kfree(su);
+                su = kmalloc(need);
+                su_cap = su ? need : 0;
+                no_mem = !su;
+            }
+            if (su) su_all(nr, nn, 1);
+        }
+        memcpy(su_r, nr, sizeof nr);
+        su_n = nn; su_ok = !no_mem;
+        if (bar) { draw_taskbar(); band_add(0, SH - TBH, SW, SH); }
+        draw_top();
+        for (int i = 0; i < nn; i++) band_add(nr[i].x, nr[i].y, nr[i].x + nr[i].w, nr[i].y + nr[i].h);
+        debug_draw(-1);
+        full = 0;
+    } else if (!full && calm && !layer) {
+        int top = -1;
+        snap_ok = 0;
+        if (ex_n) {
+            clip_bound(ex.x, ex.y, ex.w, ex.h);
+            draw_base(-1);
+            clip_bound(0, 0, SW, SH);
+            band_add(ex.x, ex.y, ex.x + ex.w, ex.y + ex.h);
+        }
+        snap_ok = 1;
+        for (int k = 0; k < nz && !full; k++)
+            if ((dirty >> zord[k]) & 1) {
+                full = !draw_visible(k, nz, 0);
+                top = zord[k];
+            }
+        if (!full) {
+            if (bar) { draw_taskbar(); band_add(0, SH - TBH, SW, SH); }
+            debug_draw(top);
+        }
+    } else full = 1;
+    if (full) {
+        flip_area(0, 0, SW, SH);
+        draw_base(-1);
+        draw_top();
+        debug_draw(-1);
+    }
+    ex_n = 0;
     cursorbuf_save(&cursor,BACKBUF,SW,SW,SH,mx,my);
     draw_cursor(mx, my);
+    band_add(x0, y0, x0 + w0, y0 + h0);
+    band_add(cursor.x, cursor.y, cursor.x + cursor.w, cursor.y + cursor.h);
 }
 
 void busy_set(const char *title, const char *msg, int frac256)
@@ -1331,7 +1563,7 @@ void busy_set(const char *title, const char *msg, int frac256)
     strlcpy(busy_msg, msg, sizeof busy_msg);
     busy_frac = frac256;
     busy_on = 1;busy_update=!strcmp(title,"Kernel update");
-    gui_dirty = 1;
+    top_dirty = 1;
     gui_pump();
 }
 

@@ -118,6 +118,7 @@ int kext_entry(const Kapi *k)
     api = k;
     gfx = gdi_bind(k, 11);
     static const AppDesc d = {
+        .live_draw = APP_NO_CARET,
         .title = "Calendar", .max_inst = 1, .in_menu = 1,
         .open = cal_open, .draw = cal_draw, .mouse = cal_mouse,
         .client_size = cal_csize,

@@ -64,7 +64,7 @@ static void scan_chunk(void)
                   n_ok, n_slow, n_retry, n_bad);
         api->ktrace(t);
     }
-    api->gui_dirty();
+    api->win_redraw(my_type, 0);
 }
 
 static void seek_test(void)
@@ -76,7 +76,7 @@ static void seek_test(void)
         u32 t0 = *api->ticks;
         api->disk_read(cyl * FH_HEADS * FH_SECTORS, buf);
         seek_ms[i] = (u32)(*api->ticks - t0) * 10;
-        api->gui_dirty();
+        api->win_redraw(my_type, 0);
     }
     api->strlcpy(msg, "seek timing done", sizeof msg);
 }
@@ -103,7 +103,7 @@ static void fh_tick(void *ctx)
         aborted = 1;
         api->strlcpy(msg, "scan aborted - the map shows what was read",
                      sizeof msg);
-        api->gui_dirty();
+        api->win_redraw(my_type, 0);
         return;
     }
     if ((i32)(*api->ticks - next_chunk) < 0) return;
@@ -248,17 +248,17 @@ static void fh_mouse(int inst, int lx, int ly, int ev, int cw, int ch)
             scanning = 1;
             msg[0] = 0;
         }
-        api->gui_dirty();
+        api->win_redraw(my_type, 0);
     } else if (ui_hit(btn_seek(ch), lx, ly)) {
         if (!scanning) seek_test();
-        api->gui_dirty();
+        api->win_redraw(my_type, 0);
     } else if (ui_hit(btn_reset(ch), lx, ly)) {
         scanning = 0;
         done_once = 0;
         reset_scan();
         for (int i = 0; i < 8; i++) seek_ms[i] = 0;
         msg[0] = 0;
-        api->gui_dirty();
+        api->win_redraw(my_type, 0);
     }
 }
 
@@ -277,7 +277,7 @@ int kext_entry(const Kapi *k)
     gfx = gdi_bind(k, 11);
     ui_init(k, gfx);
     reset_scan();
-    static const AppDesc d = {.live_draw=APP_INDEPENDENT,
+    static const AppDesc d = {.live_draw=APP_INDEPENDENT|APP_POINTER_FREE|APP_NO_CARET,
         .title = "Floppy Health", .max_inst = 1, .in_menu = 1, .resizable = 1,
         .open = fh_open, .draw = fh_draw, .mouse = fh_mouse,
         .client_size = fh_csize, .min_client = fh_min, .category = APP_CAT_SYSTEM,

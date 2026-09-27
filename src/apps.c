@@ -65,13 +65,14 @@ static void tnl(void)
     else T->head = (T->head + 1) % SBMAX;
     memset(cur_line(), 0, TCMAX);
 }
+static void tdirty(void) { win_redraw(WT_TERM, T - terms); }
 static void tputc(char c)
 {
     if(STREAM){STREAM->putc(c,STREAM->ctx);return;}
     if(!T||!T->sb)return;
     T->view = 0;
 
-    gui_dirty = 1;
+    tdirty();
     if (c == '\n') { tnl(); return; }
     if (c == '\b') { if (T->cx > 0) { T->cx--; cur_line()[T->cx] = 0; } return; }
     if (T->cx >= TCMAX - 1) tnl();
@@ -95,7 +96,7 @@ static void tdraw_input(void)
     for (int j = col; j < TCMAX; j++) row[j] = 0;
     T->cx = col < TCMAX ? col : TCMAX - 1;
     T->view = 0;
-    gui_dirty = 1;
+    tdirty();
 }
 
 static void tprompt(void)
@@ -345,11 +346,12 @@ void threads_print(void)
     }
 }
 
-int apps_animating(void)
+void apps_animate(void)
 {
+    static u8 odd;
+    odd ^= 1;
     for (int i = 0; i < MAXINST; i++)
-        if (terms[i].fx || terms[i].rainbow) return 1;
-    return 0;
+        if (terms[i].fx || (terms[i].rainbow && odd)) win_redraw(WT_TERM, i);
 }
 
 static void term_reset(int inst)
@@ -443,6 +445,23 @@ static void term_tab(void)
     }
 }
 
+__attribute__((noinline)) static void term_copy(void)
+{
+    char out[4096];
+    int o = 0;
+    int first = T->nlines - T->rows - T->view;
+    if (first < 0) first = 0;
+    int last = T->nlines - T->view;
+    for (int i = first; i < last; i++) {
+        const char *l = line_at(T, i);
+        for (int x = 0; l[x] && x < TCMAX && o < (int)sizeof out - 2; x++)
+            out[o++] = l[x];
+        if (o < (int)sizeof out - 1) out[o++] = '\n';
+    }
+    out[o] = 0;
+    clip_set_text(out);
+}
+
 static void term_key(int inst, int k)
 {
     T = &terms[inst];term_last=T;
@@ -480,22 +499,7 @@ static void term_key(int inst, int k)
         }
         return;
     }
-    if (ch == 0x03) {
-        char out[4096];
-        int o = 0;
-        int first = T->nlines - T->rows - T->view;
-        if (first < 0) first = 0;
-        int last = T->nlines - T->view;
-        for (int i = first; i < last; i++) {
-            const char *l = line_at(T, i);
-            for (int x = 0; l[x] && x < TCMAX && o < (int)sizeof out - 2; x++)
-                out[o++] = l[x];
-            if (o < (int)sizeof out - 1) out[o++] = '\n';
-        }
-        out[o] = 0;
-        clip_set_text(out);
-        return;
-    }
+    if (ch == 0x03) { term_copy(); return; }
     if (ch < 32) return;
 
     if (T->len < (int)sizeof(T->line) - 1) {
@@ -795,7 +799,8 @@ void app_min_client(int t, int *w, int *h)
 }
 
 int app_resizable(int t) { return t >= 0 && t < nregs && regs[t].resizable; }
-int app_live_draw(int t) { return t >= 0 && t < nregs && (regs[t].live_draw & APP_LIVE_DRAW); }
+int app_live_draw(int t) { return app_draw_flags(t) & APP_LIVE_DRAW; }
+int app_draw_flags(int t) { return t >= 0 && t < nregs ? regs[t].live_draw : 0; }
 
 extern void fault_show_banner(const char *msg);
 static volatile u8 hang_ended;
@@ -1068,11 +1073,11 @@ void apps_init(void)
         .open = term_reset, .close = term_close, .draw = term_draw, .key = term_key,
         .wheel = term_wheel, .client_size = term_csize, .min_client = term_min, .drop=term_drop,
 
-        .live_draw = 1,
+        .live_draw = APP_LIVE_DRAW | APP_POINTER_FREE,
     };
     static const AppDesc dsys = {
         .title = "System Info", .max_inst = 1, .in_menu = 1,
-        .draw = sysinfo_draw_w, .client_size = sysinfo_csize,
+        .draw = sysinfo_draw_w, .client_size = sysinfo_csize, .live_draw = APP_POINTER_FREE | APP_NO_CARET,
     };
     register_app(&dterm);
     register_app(&dsys);

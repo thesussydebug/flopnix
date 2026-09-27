@@ -531,7 +531,7 @@ int kext_entry(const Kapi *k)
     if (k->version < KAPI_VERSION) return 1;
     api = k;
     gfx = gdi_bind(k, 11);
-    static const AppDesc d = {.live_draw=APP_INDEPENDENT,
+    static const AppDesc d = {.live_draw=APP_INDEPENDENT|APP_POINTER_FREE|APP_NO_CARET,
         .title = "Task Manager", .max_inst = 1, .in_menu = 1, .resizable = 1,
         .open = tm_open, .draw = tm_draw, .mouse = tm_mouse, .key = tm_key, .close = tm_close,
         .client_size = tm_csize, .min_client=tm_min, .category = APP_CAT_DEV,

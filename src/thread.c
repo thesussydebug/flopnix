@@ -72,7 +72,7 @@ void threads_init(void)
     thr_on = 1;
 }
 
-int thread_create(void (*fn)(void), const char *name)
+__attribute__((minsize)) int thread_create(void (*fn)(void), const char *name)
 {
     if (!thr_on || !fn) return -1;
     int s = -1;
@@ -228,7 +228,7 @@ static u32 stack_used(int s)
     return THR_STACK - i * 4;
 }
 
-int thread_info(int slot, ThreadInfo *o)
+__attribute__((minsize)) int thread_info(int slot, ThreadInfo *o)
 {
     if (slot < 0 || slot >= THR_MAX || !o) return 0;
     o->state = panic_threads[slot].state;
@@ -240,7 +240,7 @@ int thread_info(int slot, ThreadInfo *o)
     return panic_threads[slot].state != THR_FREE;
 }
 
-int threads_selftest(void)
+__attribute__((minsize)) int threads_selftest(void)
 {
     thr_testing = 1;
     tt_n = tt_fpu_failed = 0;

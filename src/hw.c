@@ -137,7 +137,7 @@ static u8 mouse_wheel;
 int mouse_has_wheel(void) { return mouse_wheel; }
 
 static Ms2Asm masm;
-static void drain_8042(void)
+__attribute__((minsize)) static void drain_8042(void)
 {
     for (;;) {
         u8 st = inb(0x64);
@@ -302,7 +302,7 @@ static u8 mouse_id(void)
     return inb(0x60);
 }
 
-int mouse_init(void)
+__attribute__((minsize)) int mouse_init(void)
 {
     kbc_flush();
     if (!kbc_wait_in()) return 0;
@@ -364,7 +364,7 @@ void pci_cfg_write(u8 bus, u8 dev, u8 fn, u8 off, u32 v)
     outl(0xCFC, v);
 }
 
-int pci_find(u16 vendor, u16 device, int *bus, int *dev, int *fn)
+__attribute__((minsize)) int pci_find(u16 vendor, u16 device, int *bus, int *dev, int *fn)
 {
     for (int b = 0; b < 4; b++)
         for (int d = 0; d < 32; d++)
@@ -398,7 +398,7 @@ static void cmos_w(u8 r, u8 v)
 static int frombcd(u8 v) { return (v >> 4) * 10 + (v & 0x0F); }
 static u8  tobcd(int v)  { return (u8)(((v / 10) << 4) | (v % 10)); }
 
-void rtc_read(int *h, int *m, int *s, int *D, int *M, int *Y)
+__attribute__((minsize)) void rtc_read(int *h, int *m, int *s, int *D, int *M, int *Y)
 {
     for (int i = 0; i < 100000 && (cmos(0x0A) & 0x80); i++) ;
     u8 ss = cmos(0), mm = cmos(2), hh = cmos(4);
@@ -438,7 +438,7 @@ void dos_fmt(u32 dt, char *buf)
     kfmt(buf, 16, "%02d-%02d-%02d %02d:%02d", Y % 100, M, D, h, m);
 }
 
-int rtc_write(int h, int m, int s, int D, int M, int Y)
+__attribute__((minsize)) int rtc_write(int h, int m, int s, int D, int M, int Y)
 {
     if (h < 0 || h > 23 || m < 0 || m > 59 || s < 0 || s > 59 ||
         D < 1 || D > 31 || M < 1 || M > 12 || Y < 2000 || Y > 2099)

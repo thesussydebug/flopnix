@@ -263,7 +263,7 @@ int kext_entry(const Kapi *k)
 {
     if(k->version<KAPI_VERSION)return 1;api=k;ui_init(k,0);
     static const AppDesc d={.title="Kernel Update",.max_inst=1,.in_menu=1,.category=APP_CAT_SYSTEM,
-        .open=opened,.close=closed,.draw=draw,.key=key,.mouse=mouse,.client_size=size,.live_draw=APP_INDEPENDENT};
+        .open=opened,.close=closed,.draw=draw,.key=key,.mouse=mouse,.client_size=size,.live_draw=APP_INDEPENDENT|APP_POINTER_FREE};
     if(api->register_app(&d)<0)return 1;
     return api->timer_add(25,push_tick,0)<0;
 }

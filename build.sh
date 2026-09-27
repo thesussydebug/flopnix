@@ -53,7 +53,7 @@ echo "== compiling"
 
 for f in emergency util hw cpu mtrr paging ring3 fdc fs uhci services uisvc config gfx gui apps kext heap kupdate debug fault thread cpuacct kernel; do
     SZ=
-    case $f in fs|fdc|cpuacct|kernel|uhci|paging|apps|debug|emergency|cpu|mtrr|ring3|config|kupdate|fault|kext|uisvc|services) SZ=-Oz;; hw|heap|thread|gui) SZ=-Os;; esac
+    case $f in fs|fdc|cpuacct|kernel|uhci|paging|apps|debug|emergency|cpu|mtrr|ring3|config|kupdate|fault|kext|uisvc|services) SZ=-Oz;; hw|heap|thread) SZ=-Os;; gui) SZ=-Oz;; esac
     clang $CFLAGS $SZ -c src/$f.c -o out/$f.o
 done
 

@@ -13,7 +13,7 @@ u8 *const iobuf = (u8 *)MEM_IO_BASE;
 char   name_scratch[64][64];
 FatEnt fe_scratch[128];
 
-int k_atoi(const char *s)
+__attribute__((minsize)) int k_atoi(const char *s)
 {
     int v = 0, neg = 0;
     while (*s == ' ' || *s == '\t') s++;
@@ -44,7 +44,7 @@ const char *k_strstr(const char *hay, const char *needle)
 int k_toupper(int c) { return (c >= 'a' && c <= 'z') ? c - 32 : c; }
 int k_tolower(int c) { return (c >= 'A' && c <= 'Z') ? c + 32 : c; }
 
-void ksort(void *base, int n, int size, int (*cmp)(const void *, const void *))
+__attribute__((minsize)) void ksort(void *base, int n, int size, int (*cmp)(const void *, const void *))
 {
     u8 tmp[256];
     u8 *a = base;
@@ -80,7 +80,7 @@ u32 krand(void)
 char klog_buf[2048];
 static int  klog_len;
 
-void klog(const char *s)
+__attribute__((minsize)) void klog(const char *s)
 {
     int n = (int)strlen(s);
 
@@ -97,7 +97,7 @@ void klog(const char *s)
     irq_restore(flags);
 }
 
-int klog_read(char *dst, int cap)
+__attribute__((minsize)) int klog_read(char *dst, int cap)
 {
     if(!dst||cap<=0)return 0;
     u32 flags=irq_save();
@@ -117,7 +117,7 @@ int trace_dirty;
 u32 trace_seq_get(void) { return trace_seq; }
 u32 trace_held(void)    { return (u32)trace_len; }
 
-int trace_slice_read(u32 off, char *dst, u32 count)
+__attribute__((minsize)) int trace_slice_read(u32 off, char *dst, u32 count)
 {
     if(!dst)return 0;
     u32 flags=irq_save();
@@ -128,7 +128,7 @@ int trace_slice_read(u32 off, char *dst, u32 count)
     return (int)count;
 }
 
-void ktrace(const char *msg)
+__attribute__((minsize)) void ktrace(const char *msg)
 {
     char line[208];
     kfmt(line, sizeof line, "%us %s\n", ticks / 100, msg);
@@ -148,7 +148,7 @@ void ktrace(const char *msg)
     irq_restore(flags);
 }
 
-int trace_read(char *dst, int cap)
+__attribute__((minsize)) int trace_read(char *dst, int cap)
 {
     if(!dst||cap<=0)return 0;
     u32 flags=irq_save();
@@ -178,7 +178,7 @@ static int mmx_ok;
 
 int  mmx_available(void) { return mmx_ok; }
 
-void mmx_init(void)
+__attribute__((minsize)) void mmx_init(void)
 {
     u32 r[4];
     cpuid_raw(0, r);
@@ -342,7 +342,7 @@ static void one_dp(u32 whole, u32 rem, u32 div, const char *unit, char *b, int c
     kfmt(b, cap, "%u.%u %s", whole, tenths, unit);
 }
 
-void human_size(u32 bytes, char *buf, int cap)
+__attribute__((minsize)) void human_size(u32 bytes, char *buf, int cap)
 {
     if (bytes < 1024) { kfmt(buf, cap, "%u B", bytes); return; }
     if (bytes < 1024u * 1024) {
@@ -359,7 +359,7 @@ void human_size(u32 bytes, char *buf, int cap)
     one_dp(gb, bytes % (1024u * 1024 * 1024), 1024u * 1024 * 1024, "GB", buf, cap);
 }
 
-void human_size_kb(u32 kb, char *buf, int cap)
+__attribute__((minsize)) void human_size_kb(u32 kb, char *buf, int cap)
 {
     if (kb < 1024) { kfmt(buf, cap, "%u KB", kb); return; }
     if (kb < 1024u * 1024) {
@@ -436,7 +436,7 @@ __attribute__((minsize)) void kfmt(char *dst, int cap, const char *f, ...)
 static const char B64[] =
     "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
 
-int b64_encode(const u8 *in, u32 n, char *out, int cap)
+__attribute__((minsize)) int b64_encode(const u8 *in, u32 n, char *out, int cap)
 {
     if (cap <= 0) return -1;
     int o = 0;
@@ -465,7 +465,7 @@ static int b64val(char c)
     return -1;
 }
 
-int b64_decode(const char *in, u8 *out, int cap)
+__attribute__((minsize)) int b64_decode(const char *in, u8 *out, int cap)
 {
     int o = 0, bits = 0;
     u32 acc = 0;
@@ -484,7 +484,7 @@ int b64_decode(const char *in, u8 *out, int cap)
     return o;
 }
 
-u32 crc32(const void *data, u32 n)
+__attribute__((minsize)) u32 crc32(const void *data, u32 n)
 {
     const u8 *p = data;
     u32 c = 0xFFFFFFFFu;
@@ -506,7 +506,7 @@ u32 hash_fnv(const void *data, u32 n)
 
 static char hexdig(int v) { return v < 10 ? '0' + v : 'a' + v - 10; }
 
-void uuid_gen(char *out)
+__attribute__((minsize)) void uuid_gen(char *out)
 {
     u8 b[16];
     for (int i = 0; i < 16; i += 4) {
@@ -540,7 +540,7 @@ const char *path_ext(const char *p)
     return (dot && dot[1]) ? dot + 1 : "";
 }
 
-void path_dir(const char *p, char *out, int cap)
+__attribute__((minsize)) void path_dir(const char *p, char *out, int cap)
 {
     if (cap <= 0) return;
     int cut = -1;
@@ -553,7 +553,7 @@ void path_dir(const char *p, char *out, int cap)
     out[n] = 0;
 }
 
-void path_join(char *out, int cap, const char *dir, const char *name)
+__attribute__((minsize)) void path_join(char *out, int cap, const char *dir, const char *name)
 {
     int n = strlen(dir);
     int trail = n && (dir[n - 1] == '/' || dir[n - 1] == ':');
@@ -574,7 +574,7 @@ static int dow(int y, int m, int d)
     return (y + y / 4 - y / 100 + y / 400 + t[m - 1] + d) % 7;
 }
 
-void date_fmt(u32 dt, const char *fmt, char *out, int cap)
+__attribute__((minsize)) void date_fmt(u32 dt, const char *fmt, char *out, int cap)
 {
     if (cap <= 0) return;
     int Y = 1980 + ((dt >> 25) & 0x7F);
@@ -649,7 +649,7 @@ static int ms_grow(MemStream *s, u32 need)
     return 1;
 }
 
-int ms_write(MemStream *s, const void *data, u32 n)
+__attribute__((minsize)) int ms_write(MemStream *s, const void *data, u32 n)
 {
     if (!ms_grow(s, n)) {
         u32 room = s->pos < s->cap ? s->cap - s->pos : 0;

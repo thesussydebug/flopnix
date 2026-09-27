@@ -20,7 +20,7 @@ static u32 grow_limit;
 static u8 heap_on;
 MemBuffer panic_buffers[32];
 
-void mem_track(const char *name, const void *ptr, u32 size)
+__attribute__((minsize)) void mem_track(const char *name, const void *ptr, u32 size)
 {
     if (!name || !ptr) return;
     if(!size){mem_untrack(ptr);return;}
@@ -47,7 +47,7 @@ int mem_buffer(int index, MemBuffer *out)
     irq_restore(flags);if(found)*out=value;return found;
 }
 
-void heap_init(void)
+__attribute__((minsize)) void heap_init(void)
 {
     heap_top = memory.heap_end;
     grow_base = grow_top = memory.pool_end > heap_top ? memory.pool_end : heap_top;
@@ -136,7 +136,7 @@ void *kmalloc(u32 n)
     return alloc_failed(n,(u32)__builtin_return_address(0));
 }
 
-void *krealloc(void *p, u32 n)
+__attribute__((minsize)) void *krealloc(void *p, u32 n)
 {
     if (!p) return kmalloc(n);
     if (!n) { kfree(p); return 0; }

@@ -253,7 +253,7 @@ int kext_entry(const Kapi *k)
     if (k->version < KAPI_VERSION) return 1;
     api = k;
     gfx = gdi_bind(k, 11);
-    static const AppDesc d = {.live_draw=APP_LIVE_DRAW|APP_INDEPENDENT,
+    static const AppDesc d = {.live_draw=APP_LIVE_DRAW|APP_INDEPENDENT|APP_POINTER_FREE|APP_NO_CARET,
         .title = "Tetris", .max_inst = 1, .in_menu = 1,
         .open = tetris_open, .close = tetris_close, .draw = tetris_draw,
         .key = tetris_key, .client_size = tetris_csize,

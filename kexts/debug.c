@@ -342,7 +342,7 @@ int kext_entry(const Kapi *k)
     if(k->version<KAPI_VERSION)return 1;
     api=k;core=k->service_get("debug.core");if(!core||core->abi!=DEBUG_ABI)return 1;
     static const AppDesc d={.title="Debug",.max_inst=1,.in_menu=0,.draw=draw,
-        .key=key,.mouse=mouse,.wheel=wheel,.client_size=size,.live_draw=APP_INDEPENDENT};
+        .key=key,.mouse=mouse,.wheel=wheel,.client_size=size,.live_draw=APP_INDEPENDENT|APP_POINTER_FREE|APP_NO_CARET};
     appid=api->register_app(&d);if(appid<0)return 1;
     u32 saved=0;api->config_get("debug.flags",&saved);ops.flags=saved&SAVED_FLAGS;
     diag_tick=*api->ticks-100;

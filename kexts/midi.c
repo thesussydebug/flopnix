@@ -244,7 +244,7 @@ static void midi_tick(void *ctx)
         all_off();
         api->strlcpy(msg, "finished", sizeof msg);
     }
-    api->gui_dirty();
+    if (fired || !playing) api->win_redraw(my_type, 0);
 }
 
 static void picked(const char *spec, void *ctx)
@@ -382,7 +382,7 @@ int kext_entry(const Kapi *k)
 
     fm = fm_bind(k, FM_ABI);
     voices_reset();
-    static const AppDesc d = {.live_draw=APP_INDEPENDENT,
+    static const AppDesc d = {.live_draw=APP_INDEPENDENT|APP_POINTER_FREE|APP_NO_CARET,
         .title = "MIDI Player", .max_inst = 1, .in_menu = 1, .resizable = 1,
         .open = m_open, .draw = m_draw, .mouse = m_mouse,
         .client_size = m_csize, .category = APP_CAT_PROGRAMS,

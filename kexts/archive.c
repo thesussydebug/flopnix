@@ -356,7 +356,7 @@ static int open_file(const char *name,const char *full,const u8 *bytes,int n)
 const KextHeader kext_header={KEXT_MAGIC,KAPI_VERSION,KEXT_KIND_APP,0,"Archive Manager"};
 int kext_entry(const Kapi *k)
 {
-    api=k;ui_init(k,0);static const AppDesc d={.live_draw=APP_INDEPENDENT|APP_CLOSE_REQUEST,.title="Archive Manager",.max_inst=1,.in_menu=1,.resizable=1,.category=APP_CAT_PROGRAMS,
+    api=k;ui_init(k,0);static const AppDesc d={.live_draw=APP_INDEPENDENT|APP_CLOSE_REQUEST|APP_POINTER_FREE,.title="Archive Manager",.max_inst=1,.in_menu=1,.resizable=1,.category=APP_CAT_PROGRAMS,
         .open=opened,.close=closed,.draw=draw,.key=key,.mouse=mouse,.wheel=wheel,.drop=dropped,.client_size=initial,.min_client=size};
     type=k->register_app(&d);if(type<0)return 1;
     k->register_opener("fpa",open_file);k->register_opener("pz",open_file);return 0;

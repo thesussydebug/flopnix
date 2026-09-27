@@ -32,7 +32,7 @@ static void vb_set_bank(int bank)
     vb_bank = bank;
 }
 
-static int vb_find_scheme(void)
+__attribute__((minsize)) static int vb_find_scheme(void)
 {
     for (int bus = 0; bus < 4; bus++)
         for (int dev = 0; dev < 32; dev++) {
@@ -64,7 +64,7 @@ static int vb_find_scheme(void)
     return VB_NONE;
 }
 
-static void vga13h_set(void)
+__attribute__((minsize)) static void vga13h_set(void)
 {
     static const u8 seq[5]  = { 0x03,0x01,0x0F,0x00,0x0E };
     static const u8 crtc[25]= { 0x5F,0x4F,0x50,0x82,0x54,0x80,0xBF,0x1F,
@@ -123,7 +123,7 @@ u8 palette_nearest(u8 r, u8 g, u8 b)
     return (u8)best;
 }
 
-static void set_palette(void)
+__attribute__((minsize)) static void set_palette(void)
 {
     for (int i = 0; i < 16; i++)
         dac(i, pal16[i][0], pal16[i][1], pal16[i][2]);
@@ -180,21 +180,28 @@ __attribute__((minsize)) void gfx_init(void)
 }
 
 static int clx0, cly0, clx1 = 1 << 30, cly1 = 1 << 30;
+static int bnx0, bny0, bnx1 = 1 << 30, bny1 = 1 << 30;
 
 void set_clip(int x, int y, int w, int h)
 {
-    clx0 = x < 0 ? 0 : x;
-    cly0 = y < 0 ? 0 : y;
-    clx1 = x + w;
-    cly1 = y + h;
+    clx0 = x < bnx0 ? bnx0 : x;
+    cly0 = y < bny0 ? bny0 : y;
+    clx1 = x + w > bnx1 ? bnx1 : x + w;
+    cly1 = y + h > bny1 ? bny1 : y + h;
 }
 
 void clear_clip(void)
 {
-    clx0 = 0;
-    cly0 = 0;
-    clx1 = 1 << 30;
-    cly1 = 1 << 30;
+    clx0 = bnx0;
+    cly0 = bny0;
+    clx1 = bnx1;
+    cly1 = bny1;
+}
+
+void clip_bound(int x, int y, int w, int h)
+{
+    bnx0 = x; bny0 = y; bnx1 = x + w; bny1 = y + h;
+    clear_clip();
 }
 
 int surface_lock(u8 **px, int *pitch, int *w, int *h)
@@ -218,8 +225,10 @@ void clip_rect_get(int *x, int *y, int *w, int *h)
     if (h) *h = y1 > y0 ? y1 - y0 : 0;
 }
 
+void (*fill_hook)(int x0, int y0, int x1, int y1);
 void fill_rect(int x, int y, int w, int h, u8 c)
 {
+    if (fill_hook) fill_hook(x, y, x + w, y + h);
     if (x < clx0) { w += x - clx0; x = clx0; }
     if (y < cly0) { h += y - cly0; y = cly0; }
     if (x + w > clx1) w = clx1 - x;
@@ -270,7 +279,7 @@ void rect(int x, int y, int w, int h, u8 c)
     fill_rect(x + w - 1, y, 1, h, c);
 }
 
-void circle(int cx, int cy, int r, u8 c)
+__attribute__((minsize)) void circle(int cx, int cy, int r, u8 c)
 {
     int x = r, y = 0, err = 1 - r;
     while (x >= y) {
@@ -284,7 +293,7 @@ void circle(int cx, int cy, int r, u8 c)
     }
 }
 
-void fill_circle(int cx, int cy, int r, u8 c)
+__attribute__((minsize)) void fill_circle(int cx, int cy, int r, u8 c)
 {
     int x = r, y = 0, err = 1 - r;
     while (x >= y) {
@@ -340,7 +349,7 @@ void draw_char(int x, int y, char ch, u8 fg)
     }
 }
 
-void draw_text_scaled(int x, int y, const char *s, u8 fg, int sx, int sy)
+__attribute__((minsize)) void draw_text_scaled(int x, int y, const char *s, u8 fg, int sx, int sy)
 {
     if (sx < 1) sx = 1;
     if (sy < 1) sy = 1;
@@ -420,7 +429,7 @@ int sbar_from_pos(int len, int total, int vis, int pos)
     return off;
 }
 
-void focus_rect(int x, int y, int w, int h)
+__attribute__((minsize)) void focus_rect(int x, int y, int w, int h)
 {
     for (int i = 0; i < w; i += 2) {
         fill_rect(x + i, y, 1, 1, C_BLACK);
@@ -432,7 +441,7 @@ void focus_rect(int x, int y, int w, int h)
     }
 }
 
-void blit(int x, int y, int w, int h, const u8 *src, int spitch)
+static void blit_any(int x, int y, int w, int h, const u8 *src, int spitch, int key)
 {
     int sx = 0, sy = 0;
     if (x < clx0) { sx += clx0 - x; w -= clx0 - x; x = clx0; }
@@ -444,20 +453,25 @@ void blit(int x, int y, int w, int h, const u8 *src, int spitch)
     if (x + w > SW) w = SW - x;
     if (y + h > SH) h = SH - y;
     if (w <= 0 || h <= 0) return;
-    for (int j = 0; j < h; j++)
-        memcpy(BACKBUF + (y + j) * SW + x, src + (sy + j) * spitch + sx, w);
+    for (int j = 0; j < h; j++) {
+        u8 *d = BACKBUF + (y + j) * SW + x;
+        const u8 *s = src + (sy + j) * spitch + sx;
+        if (key < 0) memcpy(d, s, w);
+        else for (int i = 0; i < w; i++) if (s[i] != key) d[i] = s[i];
+    }
+}
+
+void blit(int x, int y, int w, int h, const u8 *src, int spitch)
+{
+    blit_any(x, y, w, h, src, spitch, -1);
 }
 
 void blit_key(int x, int y, int w, int h, const u8 *src, int spitch, u8 key)
 {
-    for (int j = 0; j < h; j++)
-        for (int i = 0; i < w; i++) {
-            u8 c = src[j * spitch + i];
-            if (c != key) pixel(x + i, y + j, c);
-        }
+    blit_any(x, y, w, h, src, spitch, key);
 }
 
-void read_rect(int x, int y, int w, int h, u8 *dst, int dpitch)
+__attribute__((minsize)) void read_rect(int x, int y, int w, int h, u8 *dst, int dpitch)
 {
     for (int j = 0; j < h; j++)
         for (int i = 0; i < w; i++)
@@ -531,7 +545,7 @@ static const char *const cur_arrow[] = {
     "......XX...",
 };
 
-void draw_cursor(int x, int y)
+__attribute__((minsize)) void draw_cursor(int x, int y)
 {
     if (cur_hidden) return;
     if (cur_kind == CUR_TEXT) {
@@ -563,26 +577,58 @@ void draw_cursor(int x, int y)
     }
 }
 
-static int flip_lo, flip_hi;
-
-void flip_rows(int y0, int y1) { flip_lo = y0 < 0 ? 0 : y0; flip_hi = y1 < SH ? y1 : SH; }
+#define FL_MAX 16
+static int fl[FL_MAX][4], fl_n;
+static u8 fl_any;
+/* Adds a damaged rectangle, merging it into one it barely enlarges. */
+__attribute__((minsize)) void flip_area(int x0, int y0, int x1, int y1)
+{
+    fl_any = 1;
+    if (x0 < 0) x0 = 0;
+    if (y0 < 0) y0 = 0;
+    if (x1 > SW) x1 = SW;
+    if (y1 > SH) y1 = SH;
+    if (x0 >= x1 || y0 >= y1) return;
+    int *r = fl[FL_MAX - 1];
+    for (int i = 0; i < fl_n; i++) {
+        int *q = fl[i];
+        int a = q[0] < x0 ? q[0] : x0, b = q[1] < y0 ? q[1] : y0;
+        int c = q[2] > x1 ? q[2] : x1, d = q[3] > y1 ? q[3] : y1;
+        if ((c - a) * (d - b) <= (q[2] - q[0]) * (q[3] - q[1]) + (x1 - x0) * (y1 - y0) + 2048) { r = q; goto grow; }
+    }
+    if (fl_n < FL_MAX) {
+        r = fl[fl_n++];
+        r[0] = x0; r[1] = y0; r[2] = x1; r[3] = y1;
+        return;
+    }
+grow:
+    if (x0 < r[0]) r[0] = x0;
+    if (y0 < r[1]) r[1] = y0;
+    if (x1 > r[2]) r[2] = x1;
+    if (y1 > r[3]) r[3] = y1;
+}
 
 __attribute__((minsize)) void flip(void)
 {
-    int lo = flip_lo, hi = flip_hi ? flip_hi : SH;
-    flip_lo = flip_hi = 0;
+    if (!fl_any) flip_area(0, 0, SW, SH);
+    int n = fl_n, whole = 0;
+    fl_n = fl_any = 0;
     if (!shadow_attempted && (BOOTINFO->vbe == 2 || (u32)lfb == 0xa0000) && heap_avail()) {
         shadow_attempted = 1;
         u32 bytes = (u32)SW * SH;
         if (heap_avail() > bytes + 131072u) flip_shadow = kmalloc(bytes);
     }
-    for (int y = lo; y < hi; y++) {
-        int x = 0, len = SW;
+    for (int k = 0; k < n; k++) {
+    int x0 = fl[k][0], lo = fl[k][1], x1 = fl[k][2], hi = fl[k][3];
+    whole |= !lo && hi == SH && !x0 && x1 == SW;
+    for (int y = lo; y < hi && x0 < x1; y++) {
+        int x = 0, len = x1 - x0;
         if (flip_shadow && shadow_valid &&
-            !fb_span(BACKBUF + y * SW, flip_shadow + y * SW, SW, &x, &len)) {
+            !fb_span(BACKBUF + y * SW + x0, flip_shadow + y * SW + x0, len, &x, &len)) {
             fb_skip_bytes += SW;
             continue;
         }
+        x += x0;
         fb_copy_bytes += len;
         fb_skip_bytes += SW - len;
         const u8 *source = BACKBUF;
@@ -602,7 +648,8 @@ __attribute__((minsize)) void flip(void)
             }
         }
     }
-    if (flip_shadow && !lo && hi == SH) shadow_valid = 1;
+    }
+    if (flip_shadow && whole) shadow_valid = 1;
 }
 
 #include "panicnet.h"

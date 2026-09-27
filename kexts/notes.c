@@ -377,7 +377,7 @@ int kext_entry(const Kapi *k)
     gfx = gdi_bind(k, 11);
     for (int i = 0; i < NMAX; i++) inst_of[i] = -1;
 
-    static const AppDesc d = {.live_draw=APP_INDEPENDENT,
+    static const AppDesc d = {.live_draw=APP_INDEPENDENT|APP_POINTER_FREE,
         .title = "Notes", .max_inst = NMAX, .in_menu = 1, .resizable = 1,
         .open = n_open, .draw = n_draw, .mouse = n_mouse, .wheel = n_wheel, .key = n_key,
         .client_size = n_csize, .min_client = n_min, .close = n_close,

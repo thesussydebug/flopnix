@@ -127,6 +127,7 @@ int kext_entry(const Kapi *k)
     if (k->version < KAPI_VERSION) return 1;
     api = k;
     static const AppDesc d = {
+        .live_draw = APP_NO_CARET,
         .title = "Crash Test", .max_inst = 1, .in_menu = 1,
         .draw = cs_draw, .mouse = cs_mouse, .client_size = cs_csize, .close = cs_close,
         .category = APP_CAT_DEV,

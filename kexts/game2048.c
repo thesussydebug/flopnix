@@ -61,7 +61,7 @@ static void mouse(int i,int x,int y,int ev,int cw,int ch)
 const KextHeader kext_header={KEXT_MAGIC,KAPI_VERSION,KEXT_KIND_APP,0,"2048"};
 int kext_entry(const Kapi *k)
 {
-    api=k;ui_init(k,0);static const AppDesc d={.live_draw=APP_INDEPENDENT,.title="2048",.max_inst=1,.in_menu=1,.resizable=1,.category=APP_CAT_GAMES,
+    api=k;ui_init(k,0);static const AppDesc d={.live_draw=APP_INDEPENDENT|APP_POINTER_FREE|APP_NO_CARET,.title="2048",.max_inst=1,.in_menu=1,.resizable=1,.category=APP_CAT_GAMES,
         .open=opened,.draw=draw,.key=key,.mouse=mouse,.client_size=initial,.min_client=size};
     return k->register_app(&d)<0;
 }

@@ -21,6 +21,10 @@ static inline MemoryLayout memory_layout(u32 kb)
         m.arena = 0x1E0000u; m.arena_end = MEM_IO_BASE;
         m.pool = 0x30000u; m.pool_end = MEM_DMA_BASE;
         m.heap = MEM_IO_END; m.heap_end = kb ? kb * 1024 : 0x400000u;
+        if (kb >= 5120) {
+            m.arena = MEM_IO_BASE - 0x100000u;
+            m.fb = MEM_IO_END; m.fb_end = m.heap = MEM_IO_END + 0x50000u;
+        }
     }
     if (m.heap_end < m.heap) m.heap_end = m.heap;
     return m;

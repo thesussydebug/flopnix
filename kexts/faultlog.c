@@ -42,7 +42,7 @@ static int fl_is_open(void)
     return 0;
 }
 
-static void tick(void *ctx) { (void)ctx; if (fl_is_open()) api->gui_dirty(); }
+static void tick(void *ctx) { (void)ctx; if (fl_is_open()) api->win_redraw(my_type, 0); }
 
 static u32 sel_sequence;
 static int sel_valid, top;
@@ -186,6 +186,7 @@ int kext_entry(const Kapi *k)
     api = k;
     gfx = gdi_bind(k, 11);
     static const AppDesc d = {
+        .live_draw = APP_POINTER_FREE|APP_NO_CARET,
         .title = "Fault Log", .max_inst = 1, .in_menu = 1, .resizable = 1,
         .open = fl_open, .close = fl_close, .draw = fl_draw, .mouse = fl_mouse,
         .client_size = fl_csize, .category = APP_CAT_DEV, .wheel = fl_wheel,

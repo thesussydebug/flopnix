@@ -16,10 +16,10 @@ static inline int frame_present(const FrameState *now, const FrameState *last)
            now->blink != last->blink;
 }
 
-/* Every fourth half-second tick, or any tick under an overlay, repaints everything. */
-static inline int tick_full(unsigned beat, int overlay)
+/* Every fourth half-second tick repaints everything. */
+static inline int tick_full(unsigned beat)
 {
-    return !(beat & 3) || overlay;
+    return !(beat & 3);
 }
 
 /* Rows to copy after the cursor box moved, plus the taskbar from bar_y down when bar_y < sh. */

@@ -70,7 +70,7 @@ static void size(int i,int *w,int *h){(void)i;*w=BO_W;*h=BO_H+55;}
 const KextHeader kext_header={KEXT_MAGIC,KAPI_VERSION,KEXT_KIND_APP,0,"Breakout"};
 int kext_entry(const Kapi *k)
 {
-    api=k;ui_init(k,0);static const AppDesc d={.live_draw=APP_LIVE_DRAW|APP_INDEPENDENT,.title="Breakout",.max_inst=1,.in_menu=1,.category=APP_CAT_GAMES,
+    api=k;ui_init(k,0);static const AppDesc d={.live_draw=APP_LIVE_DRAW|APP_INDEPENDENT|APP_NO_CARET,.title="Breakout",.max_inst=1,.in_menu=1,.category=APP_CAT_GAMES,
         .open=opened,.close=closed,.draw=draw,.key=key,.mouse=mouse,.client_size=size};
     type=k->register_app(&d);return type<0;
 }

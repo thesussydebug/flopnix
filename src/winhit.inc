@@ -15,8 +15,11 @@ static inline int wh_top_at(const int *zord, int nz, const WhRect *rects,
 
 #define BORDER 3
 #define TITLEH 18
+#define WH_CLIENT (1 << 24)
+#define wh_win(code) (((code) & 15) - 1)
+#define wh_bar(code) (((code) >> 16) & 255)
 
-/* Returns what a pointer at (px, py) highlights, or -1 inside a client area. */
+/* Returns what a pointer at (px, py) highlights; WH_CLIENT marks the top window's client area. */
 static int wh_hover(const int *zord, int nz, const WhRect *rects, int px, int py,
                     int bar_y, int bw, int nbtn, int limit)
 {
@@ -43,8 +46,47 @@ static int wh_hover(const int *zord, int nz, const WhRect *rects, int px, int py
     }
     if (t && (unsigned)(px - t->x - BORDER) < (unsigned)(t->w - 2 * BORDER) &&
         (unsigned)(py - t->y - BORDER - TITLEH - 1) < (unsigned)(t->h - 2 * BORDER - TITLEH - 1))
-        return -1;
+        code |= WH_CLIENT;
     return code;
+}
+
+/* Splits window zord[k] into on-screen pieces no higher window covers; -1 if more than max. */
+__attribute__((minsize)) static int wr_visible(const int *zord, int nz, const WhRect *rects, int k, int sw, int sh,
+                      WhRect *out, int max)
+{
+    const WhRect *r = &rects[zord[k]];
+    int x0 = r->x < 0 ? 0 : r->x, y0 = r->y < 0 ? 0 : r->y;
+    int x1 = r->x + r->w < sw ? r->x + r->w : sw, y1 = r->y + r->h < sh ? r->y + r->h : sh;
+    if (x0 >= x1 || y0 >= y1) return 0;
+    out[0] = (WhRect){x0, y0, x1 - x0, y1 - y0};
+    int n = 1;
+    for (int j = k + 1; j < nz; j++) {
+        const WhRect *a = &rects[zord[j]];
+        int ax1 = a->x + a->w, ay1 = a->y + a->h;
+        for (int p = n; p-- > 0;) {
+            WhRect q = out[p];
+            int qx1 = q.x + q.w, qy1 = q.y + q.h;
+            if (a->x >= qx1 || ax1 <= q.x || a->y >= qy1 || ay1 <= q.y) continue;
+            if (n + 3 > max) return -1;
+            out[p] = out[--n];
+            int top = a->y > q.y ? a->y : q.y, bot = ay1 < qy1 ? ay1 : qy1;
+            if (a->y > q.y) out[n++] = (WhRect){q.x, q.y, q.w, a->y - q.y};
+            if (ay1 < qy1) out[n++] = (WhRect){q.x, ay1, q.w, qy1 - ay1};
+            if (a->x > q.x) out[n++] = (WhRect){q.x, top, a->x - q.x, bot - top};
+            if (ax1 < qx1) out[n++] = (WhRect){ax1, top, qx1 - ax1, bot - top};
+        }
+    }
+    return n;
+}
+
+/* Nonzero when moving from (ox, oy) to (nx, ny) enters or leaves any of the n rects. */
+static int hv_crossed(const WhRect *r, int n, int ox, int oy, int nx, int ny)
+{
+    for (int i = 0; i < n; i++, r++)
+        if (((unsigned)(ox - r->x) < (unsigned)r->w && (unsigned)(oy - r->y) < (unsigned)r->h) !=
+            ((unsigned)(nx - r->x) < (unsigned)r->w && (unsigned)(ny - r->y) < (unsigned)r->h))
+            return 1;
+    return 0;
 }
 
 static inline int wh_covered(const int *zord,int nz,const WhRect *rects,int k,int width,int height)

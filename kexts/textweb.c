@@ -332,8 +332,14 @@ static void home(void)
     const char *welcome="Browser\n\nEnter an http:// or gopher:// address, or a local path such as a:page.html or u:/page.htm. Use Open or Ctrl+O to choose a file.\n\nClick a link to open it. Right-click a link to select it for Download; click blank page space to clear the selection.\n\nGopher menus, documents, searches and downloads are supported. The Links button is shown on Gopher pages.\n\nCtrl+L selects the address. Ctrl+C copies page text. Back and Forward revisit pages.\n\nBasic HTML and embedded or inline CSS are supported. Images, tables, frames, forms and external stylesheets are supported. HTTPS, scripts and file uploads are not supported. GIFs display their first frame.\n\nPages and downloads grow as available memory permits. Local files can be opened as available memory permits. Downloads saved to A: can be up to 512 KiB.";
     formatting=1;nav_serial++;view_free(&root_view);root_view.doc=page=br_zalloc(sizeof *page);root_view.layout=br_zalloc(sizeof *root_view.layout);if(!page||!root_view.layout){view_free(&root_view);page=0;formatting=0;say("Not enough memory to open Browser.");return;}root_view.layout->width=0;active_view=&root_view;active_control=-1;br_render(page,welcome,0,"",0);formatting=0;set_address("http://");field.anchor=0;field.caret=field.len;current[0]=0;top=links_view=searching=gopher=0;selected=-1;focus=at_home=1;line_cols=0;say("Enter an address, then press Enter or Go.");
 }
-static void opened(int i){(void)i;alive=1;if(!page)home();}
-static void closed(int i){(void)i;alive=0;if(busy){closing=1;return;}dispose();}
+static int blink_timer=-1;static u8 blink_shown;
+static void blink_tick(void *ctx)
+{
+    (void)ctx;if(!alive||(!focus&&active_control<0)||*api->gui_blink==blink_shown)return;
+    for(int i=0;i<api->win_max();i++){const Win *w=api->win_slot(i);if(w&&w->type==browser_type&&api->win_is_focused((Win *)w)){blink_shown=*api->gui_blink;api->win_redraw(browser_type,0);}}
+}
+static void opened(int i){(void)i;alive=1;if(blink_timer<0)blink_timer=api->timer_add(5,blink_tick,0);if(!page)home();}
+static void closed(int i){(void)i;alive=0;if(blink_timer>=0){api->timer_del(blink_timer);blink_timer=-1;}if(busy){closing=1;return;}dispose();}
 static void size(int *w,int *h){*w=584;*h=300;}
 static void initial(int i,int *w,int *h){(void)i;*w=600;*h=328;}
 static UiRect button(int n,int cw){int count=gopher&&!at_home?7:6,w=(cw-24-(count-1)*6)/count;return ui_r(12+n*(w+6),8,w,22);}
@@ -413,7 +419,7 @@ int kext_entry(const Kapi *k)
 {
     if(k->version<KAPI_VERSION)return 1;
     api=k;ui_init(k,0);tw_grow=br_realloc;bc_init(&cache,bc_budget(k->mem_total_kb()),cache_alloc,cache_release);static const AppDesc d={.title="Browser",.max_inst=1,.in_menu=1,.resizable=1,.category=APP_CAT_PROGRAMS,
-        .open=opened,.close=closed,.draw=draw,.key=key,.mouse=mouse,.wheel=wheel,.drop=dropped,.client_size=initial,.min_client=size,.live_draw=APP_INDEPENDENT};
+        .open=opened,.close=closed,.draw=draw,.key=key,.mouse=mouse,.wheel=wheel,.drop=dropped,.client_size=initial,.min_client=size,.live_draw=APP_INDEPENDENT|APP_POINTER_FREE|APP_NO_CARET};
     browser_type=k->register_app(&d);if(browser_type<0)return 1;
     return k->register_opener("html",html_opener)<0||k->register_opener("htm",html_opener)<0;
 }

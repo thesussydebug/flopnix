@@ -397,6 +397,7 @@ int kext_entry(const Kapi *k)
     api = k;
     gfx = gdi_bind(k, 11);
     static const AppDesc d = {
+        .live_draw = APP_POINTER_FREE,
         .title = "Memory Editor", .max_inst = 1, .resizable = 1, .in_menu = 1,
         .open = me_open, .close = me_close, .draw = me_draw, .key = me_key, .mouse = me_mouse,
         .wheel = me_wheel, .client_size = me_csize, .min_client = me_min,
