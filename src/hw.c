@@ -179,6 +179,16 @@ static void (*irq_fns[16])(void);
 
 static int irq_owner[16] = { -1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1 };
 
+/* Restores the page directory that was live, which can differ from kext_current() mid-load. */
+static void irq_call(int irq)
+{
+    int resident = kext_current(), space = paging_space_current();
+    kext_enter(irq_owner[irq]);
+    irq_fns[irq]();
+    kext_enter(resident);
+    paging_space_switch(space);
+}
+
 int irq_kext_busy(int owner)
 {
     for (int i=0;i<16;i++) if (irq_fns[i] && irq_owner[i]==owner) return 1;
@@ -238,13 +248,7 @@ __attribute__((minsize)) void isr_dispatch(const u32 *frame)
     case 12: mouse_isr(); break;
     default: break;
     }
-    if (irq < 16 && irq_fns[irq]) {
-
-        int resident = kext_current();
-        kext_enter(irq_owner[irq]);
-        irq_fns[irq]();
-        kext_enter(resident);
-    }
+    if (irq < 16 && irq_fns[irq]) irq_call(irq);
 
     int outermost = (in_irq == 1);
     if (irq >= 8) outb(0xA0, 0x20);

@@ -14,6 +14,7 @@
 #include "button.h"
 
 static const Kapi *api;
+#include "deltree.inc"
 #include "fileprops.inc"
 static const GdiOps *gfx;
 static int files_type = -1;
@@ -656,7 +657,7 @@ static void act_newdir(void)
     char base[16];
     for(int n=1;n<100;n++){
         kfmt(base,sizeof base,n==1?"New folder":"Folder %d",n);
-        if(strlen(F->a_dir)+(F->a_dir[0]?1:0)+strlen(base)>=sizeof nm){strlcpy(F->fm_msg,"Folder path is too long",sizeof F->fm_msg);return;}
+        if(strlen(F->a_dir)+(F->a_dir[0]?1:0)+strlen(base)>=(u32)ft_namecap(api)){strlcpy(F->fm_msg,"Folder path is too long",sizeof F->fm_msg);return;}
         kfmt(nm,sizeof nm,F->a_dir[0]?"%s/%s":"%s%s",F->a_dir,base);
         if(!fs_exists(nm))break;
     }
@@ -673,19 +674,18 @@ static void act_newdir(void)
 
 static int del_one(const char *nm, int isdir)
 {
+    int n = 0;
     if (F->cur_drive == 0) {
         if (!isdir) return fs_delete(nm);
-
-        if (api->fs_dir_count(nm) > 0) return -3;
-        if (!api->fs_is_dir(nm)) return -1;
-        return fs_delete(nm);
+        if (!api->fs_is_dir(nm) && !api->fs_dir_count(nm)) return -1;
+        return dt_floppy(nm, &n);
     }
     char full[128];
     if (F->cur_path[0] == '/' && !F->cur_path[1])
         kfmt(full, sizeof full, "/%s", nm);
     else
         kfmt(full, sizeof full, "%s/%s", F->cur_path, nm);
-    return isdir ? api->fat_rmdir(full) : fat_delete(full);
+    return isdir ? dt_usb(full, 0, &n) : fat_delete(full);
 }
 
 static int row_is_dir(const char *nm)
@@ -701,7 +701,7 @@ static void del_confirmed(int result, void *ctx)
     if (ctx) F = (Fm *)ctx;
     if (result != MBR_YES) return;
     Fm *target = F;
-    int done = 0, busy = 0, failed = 0, loaded = 0, io_error = 0, protected = 0;
+    int done = 0, busy = 0, failed = 0, loaded = 0, io_error = 0, protected = 0, system = 0;
     u32 error_lba = 0;
     int total = F->nsel;
     for (int i = 0; i < F->nsel; i++) {
@@ -723,6 +723,7 @@ static void del_confirmed(int result, void *ctx)
             if (api->disk_stat(DS_FAILED) != before && (api->disk_stat(DS_ST1) & 2)) protected = 1;
         }
         else if (r == -3) busy++;
+        else if (r == DT_LOADED) system++;
         else failed++;
     }
     api->busy_end();
@@ -733,7 +734,8 @@ static void del_confirmed(int result, void *ctx)
         api->fs_mkdir(F->a_dir);
     sel_clear();
     F->need_refresh = 1;
-    if (busy)        strlcpy(F->fm_msg, "folder not empty", sizeof F->fm_msg);
+    if (system)      strlcpy(F->fm_msg, "Folder has loaded extensions; delete them one by one.", sizeof F->fm_msg);
+    else if (busy)   strlcpy(F->fm_msg, "folder not empty", sizeof F->fm_msg);
     else if (protected) strlcpy(F->fm_msg, "Floppy is write-protected.", sizeof F->fm_msg);
     else if (io_error) kfmt(F->fm_msg, sizeof F->fm_msg, "Disk error at sector %u. Check Disk Health.", error_lba);
     else if (failed) strlcpy(F->fm_msg, "Delete failed: file missing or device unavailable.", sizeof F->fm_msg);
@@ -757,7 +759,7 @@ static void act_delete(void)
     }
     if (!nfiles && !nfolders) return;
 
-    char q[96];
+    char q[160];
     del_prompt(q, sizeof q, nfiles, nfolders, first);
     api->msgbox("Delete", q, MB_YESNO, del_confirmed, F);
 }
@@ -815,7 +817,7 @@ static void commit_rename(void)
 
     if (F->rows[i].is_dir) {
         char dst[FS_NAMELEN];
-        if(strlen(F->a_dir)+(F->a_dir[0]?1:0)+strlen(F->rnbuf)>=sizeof dst){strlcpy(F->fm_msg,"Path is too long",sizeof F->fm_msg);return;}
+        if(strlen(F->a_dir)+(F->a_dir[0]?1:0)+strlen(F->rnbuf)>=(u32)ft_namecap(api)){strlcpy(F->fm_msg,"Path is too long",sizeof F->fm_msg);return;}
         kfmt(dst,sizeof dst,F->a_dir[0]?"%s/%s":"%s%s",F->a_dir,F->rnbuf);
         int r = api->fs_rename_dir(F->rows[i].name, dst);
         if (r == 0) {
@@ -828,7 +830,7 @@ static void commit_rename(void)
     }
 
     char full[FS_NAMELEN];
-    if(strlen(F->a_dir)+(F->a_dir[0]?1:0)+strlen(F->rnbuf)>=sizeof full){strlcpy(F->fm_msg,"Path is too long",sizeof F->fm_msg);return;}
+    if(strlen(F->a_dir)+(F->a_dir[0]?1:0)+strlen(F->rnbuf)>=(u32)ft_namecap(api)){strlcpy(F->fm_msg,"Path is too long",sizeof F->fm_msg);return;}
     if (F->a_dir[0]) kfmt(full, sizeof full, "%s/%s", F->a_dir, F->rnbuf);
     else strlcpy(full, F->rnbuf, sizeof full);
     if (!strcmp(full, F->rows[i].name)) return;

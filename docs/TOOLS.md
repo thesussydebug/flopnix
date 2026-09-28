@@ -51,4 +51,6 @@ python tools/ppm2png.py screen.ppm screen.png
 
 The extension helper places `.kx` beside its source. An optional image
 argument installs the extension into that image. Production builds use the
-explicit list in `build.sh`; examples and test probes are separate.
+explicit list in `build.sh`; examples and test probes are separate. The
+`selftest` and `selftest_small` suites build at `-Os` with local symbols
+stripped, so they fit on the floppy and under the loader's 512-symbol limit.

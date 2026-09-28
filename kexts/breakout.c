@@ -12,7 +12,7 @@ static void tick(void *ctx)
 {
     (void)ctx;int focused=0;
     for(int i=0;i<api->win_max();i++){const Win *w=api->win_slot(i);if(w&&w->type==type&&api->win_is_focused((Win *)w)){focused=1;break;}}
-    if(!focused){pause_game();api->gui_dirty();return;}
+    if(!focused){pause_game();api->win_redraw(type,0);return;}
     int dir=(api->key_down(K_RIGHT)||api->key_down('d'))-(api->key_down(K_LEFT)||api->key_down('a'));
     u32 elapsed=*api->ticks-last_step;
     if(elapsed>8)elapsed=8;

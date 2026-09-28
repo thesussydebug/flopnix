@@ -193,6 +193,7 @@ u32 fdc_stat(int what)
     case DS_ST0:        return fh_st[0];
     case DS_ST1:        return fh_st[1];
     case DS_ST2:        return fh_st[2];
+    case DS_NAMELEN:    return fs_name_cap();
     }
     return 0;
 }

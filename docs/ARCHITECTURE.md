@@ -253,7 +253,8 @@ the same source. See [MAINTAINING.md §3 and §5](MAINTAINING.md#3-testing-the-i
 | Kernel entry, init report | `src/kernel.c` |
 | Window manager, compositor, screensaver | `src/gui.c` |
 | Graphics primitives, palette, framebuffer | `src/gfx.c` |
-| Shell and terminal | `src/apps.c` |
+| Command dispatch, `shell.stream`, System Info | `src/apps.c` |
+| Terminal and most shell commands | `kexts/term.inc`, `kexts/shell.c` |
 | FLOPFS | `src/fs.c` |
 | Extension loader + the Kapi table | `src/kext.c` |
 | The ABI itself | `src/kapi.h` |

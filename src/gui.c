@@ -30,6 +30,7 @@ static u16 win_dirty;
 
 static char fault_banner[128];
 static u32  fault_banner_until;
+static u8   banner_on;
 
 static char busy_title[24], busy_msg[44];
 static int  busy_frac = -1;
@@ -193,7 +194,8 @@ static int topitem_y(int y0, int i)
     return y0 + 2 + NCAT * MITEMH + MSEP;
 }
 
-__attribute__((minsize)) static void submenu_geo(int cat, int *sx, int *sy, int *sw, int *sh)
+static int sub_rh;
+__attribute__((minsize)) static int submenu_geo(int cat, int *sx, int *sy, int *sw, int *sh)
 {
     int x0, y0, mh;
     topmenu_geo(&x0, &y0, &mh);
@@ -202,13 +204,27 @@ __attribute__((minsize)) static void submenu_geo(int cat, int *sx, int *sy, int 
         int l = (int)strlen(app_desc(cat_app(cat, i))->title);
         if (l > wide) wide = l;
     }
-    *sw = wide * 8 + 20;
+    int rows = (SH - TBH - 4) / MITEMH, cols = 1;
+    sub_rh = MITEMH;
+    if (n > rows) {
+        sub_rh = 16;
+        rows = (SH - TBH - 4) / 16;
+        cols = (n + rows - 1) / rows;
+        rows = (n + cols - 1) / cols;
+    }
+    if (rows > n) rows = n;
+    if (rows < 1) rows = 1;
+    *sw = wide * 8 + (cols > 1 ? 14 : 20);
     if (*sw < 96) *sw = 96;
-    *sh = n * MITEMH + 4;
+    *sw *= cols;
+    *sh = rows * sub_rh + 4;
     *sx = x0 + MENUW - 2;
+    if (*sx + *sw > SW) *sx = SW - *sw;
+    if (*sx < 0) *sx = 0;
     *sy = topitem_y(y0, cat) - 2;
     if (*sy + *sh > SH - TBH) *sy = SH - TBH - *sh;
     if (*sy < 0) *sy = 0;
+    return rows;
 }
 
 static int topcat_at(int px, int py)
@@ -227,10 +243,10 @@ __attribute__((minsize)) static int submenu_at(int px, int py)
 {
     if (open_cat < 0) return -1;
     int sx, sy, sw, sh;
-    submenu_geo(open_cat, &sx, &sy, &sw, &sh);
-    if (px < sx || px >= sx + sw || py < sy || py >= sy + sh) return -1;
-    int idx = (py - sy - 2) / MITEMH;
-    return (idx >= 0 && idx < cat_count(open_cat)) ? idx : -1;
+    int rows = submenu_geo(open_cat, &sx, &sy, &sw, &sh), n = cat_count(open_cat);
+    if (px < sx || px >= sx + sw || py < sy + 2 || py >= sy + 2 + rows * sub_rh) return -1;
+    int idx = (px - sx) / (sw / ((n + rows - 1) / rows)) * rows + (py - sy - 2) / sub_rh;
+    return idx < n ? idx : -1;
 }
 
 static int in(int px, int py, int x, int y, int w, int h)
@@ -672,6 +688,7 @@ __attribute__((minsize)) void gui_tick(void)
             for (int i = 0; i < MAXWIN; i++) if (wins[i].used && app_busy(i)) win_repaint(i);
         }
     }
+    if (fault_banner[0] && (i32)(ticks - fault_banner_until) >= 0) { fault_banner[0] = 0; gui_dirty = 1; }
     if (!ss_active && CFG->ss_enable &&
         (u32)(ticks - last_input) > (u32)CFG->ss_secs * 100) {
         ss_active = 1;
@@ -689,10 +706,8 @@ __attribute__((minsize)) void gui_tick(void)
             if (ssy >= SH - SS_H) { ssy = SH - SS_H; ssdy = -ssdy; ss_col = cols[++ci % 6]; }
             gui_dirty = 1;
         }
-    } else if ((u32)(ticks - lasta) >= 3) {
-        lasta = ticks;
-        apps_animate();
-        if (anim_claims) gui_invalidate();
+    } else if (anim_claims) {
+        if ((u32)(ticks - lasta) >= 3) { lasta = ticks; gui_invalidate(); }
     }
 }
 
@@ -834,7 +849,7 @@ __attribute__((minsize)) void gui_key(int k)
     }
     if(k==20&&(kbd_mods()&2)){
         menu_open=0;open_cat=-1;at_k=-1;
-        gui_launch(WT_TERM);gui_dirty=1;return;
+        gui_launch(app_find("Terminal"));gui_dirty=1;return;
     }
     if (k == K_MENU) {
         menu_open = !menu_open;
@@ -1177,11 +1192,11 @@ __attribute__((minsize)) static void draw_win(int i, int foc)
 
 __attribute__((minsize)) static void draw_menu(void)
 {
-    int x0, y0, mh, sx, sy, sw, sh;
+    int x0, y0, mh, sx, sy, sw, sh, rows = 1;
     topmenu_geo(&x0, &y0, &mh);
     band_add(x0, y0, x0 + MENUW, y0 + mh);
     if (open_cat >= 0) {
-        submenu_geo(open_cat, &sx, &sy, &sw, &sh);
+        rows = submenu_geo(open_cat, &sx, &sy, &sw, &sh);
         band_add(sx, sy, sx + sw, sy + sh);
     }
     if (measuring) return;
@@ -1205,14 +1220,14 @@ __attribute__((minsize)) static void draw_menu(void)
     draw_text(x0 + 30, ry + 2, "Reboot", rhov ? C_WHITE : C_BLACK);
 
     if (open_cat >= 0) {
-        int n = cat_count(open_cat);
+        int n = cat_count(open_cat), cw = sw / ((n + rows - 1) / rows);
         panel(sx, sy, sw, sh, 0);
         menu_shade(&kapi,sx+2,sy+2,sw-4,sh-4,0);
         for (int i = 0; i < n; i++) {
-            int iy = sy + 2 + i * MITEMH;
-            int hov = in(mx, my, sx + 2, iy, sw - 4, MITEMH);
-            if (hov) menu_shade(&kapi,sx+2,iy,sw-4,MITEMH,1);
-            draw_text(sx + 8, iy + 2, app_desc(cat_app(open_cat, i))->title,
+            int ix = sx + i / rows * cw, iy = sy + 2 + i % rows * sub_rh;
+            int hov = in(mx, my, ix + 2, iy, cw - 4, sub_rh);
+            if (hov) menu_shade(&kapi,ix+2,iy,cw-4,sub_rh,1);
+            draw_text(ix + 8, iy + (sub_rh - 16) / 2, app_desc(cat_app(open_cat, i))->title,
                       hov ? C_WHITE : C_BLACK);
         }
     }
@@ -1405,9 +1420,10 @@ __attribute__((minsize)) static void draw_top(void)
         hline(gx + 5, gy + 10, 6, C_G0 + 3);
         draw_text_clip(gx + 17, gy + 2, dnd_label, C_BLACK, 110 - 21);
     }
-    if (fault_banner[0] && ticks < fault_banner_until) {
+    if (banner_on) {
         int len=strlen(fault_banner),cols=(SW-32)/8,rows=(len+cols-1)/cols;
         int bw=(len<cols?len:cols)*8+16,x=(SW-bw)/2;
+        band_add(x,2,x+bw,2+rows*16);
         fill_rect(x,2,bw,rows*16,C_MAROON);rect(x,2,bw,rows*16,C_RED);
         for(int row=0;row<rows;row++){
             char line[128];int n=len-row*cols;if(n>cols)n=cols;
@@ -1446,13 +1462,15 @@ __attribute__((minsize)) static void draw_top(void)
 __attribute__((minsize)) void gui_compose(void)
 {
     static CursorBuf cursor;
-    int calm = !ss_active && !drect_on && !(fault_banner[0] && ticks < fault_banner_until);
+    banner_on = fault_banner[0] && ticks < fault_banner_until;
+    int calm = !ss_active && !drect_on;
     if (drag_win < 0 && resize_win < 0) ghost = 0;
-    int layer = menu_open || ov_draw || busy_on || at_k >= 0 || dnd_on || ghost;
+    int layer = menu_open || ov_draw || busy_on || at_k >= 0 || dnd_on || ghost || banner_on;
     int stack = calm && layer;
     int full = gui_dirty == 1 || ss_active || (layer && (!stack || ex_n)), bar = bar_dirty, dirty = win_dirty;
     int pointer_only = !gui_dirty && !top_dirty && !ss_active && !layer;
     int x0 = cursor.x, y0 = cursor.y, w0 = cursor.w, h0 = cursor.h;
+    for (int i = 0; i < su_n; i++) if (su_r[i].y + su_r[i].h > SH - TBH) bar = 1;
     gui_dirty = bar_dirty = top_dirty = 0;
     win_dirty = 0;
     shown_x = mx; shown_y = my; shown_blink = gui_blink;

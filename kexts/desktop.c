@@ -16,6 +16,7 @@
 #include "marquee.inc"
 
 static const Kapi *api;
+#include "deltree.inc"
 #include "fileprops.inc"
 
 #define DESK_LST "desktop.lst"
@@ -654,8 +655,9 @@ static void icon_pick(int idx, void *ctx)
                       "feature from FLOPNIX at the next boot. Really delete?",
                       sel);
         else
-            api->kfmt(q, sizeof q,
-                      "Delete %s from Desktop? This cannot be undone.", desk_leaf(sel));
+            api->kfmt(q, sizeof q, desk_isdir(sel)
+                      ? "Delete folder %s and everything in it? This cannot be undone."
+                      : "Delete %s from Desktop? This cannot be undone.", desk_leaf(sel));
         api->msgbox("Delete file", q, MB_YESNO, del_confirmed, 0);
         break;
     }
@@ -838,8 +840,9 @@ static void desk_delete(char *list)
 {
     for(char *p=list;p&&*p;){
         char *end=p;while(*end&&*end!='\n')end++;char more=*end;*end=0;
-        if(api->fs_dir_count(p))say("Empty folders before deleting them");
-        else if(api->fs_delete(p))say("Could not delete file; try again");
+        int n=0,dir=api->fs_dir_count(p)>0,r=dir?dt_floppy(p,&n):api->fs_delete(p);
+        if(r==DT_LOADED)say("Folder has loaded extensions; delete them one by one");
+        else if(r)say(dir?"Could not delete the whole folder; try again":"Could not delete file; try again");
         else{lst_del(p);dsel_remove(p);if(!api->strcmp(sel,p))sel[0]=0;}
         if(!more)break;p=end+1;
     }

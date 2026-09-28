@@ -83,14 +83,14 @@ static int step_ticks(void)
 static void on_over(int result, void *ctx)
 {
     (void)ctx;
-    if (result == MBR_YES) { reset(0); api->gui_dirty(); }
+    if (result == MBR_YES) { reset(0); api->win_redraw(snake_type, 0); }
 }
 
 static void game_over(void)
 {
     over = 1;
     blip(140, 24);
-    api->gui_dirty();
+    api->win_redraw(snake_type, 0);
     char m[52];
     api->kfmt(m, sizeof m, "You scored %d.  Play again?", score);
     api->msgbox("Game Over", m, MB_YESNO, on_over, 0);
@@ -99,7 +99,7 @@ static void game_over(void)
 static void game_won(void)
 {
     over = won = 1;
-    api->gui_dirty();
+    api->win_redraw(snake_type, 0);
     api->notify("You filled the whole board");
     api->msgbox("You win!", "You filled the whole board!  Play again?",
                 MB_YESNO, on_over, 0);
@@ -150,7 +150,7 @@ static void tick(void *ctx)
     if (++subtick < step_ticks()) return;
     subtick = 0;
     advance();
-    api->gui_dirty();
+    api->win_redraw(snake_type, 0);
 }
 
 static void turn_to(int nd)
@@ -170,7 +170,7 @@ static void snake_key(int inst, int k)
     case K_LEFT:  case 'a': case 'A': turn_to(2); break;
     case K_RIGHT: case 'd': case 'D': turn_to(3); break;
     case ' ': case 'p': case 'P':
-        if (started && !over) { paused = !paused; api->gui_dirty(); }
+        if (started && !over) { paused = !paused; api->win_redraw(snake_type, 0); }
         break;
     }
 }
@@ -308,9 +308,9 @@ static void snake_mouse(int inst, int lx, int ly, int ev, int cw, int ch)
     (void)inst; (void)cw; (void)ch;
     if (ev != EV_PRESS) return;
     if (ly < 4 || ly >= 24) return;
-    if (lx >= M && lx < M + 44) { reset(0); api->gui_dirty(); return; }
+    if (lx >= M && lx < M + 44) { reset(0); api->win_redraw(snake_type, 0); return; }
     if (lx >= M + 52 && lx < M + 108) {
-        if (started && !over) { paused = !paused; api->gui_dirty(); }
+        if (started && !over) { paused = !paused; api->win_redraw(snake_type, 0); }
     }
 }
 

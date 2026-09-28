@@ -102,7 +102,7 @@ static void poll(void *ctx)
         rx_bytes++;
         got = 1;
     }
-    if (got) api->gui_dirty();
+    if (got) api->win_redraw(my_type, 0);
 }
 
 static void sm_draw(Win *w, int cx, int cy, int cw, int ch)
@@ -156,7 +156,7 @@ static void sm_key(int inst, int k)
     else if (k == '\b')         { uart_tx('\b'); if (local_echo) put_ch('\b'); }
     else if (k >= 32 && k < 127) { uart_tx((char)k); if (local_echo) put_ch((char)k); }
     else return;
-    api->gui_dirty();
+    api->win_redraw(my_type, 0);
 }
 
 static void sm_mouse(int inst, int lx, int ly, int ev, int cw, int ch)
@@ -168,10 +168,10 @@ static void sm_mouse(int inst, int lx, int ly, int ev, int cw, int ch)
         if (lx >= 6 + i * 58 && lx < 6 + i * 58 + 54) {
             baud = RATES[i];
             uart_open();
-            api->gui_dirty();
+            api->win_redraw(my_type, 0);
             return;
         }
-    if (lx >= 244 && lx < 300) { local_echo = !local_echo; api->gui_dirty(); }
+    if (lx >= 244 && lx < 300) { local_echo = !local_echo; api->win_redraw(my_type, 0); }
 }
 
 static void sm_open(int inst)

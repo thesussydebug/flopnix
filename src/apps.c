@@ -6,145 +6,40 @@
 #include "ramtest.inc"
 #include "appq.inc"
 #include "busycore.inc"
-#include "clipline.inc"
 #include "shcwd.inc"
-#include "tabcomp.inc"
-#include "shcmd.inc"
-#include "shspec.inc"
 #include "shellstream.h"
+#include "shellterm.h"
 
 extern char __bss_start[], __bss_end[], __load_end[];
 
 int net_parse_ip(const char *s, u32 *out);
 static void sh_dispatch(char *cmd);
 
-#define TCMAX 80
-#define SBMAX 160
-#define THIST 12
-#define PROMPT "root@flopnix:~# "
-
-typedef struct {
-    char (*sb)[TCMAX];
-    int  head;
-    int  nlines;
-    int  cx;
-    int  view;
-    int  cols, rows;
-    u8   rainbow, fx;
-
-    char line[192];
-    char pending[192];
-    u8 running;
-    int  len;
-    int  inpx;
-    char (*hist)[192];
-    int  hist_n, hist_pos;
-
-    char cwd[SC_MAX];
-
-    char tab_pre[32];
-    int  tab_idx;
-    u8   tab_on;
-} Term;
-
-static Term terms[MAXINST];
-static Term *term_context[THR_MAX],*term_last;
-#define T term_context[thr_self]
-static int tdcols, tdrows;
 static ShellStream *streams[THR_MAX];
 static u8 in_shell_exec;
 #define STREAM streams[thr_self]
 
-static char *line_at(Term *t, int i) { return t->sb[(t->head + i) % SBMAX]; }
-static char *cur_line(void) { return line_at(T, T->nlines - 1); }
-
-static void tnl(void)
+static const ShellTermOps *tops(void)
 {
-    T->cx = 0;
-    if (T->nlines < SBMAX) T->nlines++;
-    else T->head = (T->head + 1) % SBMAX;
-    memset(cur_line(), 0, TCMAX);
+    const ShellTermOps *o = service_get("shell.term");
+    return o && o->abi == SHELL_TERM_ABI ? o : 0;
 }
-static void tdirty(void) { win_redraw(WT_TERM, T - terms); }
-static void tputc(char c)
+static void tprint(const char *s)
 {
-    if(STREAM){STREAM->putc(c,STREAM->ctx);return;}
-    if(!T||!T->sb)return;
-    T->view = 0;
-
-    tdirty();
-    if (c == '\n') { tnl(); return; }
-    if (c == '\b') { if (T->cx > 0) { T->cx--; cur_line()[T->cx] = 0; } return; }
-    if (T->cx >= TCMAX - 1) tnl();
-    cur_line()[T->cx] = c;
-    if (++T->cx >= T->cols) tnl();
+    ShellStream *st = STREAM;
+    if (st) { while (*s) st->putc(*s++, st->ctx); return; }
+    const ShellTermOps *o = tops();
+    if (o) o->print(s);
 }
-static void tprint(const char *s) { while (*s) tputc(*s++); }
+static void tputc(char c) { char s[2] = { c, 0 }; tprint(s); }
 
-static void tdraw_input(void)
-{
-    char *row = cur_line();
-    int avail = T->cols - T->inpx - 1;
-    if (avail < 1) avail = 1;
-    int start = 0, col = T->inpx;
-    if (T->len > avail) {
-
-        start = T->len - avail + 1;
-        row[col++] = '<';
-    }
-    while (col < T->cols - 1 && T->line[start]) row[col++] = T->line[start++];
-    for (int j = col; j < TCMAX; j++) row[j] = 0;
-    T->cx = col < TCMAX ? col : TCMAX - 1;
-    T->view = 0;
-    tdirty();
-}
-
-static void tprompt(void)
-{
-    char p[80];
-    kfmt(p, sizeof p, "root@flopnix:/%s# ", T->cwd);
-    tprint(p);
-    T->len = 0;
-    T->line[0] = 0;
-    T->inpx = T->cx;
-    T->running=0;
-    if(T->pending[0]){strlcpy(T->line,T->pending,sizeof T->line);T->len=strlen(T->line);T->pending[0]=0;tdraw_input();}
-}
-
-const char *shell_cwd_get(void) { return STREAM ? STREAM->cwd : T ? T->cwd : ""; }
+const char *shell_cwd_get(void) { return STREAM ? STREAM->cwd : ""; }
 
 int shell_cwd_set(const char *d)
 {
-    if ((!T&&!STREAM) || !d) return 0;
-    if ((int)strlen(d) >= SC_MAX) return 0;
-    strlcpy(STREAM?STREAM->cwd:T->cwd, d, SC_MAX);
+    if (!STREAM || !d || (int)strlen(d) >= SC_MAX) return 0;
+    strlcpy(STREAM->cwd, d, SC_MAX);
     return 1;
-}
-
-static void term_set_input(const char *s)
-{
-    T->len = 0;
-    for (const char *p = s; *p && T->len < (int)sizeof(T->line) - 1; p++)
-        T->line[T->len++] = *p;
-    T->line[T->len] = 0;
-    tdraw_input();
-}
-static void hist_push(const char *s)
-{
-    if (!s[0]) return;
-    if (T->hist_n > 0 && !strcmp(T->hist[(T->hist_n - 1) % THIST], s)) { T->hist_pos = T->hist_n; return; }
-    strlcpy(T->hist[T->hist_n % THIST], s, sizeof T->hist[0]);
-    T->hist_n++;
-    T->hist_pos = T->hist_n;
-}
-static void hist_recall(int dir)
-{
-    int lo = T->hist_n > THIST ? T->hist_n - THIST : 0;
-    int np = T->hist_pos + dir;
-    if (np < lo) np = lo;
-    if (np > T->hist_n) np = T->hist_n;
-    T->hist_pos = np;
-    term_set_input(np == T->hist_n ? "" : T->hist[np % THIST]);
 }
 
 u32 used_kb(void)
@@ -157,36 +52,14 @@ u32 used_kb(void)
             kapi.mem_info(MI_POOL_USED) + heap_capacity() - heap_avail()) / 1024 + 120;
 }
 
-void shell_print(const char *s) { if(!T&&!STREAM)T=term_last;if(T||STREAM)tprint(s); }
+void shell_print(const char *s) { tprint(s); }
 
-void term_clear(void)
-{
-    if(STREAM){tprint("\033[2J\033[H");return;}
-    if (!T||!T->sb) return;
-    memset(T->sb, 0, SBMAX*TCMAX);
-    T->head = T->cx = T->view = 0;
-    T->nlines = 1;
-}
-int term_fx(int mode)
-{
-    if(STREAM)return 0;
-    if (!T||!T->sb) return 0;
-    if (mode == 1) return T->fx = 1;
-    if (mode == 2) return T->rainbow = !T->rainbow;
-    return 0;
-}
-const char *term_hist(int i)
-{
-    if (STREAM || !T || i < 0) return 0;
-    int count = T->hist_n > THIST ? THIST : T->hist_n;
-    if (i >= count) return 0;
-    int lo = T->hist_n > THIST ? T->hist_n - THIST : 0;
-    return T->hist[(lo + i) % THIST];
-}
+void term_clear(void) { tprint("\033[2J\033[H"); }
+int term_fx(int mode) { const ShellTermOps *o = tops(); return o ? o->fx(mode) : 0; }
+const char *term_hist(int i) { const ShellTermOps *o = tops(); return o ? o->hist(i) : 0; }
 int shell_win_close(int i)
 {
     if (i < 0 || i >= MAXWIN || !wins[i].used) return 0;
-    if (wins[i].type == WT_TERM && &terms[wins[i].inst] == T) return -1;
     win_close(i);
     return 1;
 }
@@ -346,223 +219,6 @@ void threads_print(void)
     }
 }
 
-void apps_animate(void)
-{
-    static u8 odd;
-    odd ^= 1;
-    for (int i = 0; i < MAXINST; i++)
-        if (terms[i].fx || (terms[i].rainbow && odd)) win_redraw(WT_TERM, i);
-}
-
-static void term_reset(int inst)
-{
-    ShellStream *saved=STREAM;STREAM=0;
-    T = &terms[inst];term_last=T;
-    void *storage=T->sb;
-    memset(T, 0, sizeof *T);
-    T->sb=storage?storage:kmalloc(SBMAX*TCMAX+THIST*192);
-    if(!T->sb){STREAM=saved;return;}
-    T->hist=(void *)(T->sb+SBMAX);
-    memset(T->sb,0,SBMAX*TCMAX+THIST*192);
-    mem_track("Terminal",T->sb,SBMAX*TCMAX+THIST*192);
-    T->nlines = 1;
-    T->cols = tdcols;
-    T->rows = tdrows;
-    T->hist_pos = 0;
-    tprint(OS_NAME " " OS_VER "\n");
-    tprint("type 'help' for commands\n");
-    if (BOOTINFO->diag & BD_ANY_HANG)
-        tprint("boot: recovered from a BIOS hang - see 'dmesg'\n");
-    tprint("\n");
-    tprompt();
-    STREAM=saved;
-}
-
-static void term_close(int inst)
-{
-    Term *t=&terms[inst];
-    kfree(t->sb);memset(t,0,sizeof *t);
-    if(term_last==t)term_last=0;
-    for(int i=0;i<THR_MAX;i++)if(term_context[i]==t)term_context[i]=0;
-}
-
-static void term_scroll(Term *t, int lines)
-{
-    if(!t->sb)return;
-    int maxv = t->nlines - t->rows;
-    if (maxv < 0) maxv = 0;
-    t->view += lines;
-    if (t->view < 0) t->view = 0;
-    if (t->view > maxv) t->view = maxv;
-}
-
-void term_wheel(int inst, int dz) { term_scroll(&terms[inst], dz * 3); }
-static void term_drop(int inst,int x,int y,const char *type,const char *data)
-{
-    (void)x;(void)y;
-    if(!terms[inst].sb||!type||!data||(strcmp(type,"file")&&strcmp(type,"file.cut")))return;
-    win_focus(WT_TERM,inst);
-    preempt_disable();
-    Term *t=&terms[inst],*saved=T;
-    if(t->running)sp_insert(t->pending,strlen(t->pending),sizeof t->pending,data);
-    else{T=t;t->len=sp_insert(t->line,t->len,sizeof t->line,data);t->tab_on=0;tdraw_input();T=saved;}
-    preempt_enable();
-}
-
-static void tab_replace(int wordstart, const char *s)
-{
-    while (T->len > wordstart) { T->len--; tputc('\b'); }
-    for (int i = 0; s[i] && T->len < (int)sizeof T->line - 1; i++) {
-        T->line[T->len++] = s[i];
-        tputc(s[i]);
-    }
-}
-
-static void term_tab(void)
-{
-    for (int i = 0; i < T->len; i++)
-        if (T->line[i] == ' ') return;
-
-    if (!T->tab_on) {
-        int n = T->len < (int)sizeof T->tab_pre - 1 ? T->len
-                                                    : (int)sizeof T->tab_pre - 1;
-        for (int i = 0; i < n; i++) T->tab_pre[i] = T->line[i];
-        T->tab_pre[n] = 0;
-        T->tab_idx = 0;
-        T->tab_on = 1;
-    }
-
-    int m = tc_count(T->tab_pre, sh_names, SH_NNAMES);
-    if (!m) { T->tab_on = 0; return; }
-
-    const char *c = tc_nth(T->tab_pre, sh_names, SH_NNAMES, T->tab_idx % m);
-    T->tab_idx++;
-    if (!c) return;
-    tab_replace(0, c);
-    if (m == 1) {
-        if (T->len < (int)sizeof T->line - 1) { T->line[T->len++] = ' '; tputc(' '); }
-        T->tab_on = 0;
-    }
-}
-
-__attribute__((noinline)) static void term_copy(void)
-{
-    char out[4096];
-    int o = 0;
-    int first = T->nlines - T->rows - T->view;
-    if (first < 0) first = 0;
-    int last = T->nlines - T->view;
-    for (int i = first; i < last; i++) {
-        const char *l = line_at(T, i);
-        for (int x = 0; l[x] && x < TCMAX && o < (int)sizeof out - 2; x++)
-            out[o++] = l[x];
-        if (o < (int)sizeof out - 1) out[o++] = '\n';
-    }
-    out[o] = 0;
-    clip_set_text(out);
-}
-
-static void term_key(int inst, int k)
-{
-    T = &terms[inst];term_last=T;
-    if(!T->sb)return;
-    if (T->fx) { T->fx = 0; tprompt(); return; }
-    if (k == K_UP)   { hist_recall(-1); return; }
-    if (k == K_DOWN) { hist_recall(1); return; }
-    if (k == K_PGUP) { term_scroll(T, T->rows - 1); return; }
-    if (k == K_PGDN) { term_scroll(T, -(T->rows - 1)); return; }
-    if (k >= 0x100) return;
-    char ch = (char)k;
-    if (ch == '\t') { term_tab(); return; }
-    T->tab_on = 0;
-    if (ch == '\n') {
-        u32 flags=irq_save();int busy=in_shell_exec;if(!busy)T->running=1;irq_restore(flags);
-        if(busy){tprint("\nRemote command running; try again.\n");tprompt();return;}
-        tputc('\n');
-        T->line[T->len] = 0;
-        hist_push(T->line);
-        char command[sizeof T->line];strlcpy(command,T->line,sizeof command);T->running=1;
-        sh_dispatch(command);
-        T->running=0;
-        if (!T->fx) tprompt();
-        return;
-    }
-    if (ch == '\b') {
-        if (T->len > 0) { T->line[--T->len] = 0; tdraw_input(); }
-        return;
-    }
-    if (ch == 0x16) {
-        char clip[192];
-        if (clip_get_text(clip, sizeof clip) > 0) {
-            T->len = cl_paste(T->line, T->len, sizeof T->line, clip);
-            tdraw_input();
-        }
-        return;
-    }
-    if (ch == 0x03) { term_copy(); return; }
-    if (ch < 32) return;
-
-    if (T->len < (int)sizeof(T->line) - 1) {
-        T->line[T->len++] = ch;
-        T->line[T->len] = 0;
-        tdraw_input();
-    }
-}
-
-static const u8 rain_hue[6] = { C_RED, C_YELLOW, C_BGREEN, C_CYAN, C_BBLUE, C_MAGENTA };
-
-static void matrix_draw(int cx, int cy, int cols, int rows)
-{
-    u32 fr = ticks / 2;
-    int period = rows + 14;
-    for (int c = 0; c < cols; c++) {
-        int head = (int)((fr + c * 7) % period);
-        for (int r = 0; r < rows; r++) {
-            int d = head - r;
-            if (d < 0 || d >= 11) continue;
-            char g = 33 + (char)((c * 31 + r * 17 + fr / 8) % 94);
-            u8 col = d == 0 ? C_WHITE : (d < 3 ? C_BGREEN : C_GREEN);
-            draw_char(cx + 4 + c * 8, cy + 4 + r * 16, g, col);
-        }
-    }
-}
-
-static void term_draw(Win *w, int cx, int cy, int cw, int ch)
-{
-    Term *t = &terms[w->inst];
-    fill_rect(cx, cy, cw, ch, C_TERMBG);
-    if(!t->sb){draw_text_clip(cx+4,cy+4,"Not enough memory. Close and reopen Terminal.",C_RED,cw-8);return;}
-    int cols = (cw - 8) / 8, rows = (ch - 8) / 16;
-    if (cols > TCMAX) cols = TCMAX; if (cols < 8) cols = 8;
-    if (rows > 44) rows = 44; if (rows < 3) rows = 3;
-    t->cols = cols; t->rows = rows;
-
-    if (t->fx) { matrix_draw(cx, cy, cols, rows); return; }
-
-    int maxv = t->nlines - rows; if (maxv < 0) maxv = 0;
-    if (t->view > maxv) t->view = maxv;
-    int firstvis = t->nlines - rows - t->view;
-    if (firstvis < 0) firstvis = 0;
-    for (int r = 0; r < rows; r++) {
-        int li = firstvis + r;
-        if (li < 0 || li >= t->nlines) continue;
-        char *ln = line_at(t, li);
-        for (int c = 0; c < cols; c++) {
-            if (!ln[c] || ln[c] == ' ') continue;
-            u8 col = t->rainbow ? rain_hue[(c + r + ticks / 6) % 6] : C_TERMFG;
-            draw_char(cx + 4 + c * 8, cy + 4 + r * 16, ln[c], col);
-        }
-    }
-    if (t->view > 0) {
-        char tag[20];
-        kfmt(tag, sizeof tag, "-- %d up --", t->view);
-        draw_text(cx + cw - strlen(tag) * 8 - 8, cy + 2, tag, C_YELLOW);
-    }
-    int crow = (t->nlines - 1) - firstvis;
-    if (win_is_focused(w) && gui_blink && t->view == 0 && crow >= 0 && crow < rows && t->cx < cols)
-        fill_rect(cx + 4 + t->cx * 8, cy + 4 + crow * 16 + 14, 8, 2, C_TERMFG);
-}
-
 const char *cpu_brand(void);
 u32 cpu_mhz(void);
 
@@ -621,33 +277,11 @@ static void sh_dispatch(char *cmd)
     tprint("shell.kx not loaded - only registered commands work\n");
 }
 
-int shell_exec(const char *line)
-{
-    if (!line || !line[0] || in_shell_exec) return -1;
-    int inst = -1;
-    for (int i = 0; i < MAXINST; i++)
-        if (reg_used[WT_TERM][i]) inst = i;
-    if (inst < 0) return -1;
-    T = &terms[inst];term_last=T;
-    if(!T->sb||T->running)return -1;
-    char buf[192];
-    strlcpy(buf, line, sizeof buf);
-    in_shell_exec = 1;
-    tputc('\n');
-    sh_dispatch(buf);
-    tprompt();
-    in_shell_exec = 0;
-    gui_dirty = 1;
-    return 0;
-}
-
 static int shell_stream_run(ShellStream *stream,const char *line)
 {
     if(!stream||!stream->putc||!line||strlen(line)>=192)return -1;
     u32 flags=irq_save();
-    int busy=in_shell_exec;
-    for(int i=0;i<MAXINST;i++)busy|=terms[i].running;
-    if(busy){irq_restore(flags);return -2;}
+    if(in_shell_exec){irq_restore(flags);return -2;}
     in_shell_exec=1;STREAM=stream;irq_restore(flags);
     char buf[192];strlcpy(buf,line,sizeof buf);
     int resident=kext_current(),pd=preempt_depth();
@@ -658,29 +292,17 @@ static int shell_stream_run(ShellStream *stream,const char *line)
 }
 const ShellStreamOps shell_stream_ops={SHELL_STREAM_ABI,shell_stream_run};
 
-static Term *newest_term(void)
+static void null_putc(char c, void *ctx) { (void)c; (void)ctx; }
+int shell_exec(const char *line)
 {
-    for (int i = MAXINST - 1; i >= 0; i--)
-        if (reg_used[WT_TERM][i]) return &terms[i];
-    return 0;
+    if (!line || !line[0]) return -1;
+    const ShellTermOps *o = tops();
+    if (o) return o->exec(line);
+    static ShellStream quiet = { "", null_putc, 0 };
+    return shell_stream_run(&quiet, line);
 }
-int shell_history_count(void)
-{
-    if(STREAM)return 0;
-    Term *t = newest_term();
-    if (!t) return 0;
-    return t->hist_n < THIST ? t->hist_n : THIST;
-}
-const char *shell_history(int i)
-{
-    if(STREAM)return "";
-    Term *t = newest_term();
-    if (!t) return "";
-    int lo = t->hist_n > THIST ? t->hist_n - THIST : 0;
-    int idx = lo + i;
-    if (i < 0 || idx >= t->hist_n) return "";
-    return t->hist[idx % THIST];
-}
+int shell_history_count(void) { int n = 0; while (term_hist(n)) n++; return n; }
+const char *shell_history(int i) { const char *h = term_hist(i); return h ? h : ""; }
 
 int register_app(const AppDesc *d)
 {
@@ -928,21 +550,29 @@ static int aq_post(u8 kind,int win,int a,int b,int c,int d,int e)
     AppEv *q=&aq[aq_n++];q->kind=kind;q->win=win;q->a=a;q->b=b;q->c=c;q->d=d;q->e=e;
     irq_restore(f);return 1;
 }
-static int aq_take(AppEv *ev)
+static int aq_find(void)
 {
-    u32 f=irq_save();
     for(int i=0;i<aq_n;i++){
         Win *w=&wins[aq[i].win];if(!w->used)continue;
         int owner=reg_owner[w->type],legacy=!(regs[w->type].live_draw&APP_INDEPENDENT),blocked=0;
         for(int t=0;t<THR_MAX;t++)if(jobs[t].active&&
             (jobs[t].type==w->type||(owner>=0&&jobs[t].owner==owner)||(legacy&&jobs[t].legacy)))blocked=1;
-        if(blocked||kext_timer_busy(owner)||(legacy&&buffer_mutex.held))continue;
-        *ev=aq[i];memmove(aq+i,aq+i+1,(--aq_n-i)*sizeof *aq);
-        int t=thr_self;jobs[t].active=1;jobs[t].win=ev->win;jobs[t].type=w->type;jobs[t].owner=owner;
-        jobs[t].legacy=legacy;jobs[t].since=ticks;jobs[t].prog=0;jobs[t].io=0;jobs[t].kill=jobs[t].cancel=0;
-        if(legacy)app_buffer_lock();irq_restore(f);return 1;
+        if(!blocked&&!kext_timer_busy(owner)&&!(legacy&&buffer_mutex.held))return i;
     }
-    irq_restore(f);return 0;
+    return -1;
+}
+int app_q_ready(void){u32 f=irq_save();int r=aq_find()>=0;irq_restore(f);return r;}
+static int aq_take(AppEv *ev)
+{
+    u32 f=irq_save();
+    int i=aq_find();
+    if(i<0){irq_restore(f);return 0;}
+    Win *w=&wins[aq[i].win];
+    int owner=reg_owner[w->type],legacy=!(regs[w->type].live_draw&APP_INDEPENDENT);
+    *ev=aq[i];memmove(aq+i,aq+i+1,(--aq_n-i)*sizeof *aq);
+    int t=thr_self;jobs[t].active=1;jobs[t].win=ev->win;jobs[t].type=w->type;jobs[t].owner=owner;
+    jobs[t].legacy=legacy;jobs[t].since=ticks;jobs[t].prog=0;jobs[t].io=0;jobs[t].kill=jobs[t].cancel=0;
+    if(legacy)app_buffer_lock();irq_restore(f);return 1;
 }
 
 int app_owner_busy(int owner)
@@ -1051,9 +681,6 @@ void app_drop(Win *w,int lx,int ly,const char *type,const char *data)
     if(!aq_post(AE_DROP,w-wins,(int)p,0,0,0,0)){kfree(p);fault_show_banner("E42 - Input queue is full.");}
 }
 
-static void term_csize(int inst, int *w, int *h)
-{ (void)inst; *w = tdcols * 8 + 8; *h = tdrows * 16 + 8; }
-static void term_min(int *w, int *h) { *w = 30 * 8 + 8; *h = 6 * 16 + 8; }
 static void sysinfo_csize(int inst, int *w, int *h)
 { (void)inst; *w = 438; *h = 214; }
 static void sysinfo_draw_w(Win *w, int cx, int cy, int cw, int ch)
@@ -1061,24 +688,9 @@ static void sysinfo_draw_w(Win *w, int cx, int cy, int cw, int ch)
 
 void apps_init(void)
 {
-    tdcols = (SW - 60) / 8;
-    if (tdcols > TCMAX) tdcols = TCMAX;
-    if (tdcols < 30) tdcols = 30;
-    tdrows = (SH - 120) / 16;
-    if (tdrows > 40) tdrows = 40;
-    if (tdrows < 5) tdrows = 5;
-
-    static const AppDesc dterm = {
-        .title = "Terminal", .max_inst = MAXINST, .resizable = 1, .in_menu = 1,
-        .open = term_reset, .close = term_close, .draw = term_draw, .key = term_key,
-        .wheel = term_wheel, .client_size = term_csize, .min_client = term_min, .drop=term_drop,
-
-        .live_draw = APP_LIVE_DRAW | APP_POINTER_FREE,
-    };
     static const AppDesc dsys = {
         .title = "System Info", .max_inst = 1, .in_menu = 1,
         .draw = sysinfo_draw_w, .client_size = sysinfo_csize, .live_draw = APP_POINTER_FREE | APP_NO_CARET,
     };
-    register_app(&dterm);
     register_app(&dsys);
 }

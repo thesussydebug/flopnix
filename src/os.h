@@ -367,6 +367,7 @@ int  app_busy(int win);
 u32  app_q_dropped(void);
 u32  app_q_peak(void);
 int  app_q_depth(void);
+int  app_q_ready(void);
 int  thread_overflowed(void);
 void preempt_disable(void);
 void preempt_enable(void);
@@ -411,6 +412,7 @@ int   fs_dir_count(const char *dir);
 int   fs_defrag(void (*prog)(int done, int total));
 
 int   fs_exists(const char *name);
+u32   fs_name_cap(void);
 u32   fs_free_kb(void);
 const char *ext_type(const char *name);
 
@@ -510,7 +512,7 @@ int services_dialog_owner(void);
 
 #define MAXWIN 12
 
-enum { WT_TERM, WT_SYSINFO, WT_BUILTIN_COUNT };
+enum { WT_SYSINFO, WT_BUILTIN_COUNT };
 #define K_MENU 0x200
 #define K_PRTSC 0x201
 extern Win wins[MAXWIN];
@@ -591,7 +593,6 @@ void app_mouse(Win *w, int lx, int ly, int ev, int cw, int ch);
 void app_drop(Win *w, int lx, int ly, const char *type, const char *data);
 void app_key(Win *w, int k);
 void app_wheel(Win *w, int dz);
-void apps_animate(void);
 void shell_print(const char *s);
 u32  used_kb(void);
 void dmesg_print(void);

@@ -394,9 +394,9 @@ static void move_vert(int delta)
 }
 
 static void run_pending(void);
-static void save_write(void)
+static int save_write(void)
 {
-    if (!E->buf) { strlcpy(E->msg, "Not enough memory to save", sizeof E->msg); return; }
+    if (!E->buf) { strlcpy(E->msg, "Not enough memory to save", sizeof E->msg); return -1; }
     Ed *keep = E;
     int r;
     if (E->src == 1) r = fat_write(E->fullpath, (u8 *)E->buf, E->len);
@@ -407,6 +407,7 @@ static void save_write(void)
     else if (r == -3) strlcpy(E->msg, "that name is a folder", sizeof E->msg);
     else              strlcpy(E->msg, "write error", sizeof E->msg);
     if(r==0)run_pending();else E->pending=PA_NONE;
+    return r;
 }
 
 static void save_picked(const char *path, void *ctx)
@@ -422,6 +423,11 @@ static void save_picked(const char *path, void *ctx)
         E->pending=PA_NONE;
         return;
     }
+    Ed *ed = E;
+    char old_name[sizeof ed->name], old_full[sizeof ed->fullpath];
+    u8 old_src = ed->src, old_ro = ed->ro;
+    strlcpy(old_name, ed->name, sizeof old_name);
+    strlcpy(old_full, ed->fullpath, sizeof old_full);
     if (drive == 0) {
         strlcpy(E->name, bare, FS_NAMELEN);
         E->src = 0; E->fullpath[0] = 0;
@@ -431,7 +437,11 @@ static void save_picked(const char *path, void *ctx)
         E->src = 1;
     }
     E->ro = 0;
-    save_write();
+    if (save_write()) {
+        strlcpy(ed->name, old_name, sizeof ed->name);
+        strlcpy(ed->fullpath, old_full, sizeof ed->fullpath);
+        ed->src = old_src; ed->ro = old_ro;
+    }
 }
 
 static void do_save(void)

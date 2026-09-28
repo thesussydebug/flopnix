@@ -1,4 +1,5 @@
 /* Checks a folder tree before copying its files. */
+#include "filepaths.inc"
 static int folder_copy_a(const Kapi *k,const char *src,const char *dst)
 {
     static char names[FS_NFILES][FS_NAMELEN],targets[FS_NFILES][FS_NAMELEN];
@@ -8,7 +9,7 @@ static int folder_copy_a(const Kapi *k,const char *src,const char *dst)
     for(int i=0;i<FS_NFILES;i++){
         FsEnt *e=k->fs_slot(i);if(!e||!e->used){free++;continue;}
         if(!fs_under(e->name,src))continue;
-        if(!fs_rejoin(e->name,src,dst,targets[n],FS_NAMELEN)||k->fs_exists(targets[n]))return -1;
+        if(!fs_rejoin(e->name,src,dst,targets[n],ft_namecap(k))||k->fs_exists(targets[n]))return -1;
         k->strlcpy(names[n],e->name,FS_NAMELEN);sizes[n]=e->size;dirs[n]=!!(e->attr&FS_ATTR_DIR);
         if(dirs[n]&&!fs_dirname_ok(targets[n]))return -1;
         if(!dirs[n])sectors+=(e->size+511)/512+(e->size==0);

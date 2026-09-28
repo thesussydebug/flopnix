@@ -29,12 +29,12 @@ static inline void del_prompt(char *out, int cap, int nfiles, int nfolders,
     if (total == 1 && first && first[0]) {
         at = dp_put(out, cap, at, nfolders ? "Delete folder \"" : "Delete \"");
         at = dp_put(out, cap, at, first);
-        at = dp_put(out, cap, at, "\"?");
+        at = dp_put(out, cap, at, nfolders ? "\" and everything in it?" : "\"?");
     } else {
         at = dp_put(out, cap, at, "Delete ");
         at = dp_num(out, cap, at, total);
 
-        at = dp_put(out, cap, at, nfolders ? " items?" : " files?");
+        at = dp_put(out, cap, at, nfolders ? " items and everything in their folders?" : " files?");
     }
     dp_put(out, cap, at, DP_TAIL);
 }

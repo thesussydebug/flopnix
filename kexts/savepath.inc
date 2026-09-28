@@ -62,3 +62,12 @@ static inline int save_path(int drive, const char *dir, const char *typed,
     for(int i=0;i<=len;i++)out[i+2]=path[i];
     return SAVE_PATH_OK;
 }
+/* cap is disk_stat(DS_NAMELEN); older kernels report 0. */
+static inline int save_path_max(u32 cap) { return (cap && cap < FS_NAMELEN ? (int)cap : FS_NAMELEN) - 1; }
+static inline int save_path_fits(const char *spec, u32 cap)
+{
+    int n=0;
+    if(spec[0]!='a')return 1;
+    while(spec[n+2])n++;
+    return n<=save_path_max(cap);
+}

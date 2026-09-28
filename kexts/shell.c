@@ -15,6 +15,7 @@
 #include "dynbuf.h"
 
 static const Kapi *api;
+#include "deltree.inc"
 
 #define ticks           (*api->ticks)
 #define timer_alive     (*api->timer_alive)
@@ -315,7 +316,7 @@ static int path_arg(const char *args,int *drive,char *path,int cap)
 static int path_info(int drive,const char *path,u32 *size,int *is_dir)
 {
     if(!drive){
-        if(!path[0]||api->fs_is_dir(path)){*size=0;*is_dir=1;return 1;}
+        if(!path[0]||api->fs_is_dir(path)||api->fs_dir_count(path)){*size=0;*is_dir=1;return 1;}
         for(int i=0;i<FS_NFILES;i++){const FsEnt *e=fs_slot(i);if(e&&e->used&&!strcmp(e->name,path)){*size=e->size;*is_dir=0;return 1;}}
         return 0;
     }
@@ -769,6 +770,8 @@ done:
     api->kfree(data);
 }
 
+#include "term.inc"
+
 static void sh_exec(char *cmd)
 {
     while (*cmd == ' ') cmd++;
@@ -1091,9 +1094,18 @@ static void sh_exec(char *cmd)
         kfmt(buf, sizeof buf, "%d file%s\n", m, m == 1 ? "" : "s");
         tprint(buf);
     } else if (!strncmp(cmd, "rm ", 3)) {
+        int rec=!strncmp(cargs,"-r ",3);const char *a=rec?cargs+3:cargs;while(*a==' ')a++;
         char fn[96];int drive=0,dir=0;u32 size=0;
-        if(!path_arg(cargs,&drive,fn,sizeof fn)||!path_info(drive,fn,&size,&dir)){tprint("rm: file not found\n");return;}
-        if(dir){tprint("rm: use rmdir for empty folders\n");return;}
+        if(!path_arg(a,&drive,fn,sizeof fn)||!path_info(drive,fn,&size,&dir)){tprint("rm: file not found\n");return;}
+        if(dir&&!rec){tprint("rm: that is a folder; rm -r deletes it with everything in it\n");return;}
+        if(dir){
+            int n=0,r=drive?dt_usb(fn,0,&n):dt_floppy(fn,&n);
+            api->broadcast("fs.changed","");
+            if(r==DT_LOADED)tprint("rm: folder has loaded extensions; delete them one by one\n");
+            else if(r){kfmt(buf,sizeof buf,"rm: stopped after %d item%s; disk error or read-only\n",n,n==1?"":"s");tprint(buf);}
+            else{kfmt(buf,sizeof buf,"deleted the folder and %d item%s in it\n",n,n==1?"":"s");tprint(buf);}
+            return;
+        }
         if(drive?fat_delete(fn):fs_delete(fn))tprint("rm: unable to delete file\n");
     } else if (!strncmp(cmd, "cp ", 3) || !strncmp(cmd, "mv ", 3)) {
         copy_move(cargs,cmd[0]=='m');
@@ -1432,7 +1444,9 @@ static void sh_exec(char *cmd)
         int id = 0, any = 0;
         while (*p >= '0' && *p <= '9') { id = id * 10 + (*p++ - '0'); any = 1; }
         if (!any) { tprint("usage: kill <id>  (see 'ps')\n"); return; }
-        int r = api->win_close(id);
+        const Win *kw = win_slot(id);
+        Term *self = t_current();
+        int r = kw && kw->used && kw->type == term_type && self && &terms[kw->inst] == self ? -1 : api->win_close(id);
         if (r == 1)      { kfmt(buf, sizeof buf, "closed window %d\n", id); tprint(buf); }
         else if (r == -1) tprint("kill: that's this terminal\n");
         else              tprint("kill: bad window id (see 'ps')\n");
@@ -1674,5 +1688,6 @@ int kext_entry(const Kapi *k)
     if (k->version < KAPI_VERSION) return 1;
     api = k;
     api->register_shell(shell_dispatch);
+    term_init();
     return 0;
 }

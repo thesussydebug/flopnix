@@ -204,7 +204,6 @@ static void autoexec_run(void)
     if (n > (int)sizeof script - 1) n = sizeof script - 1;
     memcpy(script, iobuf, n);
     script[n] = 0;
-    if (win_open(WT_TERM) < 0) return;
     int pos = 0;
     char line[AX_LINE];
     while (ax_next(script, n, &pos, line, sizeof line))
@@ -422,7 +421,7 @@ void kmain(void)
         }
         ts[nts++] = cpu_now();
         if (gui_launch_pending()) work = 1;
-        if (app_q_depth()) thr_yield();
+        if (app_q_ready()) thr_yield();
         kext_enter(-1);
         gui_tick();      ts[nts++] = cpu_now();
         fdc_tick();      ts[nts++] = cpu_now();

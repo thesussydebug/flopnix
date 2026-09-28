@@ -20,7 +20,7 @@ static inline const char *sh_usage(const char *c)
     if (sc_eq(c, "du"))       return "du [dir]      - disk used under a folder";
     if (sc_eq(c, "map"))      return "map           - show which sectors each file owns";
     if (sc_eq(c, "cat"))      return "cat file [> output] - print or copy file contents";
-    if (sc_eq(c, "rm"))       return "rm <file>     - delete a file";
+    if (sc_eq(c, "rm"))       return "rm [-r] <path> - delete a file; -r a folder and its contents";
     if (sc_eq(c, "cp"))       return "cp <src> <dst>- copy a file between paths";
     if (sc_eq(c, "mv"))       return "mv <src> <dst>- move a file between paths";
     if (sc_eq(c, "touch"))    return "touch <file>  - create/update a file";

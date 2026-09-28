@@ -8,7 +8,7 @@ static int ft_copy_name(const Kapi *k,int drive,const char *dir,const char *leaf
     const char *ext=dot?dot:"";int bl=dot?(int)(dot-leaf):(int)k->strlen(leaf);
     for(int i=1;i<100;i++){
         char suffix[8],base[64],name[80];k->kfmt(suffix,sizeof suffix,"_%d",i);
-        int room=(drive?8:FS_NAMELEN-1-(int)k->strlen(dir)-(dir[0]?1:0)-(int)k->strlen(ext))-(int)k->strlen(suffix);
+        int room=(drive?8:ft_namecap(k)-1-(int)k->strlen(dir)-(dir[0]?1:0)-(int)k->strlen(ext))-(int)k->strlen(suffix);
         if(room<1)return FT_PATH;if(bl<room)room=bl;if(room>63)room=63;
         k->memcpy(base,leaf,room);base[room]=0;k->kfmt(name,sizeof name,"%s%s%s",base,suffix,ext);
         int rc=drive?ft_usb_name(k,dir,name,dst):ft_join(k,0,dir,name,dst);

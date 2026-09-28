@@ -28,13 +28,15 @@ static const char *ft_reason(int rc)
     }
 }
 
+static int ft_namecap(const Kapi *k)
+{u32 n=k->disk_stat?k->disk_stat(DS_NAMELEN):0;return n&&n<FS_NAMELEN?(int)n:FS_NAMELEN;}
 static int ft_join(const Kapi *k,int drive,const char *dir,const char *leaf,char *out)
 {
     int d=k->strlen(dir),n=k->strlen(leaf),slash=d&&dir[d-1]!='/';
     if(!n||k->strcmp(leaf,".")==0||k->strcmp(leaf,"..")==0)return FT_PATH;
     for(int i=0;i<n;i++)if((u8)leaf[i]<32||leaf[i]=='/'||leaf[i]=='\\'||leaf[i]==':')return FT_PATH;
 
-    if((drive&&d>=64)||d+slash+n>=(drive?FT_PATHMAX:FS_NAMELEN))return FT_PATH;
+    if((drive&&d>=64)||d+slash+n>=(drive?FT_PATHMAX:ft_namecap(k)))return FT_PATH;
     k->kfmt(out,FT_PATHMAX,"%s%s%s",dir,slash?"/":"",leaf);return 0;
 }
 static int ft_exists(const Kapi *k,int drive,const char *path)

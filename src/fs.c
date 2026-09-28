@@ -110,6 +110,8 @@ static FsEnt *find(const char *name)
     return 0;
 }
 
+u32 fs_name_cap(void) { return (u32)fs_namelen; }
+
 int fs_exists(const char *name)
 {
     return fs_ensure() && find(name) != 0;

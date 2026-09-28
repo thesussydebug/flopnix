@@ -268,8 +268,12 @@ static void pk_save_commit(void)
     if (!pk_nlen) return;
     char spec[132];
     int result = save_path(pk_drive, pk_path, pk_name, pk_ext, spec, sizeof spec);
+    u32 cap = api->disk_stat(DS_NAMELEN);
+    if (!result && !save_path_fits(spec, cap)) result = SAVE_PATH_LONG;
     const char *error = 0;
-    if (result == SAVE_PATH_LONG) error = "Path too long (A: 63 chars max)";
+    char toolong[40];
+    api->kfmt(toolong, sizeof toolong, "Path too long (A: %d chars max)", save_path_max(cap));
+    if (result == SAVE_PATH_LONG) error = toolong;
     else if (result) error = "Invalid file path";
     else if (spec[0] == 'a') {
         const char *name = spec + 2;
@@ -284,6 +288,14 @@ static void pk_save_commit(void)
                      (!e->name[parent] && (e->attr & FS_ATTR_DIR)))) { found = 1; break; }
             }
             if (!found) error = "Folder not found";
+        }
+    } else {
+        char parent[132];
+        int cut = 0;
+        for (int i = 3; spec[i]; i++) if (spec[i] == '/') cut = i;
+        if (cut) {
+            api->memcpy(parent, spec + 2, cut - 2); parent[cut - 2] = 0;
+            if (api->fat_exists(parent) != 2) error = "Folder not found";
         }
     }
     if (error) {
@@ -354,9 +366,19 @@ static int pk_mouse(int px, int py, int ev)
     int x, y, w, h;
     pk_geo(&x, &y, &w, &h);
     if (py >= y + 2 && py < y + 18) {
-        if (px >= x + w - 92 && px < x + w - 50) { pk_drive = 0; pk_path[0] = 0; pk_scroll = 0; pk_sel[0] = 0; pk_build(); }
-        else if (px >= x + w - 48 && px < x + w - 6 && api->usb_present()) {
-            pk_drive = 1; api->strlcpy(pk_path, "/", sizeof pk_path); pk_scroll = 0; pk_sel[0] = 0; pk_build();
+        int drive = -1;
+        if (px >= x + w - 92 && px < x + w - 50) drive = 0;
+        else if (px >= x + w - 48 && px < x + w - 6 && api->usb_present()) drive = 1;
+        if (drive >= 0) {
+            if (pk_save && drive != pk_drive) {
+                const char *leaf = pk_name;
+                for (const char *p = pk_name; *p; p++) if (*p == '/' || *p == '\\' || *p == ':') leaf = p + 1;
+                char keep[64];
+                api->strlcpy(keep, leaf, sizeof keep);
+                pk_name_set(keep);
+            }
+            pk_drive = drive; api->strlcpy(pk_path, drive ? "/" : "", sizeof pk_path);
+            pk_scroll = 0; pk_sel[0] = 0; pk_build();
         }
         return 1;
     }

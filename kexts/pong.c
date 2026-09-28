@@ -70,7 +70,7 @@ static void tick(void *ctx)
         if (sl >= WIN_AT || sr >= WIN_AT) over = 1;
         pong_serve(&st, r == 1 ? 1 : -1);
     }
-    api->gui_dirty();
+    api->win_redraw(my_type, 0);
 }
 
 static void pong_close(int inst)
@@ -113,7 +113,7 @@ static void pong_key(int inst, int k)
         running = over = 0;
         break;
     }
-    api->gui_dirty();
+    api->win_redraw(my_type, 0);
 }
 
 static void num(char *b, int cap, int v)

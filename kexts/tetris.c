@@ -93,7 +93,7 @@ static void tick(void *ctx)
     if (--fall > 0) return;
     fall = tet_speed(level);
     drop_one();
-    api->gui_dirty();
+    api->win_redraw(my_type, 0);
 }
 
 static void tetris_open(int inst)
@@ -113,14 +113,14 @@ static void tetris_key(int inst, int k)
     (void)inst;
     if (over) {
         if (k == 'r' || k == 'R') reset();
-        api->gui_dirty();
+        api->win_redraw(my_type, 0);
         return;
     }
 
     if (paused) {
         if (k == 'p' || k == 'P') paused = 0;
         else if (k == 'r' || k == 'R') reset();
-        api->gui_dirty();
+        api->win_redraw(my_type, 0);
         return;
     }
     switch (k) {
@@ -148,7 +148,7 @@ static void tetris_key(int inst, int k)
         reset();
         break;
     }
-    api->gui_dirty();
+    api->win_redraw(my_type, 0);
 }
 
 static void cell(int cx, int cy, int x, int y, u8 col)

@@ -3,6 +3,8 @@
 #include "gdi.h"
 #include "archive_core.inc"
 #include "filepaths.inc"
+#include "shpath.h"
+#include "savepath.inc"
 #include "ui.inc"
 static const Kapi *api;
 #include "appfield.h"
@@ -14,7 +16,7 @@ static int count,selected,scroll,dirty,type=-1,alive,extract_all,focus;
 static int working,pending;
 static char pending_path[202];
 static void run_pending(void);
-static char filename[FS_NAMELEN+2],message[100];static AppField field;
+static char filename[128],message[100];static AppField field;
 static void say(const char *s){api->strlcpy(message,s,sizeof message);api->gui_dirty();}
 static int reserve(void)
 {
@@ -111,9 +113,10 @@ static void load_file(const char *p)
     }
     api->kfree(previous);
     selected=scroll=dirty=0;af_set(&field,filename,sizeof filename,"desktop/files.fpa");
-    const char *local=p;if((p[0]=='a'||p[0]=='A')&&p[1]==':')local+=2;
+    int usb=(p[0]=='u'||p[0]=='U')&&p[1]==':';
+    const char *local=p;if(!usb&&(p[0]=='a'||p[0]=='A')&&p[1]==':')local+=2;
     int len=(int)api->strlen(local);
-    if(!((p[0]=='u'||p[0]=='U')&&p[1]==':')&&len<24&&len>4&&!api->strcasecmp(local+len-4,".fpa"))af_set(&field,filename,sizeof filename,local);
+    if(len<(int)sizeof filename&&len>4&&!api->strcasecmp(local+len-4,".fpa")){af_set(&field,filename,sizeof filename,local);if(usb)filename[0]='u';}
     say("Archive checked. Select a file or extract them all.");
 }
 static void load_path(const char *p)
@@ -184,25 +187,27 @@ static void dropped(int inst,int x,int y,const char *kind,const char *payload)
     }
     work_end();
 }
-static int save_name(char out[FS_NAMELEN])
+static const char *save_target(char spec[132])
 {
-    const char *s=filename;if((s[0]=='a'||s[0]=='A')&&s[1]==':')s+=2;
-    int n=(int)api->strlen(s);if(n<5||n>=FS_NAMELEN||api->strcasecmp(s+n-4,".fpa"))return 0;
-    char part[FS_NAMELEN];int k=0;
-    for(int i=0;i<=n;i++){
-        if(!s[i]||s[i]=='/'){part[k]=0;if(!k||(k==1&&part[0]=='.')||(k==2&&part[0]=='.'&&part[1]=='.'))return 0;k=0;}
-        else {if((u8)s[i]<32||s[i]==':'||s[i]=='\\')return 0;part[k++]=s[i];}
-    }
-    api->strlcpy(out,s,FS_NAMELEN);return 1;
+    static char why[64];
+    int r=save_path(0,"",filename,"fpa",spec,132);u32 cap=api->disk_stat(DS_NAMELEN);
+    if(!r&&!save_path_fits(spec,cap))r=SAVE_PATH_LONG;
+    if(r==SAVE_PATH_LONG){api->kfmt(why,sizeof why,"Path is too long; this floppy allows %d characters.",save_path_max(cap));return why;}
+    if(r)return "Use a name like desktop/files.fpa or u:/files.fpa.";
+    if(spec[0]=='u'&&(!api->usb_present()||!api->fat_writable()))return "USB is missing or read-only.";
+    return 0;
 }
 static void save_file(int answer,void *ctx)
 {
     (void)ctx;if(!alive||answer!=MBR_YES)return;
-    char name[FS_NAMELEN];if(!save_name(name)||!reserve())return;
+    char spec[132];const char *err=save_target(spec);if(err){say(err);return;}
+    if(!reserve())return;
+    int usb=spec[0]=='u';
     api->busy_set("Archive Manager","Writing archive...",-1);
-    int r=api->fs_write(name,data,length);api->busy_end();
-    if(r==0){dirty=0;say("Archive saved.");api->broadcast("file.saved",name);}
-    else say(r==-2?"Not enough contiguous disk space. Try another disk or free space.":"Archive could not be saved. Your changes are still here.");
+    int r=usb?api->fat_write(spec+2,data,length):api->fs_write(spec+2,data,length);api->busy_end();
+    if(r==0){dirty=0;say(usb?"Archive saved to USB.":"Archive saved.");api->broadcast("file.saved",spec+2);}
+    else say(r==-2?(usb?"The USB stick is full. Your changes are still here.":"Not enough contiguous disk space. Try another disk or free space.")
+        :r==-3?"That name is a folder. Choose another name.":"Archive could not be saved. Your changes are still here.");
 }
 static void save_now(int answer,void *ctx)
 {
@@ -211,9 +216,16 @@ static void save_now(int answer,void *ctx)
 }
 static void save(void)
 {
-    char name[FS_NAMELEN];if(!save_name(name)){pending=0;say("Use an A: name ending in .fpa (63 characters including folder).");return;}
-    if(api->fs_exists(name))api->msgbox("Replace archive?","A file with this name already exists. Replace it?",MB_YESNO,save_now,0);
+    char spec[132];const char *err=save_target(spec);if(err){pending=0;say(err);return;}
+    if(spec[0]=='u'?api->fat_exists(spec+2):api->fs_exists(spec+2))api->msgbox("Replace archive?","A file with this name already exists. Replace it?",MB_YESNO,save_now,0);
     else save_now(MBR_YES,0);
+}
+static void picked_save(const char *p,void *ctx)
+{
+    (void)ctx;if(!p||!alive||working||pending)return;
+    if((p[0]=='a'||p[0]=='A')&&p[1]==':')p+=2;
+    if(api->strlen(p)>=sizeof filename){say("That path is too long.");return;}
+    af_set(&field,filename,sizeof filename,p);save();
 }
 static void extract_files(const char *p,void *ctx)
 {
@@ -297,6 +309,7 @@ static void action(int n)
     if(n<2)request_action(n+1);
     else if(n==2)api->file_picker("Add a file",0,0,add_path,0);
     else if(n==3)remove_selected();else if(n==4)save();
+    else if(n==7)api->file_save("Save archive","fpa",filename,picked_save,0);
     else if(count){extract_all=n==6;api->file_picker("Extract to a folder on A: or U:",0,1,extract_to,0);}
 }
 static void size(int *w,int *h){*w=472;*h=304;}
@@ -317,7 +330,8 @@ static void draw(Win *w,int x,int y,int cw,int ch)
         api->kfmt(t,sizeof t,"%u / %u",entries[i].raw,entries[i].packed);api->draw_text_clip(x+cw-164,yy+1,t,c,148);
     }
     if(!count)api->draw_text(x+24,y+94,"Drop files here or choose Add.",C_GRAY);
-    api->draw_text(x+12,y+ch-82,"Save as",C_GRAY);af_draw(&field,x+78,y+ch-88,cw-90,focus);
+    api->draw_text(x+12,y+ch-82,"Save as",C_GRAY);af_draw(&field,x+78,y+ch-88,cw-176,focus);
+    ui_button(x,y,ui_r(cw-92,ch-88,80,24),"Browse...",0,1);
     ui_button(x,y,ui_r(12,ch-56,144,24),"Extract selected",0,count>0);
     ui_button(x,y,ui_r(162,ch-56,112,24),"Extract all",0,count>0);
     char t[44];api->kfmt(t,sizeof t,"%u KiB",(length+1023)/1024);api->draw_text_clip(x+286,y+ch-51,t,C_GRAY,cw-298);
@@ -333,9 +347,10 @@ static void key(int i,int k)
 static void mouse(int i,int x,int y,int ev,int cw,int ch)
 {
     (void)i;if(working)return;ui_pointer(x,y,ev);
-    if(af_mouse(&field,78,ch-88,cw-90,x,y,ev)){focus=1;return;}
+    if(af_mouse(&field,78,ch-88,cw-176,x,y,ev)){focus=1;return;}
     for(int n=0;n<5;n++)if(ui_click(ui_r(12+n*78,34,72,22),x,y,ev)){action(n);return;}
-    if(ev==EV_PRESS){focus=ui_hit(ui_r(78,ch-88,cw-90,24),x,y);if(focus)return;}
+    if(ui_click(ui_r(cw-92,ch-88,80,24),x,y,ev)){focus=0;action(7);return;}
+    if(ev==EV_PRESS){focus=ui_hit(ui_r(78,ch-88,cw-176,24),x,y);if(focus)return;}
     if(ui_click(ui_r(12,ch-56,144,24),x,y,ev)){action(5);return;}
     if(ui_click(ui_r(162,ch-56,112,24),x,y,ev)){action(6);return;}
     if(ev==EV_PRESS&&x>=14&&x<cw-14&&y>=84&&y<ch-92){int n=scroll+(y-84)/18;if(n<count)selected=n;}

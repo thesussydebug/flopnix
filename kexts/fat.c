@@ -1013,7 +1013,13 @@ int fat_rmdir(const char *path)
     if (rd(slot_lba) != 0) return -1;
     u8 dsec[512];
     memcpy(dsec, secbuf, 512);
+    u8 want = lfn_checksum(dsec + slot_off);
     dsec[slot_off] = 0xE5;
+    for (int e = slot_off - 32; e >= 0; e -= 32) {
+        u8 *pd = dsec + e;
+        if (pd[11] != 0x0F || pd[13] != want) break;
+        pd[0] = 0xE5;
+    }
     if (wr(slot_lba, dsec) != 0) return -1;
     if (clus >= 2) free_chain(clus);
     return 0;

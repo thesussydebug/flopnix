@@ -67,7 +67,8 @@ enum {
 enum {
     DS_OPS, DS_RETRIED, DS_FAILED,
     DS_LAST_MS, DS_WORST_MS, DS_LAST_TRIES, DS_LAST_LBA,
-    DS_ST0, DS_ST1, DS_ST2
+    DS_ST0, DS_ST1, DS_ST2,
+    DS_NAMELEN  /* longest A: path the mounted floppy takes, plus the NUL */
 };
 
 enum {

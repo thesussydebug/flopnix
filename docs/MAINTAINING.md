@@ -94,7 +94,8 @@ service is registered and it can test the *live* system (it binds the real
 4. Implement, re-run, watch it pass.
 
 `RESULT: INCOMPLETE (no DONE line)` means the kext did not load or the guest
-hung — usually an E41 (§4) or a crash before the suite finished, not a failed
+hung — usually an E41 (§4), more than 512 symbols (E40), or a crash before the
+suite finished, not a failed
 assertion.
 
 ### Networking integration checks

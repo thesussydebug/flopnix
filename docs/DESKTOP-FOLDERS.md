@@ -44,7 +44,8 @@ Remove that incomplete destination before retrying the folder copy.
 
 FLOPFS still allows only 23 characters for the complete path. Short names are
 especially useful inside desktop folders. A rename that would make any child
-path too long is refused. Nonempty folders must be emptied before deletion.
+path too long is refused. Deleting a folder deletes everything in it after one
+confirmation; a folder holding a loaded extension, such as `sys`, is refused.
 Archive files (`.fpa` and `.pz`) use a dedicated chest icon in both desktop and
 Files views.
 
