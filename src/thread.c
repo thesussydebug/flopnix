@@ -149,6 +149,7 @@ void thr_yield(void)
 void thr_tick(void)
 {
     if (!thr_on) return;
+    app_break_poll();
     app_kill_poll();
 
     if (!thr_may_switch(preempt, fault_armed[thr_self], nopreempt, in_irq)) return;
@@ -274,40 +275,50 @@ __attribute__((minsize)) int threads_selftest(void)
 #define MTX_HELD_MAX 8
 static Mutex *mheld[THR_MAX][MTX_HELD_MAX];
 static int    mheldn[THR_MAX];
+static Mutex *mwait[THR_MAX];
 
 void mtx_lock(Mutex *m)
 {
     if (!thr_on) return;
     for (;;) {
         u32 f = irq_save();
-        if (!m->held) {
-            m->held = 1; m->owner = thr_self; m->depth = 1;
-            if (mheldn[thr_self] < MTX_HELD_MAX)
-                mheld[thr_self][mheldn[thr_self]++] = m;
-            irq_restore(f); return;
-        }
-        if (m->owner == thr_self) {
+        if (!m->held || m->owner == thr_self) {
+            if (!m->held) { m->held = 1; m->owner = thr_self; m->depth = 0; }
             m->depth++;
+            m->want &= ~(1 << thr_self); mwait[thr_self] = 0;
             if (mheldn[thr_self] < MTX_HELD_MAX)
                 mheld[thr_self][mheldn[thr_self]++] = m;
             irq_restore(f); return;
         }
+        m->want |= 1 << thr_self; mwait[thr_self] = m;
         irq_restore(f);
         thr_yield();
     }
 }
 
-void mtx_unlock(Mutex *m)
+/* Returns 1 when another thread waits and this one may yield to it. */
+static int mtx_release(Mutex *m)
 {
-    if (!thr_on) return;
+    int wake = 0;
     u32 f = irq_save();
     if (m->owner == thr_self) {
         if (mheldn[thr_self] > 0 &&
             mheld[thr_self][mheldn[thr_self] - 1] == m)
             mheldn[thr_self]--;
-        if (--m->depth <= 0) { m->held = 0; m->owner = -1; m->depth = 0; }
+        if (--m->depth <= 0) {
+            m->held = 0; m->owner = -1; m->depth = 0;
+            wake = (m->want & ~(1 << thr_self)) && (f & 0x200) && !nopreempt && !in_irq;
+        }
     }
     irq_restore(f);
+    return wake;
+}
+
+void mtx_unlock(Mutex *m)
+{
+    if (!thr_on) return;
+    if (mtx_release(m)) thr_yield();
+    if (!in_irq) app_kill_poll();
 }
 
 int mtx_held_count(void) { return thr_on ? mheldn[thr_self] : 0; }
@@ -315,9 +326,11 @@ int mtx_held_count(void) { return thr_on ? mheldn[thr_self] : 0; }
 void mtx_unwind(int snap)
 {
     if (!thr_on) return;
+    Mutex *w = mwait[thr_self];
+    if (w) { w->want &= ~(1 << thr_self); mwait[thr_self] = 0; }
     while (mheldn[thr_self] > snap) {
         int before = mheldn[thr_self];
-        mtx_unlock(mheld[thr_self][before - 1]);
+        mtx_release(mheld[thr_self][before - 1]);
         if (mheldn[thr_self] >= before)
             mheldn[thr_self] = before - 1;
         klog("fault recovery released a leaked lock\n");

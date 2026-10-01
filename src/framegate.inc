@@ -1,4 +1,4 @@
-/* Tracks frame presentation timing. */
+/* tracks frame presentation timing */
 #ifndef FRAMEGATE_INC
 #define FRAMEGATE_INC
 
@@ -16,10 +16,10 @@ static inline int frame_present(const FrameState *now, const FrameState *last)
            now->blink != last->blink;
 }
 
-/* Every fourth half-second tick repaints everything. */
-static inline int tick_full(unsigned beat)
+/* redraws everything every half-second ticks, 0 never does*/
+static inline int tick_full(unsigned beat, unsigned every)
 {
-    return !(beat & 3);
+    return every && beat % every == 0;
 }
 
 /* Rows to copy after the cursor box moved, plus the taskbar from bar_y down when bar_y < sh. */

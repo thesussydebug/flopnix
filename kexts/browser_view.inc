@@ -19,17 +19,15 @@ static int view_media(BrView *v,int oi,u8 *px,int dw,int dh,int w,int h)
     if(!o->width&&!o->height){o->width=dw;o->height=dh;}else if(!o->width)o->width=br_max(1,o->height*w/h);else if(!o->height)o->height=o->width>0?br_max(1,o->width*h/w):dh;
     return 1;
 }
+static int br_img_reclaim(void *ctx){(void)ctx;return bc_evict_one(&cache);}
+static int br_img_step(void *ctx,int f){(void)ctx;api->busy_set("Browser","Decoding image...",f);return closing||api->esc_pending();}
 static __attribute__((noinline)) int view_image(BrView *v,int oi,const Transfer *d)
 {
-    int w,h,c;u32 total=api->mem_total_kb();image_limit=total>=16256?4194304:total>=7936?1048576:262144;
-    if(!stbi_info_from_memory(d->data,(int)d->len,&w,&h,&c)||w<1||h<1||(u32)w*(u32)h>image_limit/4)return 0;
-    u8 *rgba=stbi_load_from_memory(d->data,(int)d->len,&w,&h,&c,4);if(!rgba)return -1;
-    int dw=br_min(w,512),dh=br_max(1,h*dw/w);if(dh>512){dw=br_max(1,dw*512/dh);dh=512;}
-    if(!view_media(v,oi,0,dw,dh,w,h)){stbi_image_free(rgba);return -1;}BrMedia *m=&v->media[oi];
-    static u16 nearest[4096];for(int i=0;i<4096;i++)nearest[i]=256;
-    for(int y=0;y<dh;y++)for(int x=0;x<dw;x++){const u8 *p=rgba+((y*h/dh)*w+x*w/dw)*4;if(p[3]<128){m->pixels[y*dw+x]=255;continue;}int k=(p[0]>>4)*256+(p[1]>>4)*16+(p[2]>>4);if(nearest[k]==256){u8 index=api->palette_nearest(p[0],p[1],p[2]);nearest[k]=index==255?C_WHITE:index;}m->pixels[y*dw+x]=(u8)nearest[k];}
-    stbi_image_free(rgba);
-    const char *url=v->doc->object[oi].url;if(cacheable(url))bc_put(&cache,url,BC_IMAGE,m->pixels,(u32)(dw*dh),dw|dh<<16,w|h<<16);
+    const ImageOps *io=img_bind(api);ImgInfo in;if(!io)return -1;int r=io->probe(d->data,d->len,&in);if(r)return r==IMG_ENOMEM?-1:0;
+    int w=in.w,h=in.h,dw=br_min(w,512),dh=br_max(1,h*dw/w);if(dh>512){dw=br_max(1,dw*512/dh);dh=512;}
+    u8 *px=br_malloc((u32)(dw*dh));if(!px)return -1;ImgReq q;api->memset(&q,0,sizeof q);q.dst=px;q.dw=q.pitch=dw;q.dh=dh;q.flags=IMG_ALPHAKEY;q.key=255;q.reclaim=br_img_reclaim;q.progress=br_img_step;
+    int bad=io->decode(d->data,d->len,&q);api->busy_end();if(bad){api->kfree(px);return -1;}view_media(v,oi,px,dw,dh,w,h);
+    const char *url=v->doc->object[oi].url;if(cacheable(url))bc_put(&cache,url,BC_IMAGE,px,(u32)(dw*dh),dw|dh<<16,w|h<<16);
     return 1;
 }
 static void view_picture(BrView *v,int i)
@@ -62,7 +60,7 @@ static __attribute__((noinline)) int view_load(BrView *v,const char *url,const c
     if(!(local?read_local(localpath,&d):(allocate(&d)&&fetch(requested,&u,&d,body)))){release(&d);return 0;}
     BrView *next;
     for(int hops=0;;hops++){
-        int mode=local?1:br_mode(&u,&d.info,d.data,(int)d.len);if(mode<0){say("This frame response is a file. Use Download to save it.");release(&d);return 0;}
+        int mode=local?1:br_mode(&u,&d.info,d.data,(int)d.len);if(mode<0){if(v==&root_view)offer_save(&d,requested,0);else say("This frame response is a file. Use Download to save it.");release(&d);return 0;}
         br_text_fix(d.data,d.len);
         next=br_zalloc(sizeof *next);if(!next){release(&d);return 0;}next->parent=v->parent;next->depth=v->depth;next->post=body!=0;next->doc=br_zalloc(sizeof *next->doc);next->layout=br_zalloc(sizeof *next->layout);BrCss *css=br_malloc(sizeof *css);
         if(!next->doc||!next->layout||!css){view_free(next);api->kfree(next);api->kfree(css);release(&d);return 0;}next->layout->width=0;tw_copy(next->url,TW_URL,requested,tw_len(requested));view_render(next,(const char *)d.data,mode,css);api->kfree(css);
@@ -106,7 +104,7 @@ static void view_control(BrView *v,int ci,BrClip clip,int x,int y,int w,int h)
     if(c->type==BC_SUBMIT||c->type==BC_RESET||c->type==BC_BUTTON||c->type==BC_FILE){view_text(clip,x+8,y+4,o->label,fg,w-12);return;}
     if(c->type==BC_SELECT){if(c->multiple){for(int row=0;row<5;row++){int k=br_max(0,c->choice)/5*5+row;if(k>=c->count)break;BrOption *opt=&v->doc->option[c->option+k];view_text(clip,x+4,y+2+row*20,opt->selected?"[x]":"[ ]",fg,24);view_text(clip,x+30,y+2+row*20,opt->label,opt->disabled?C_GRAY:fg,w-34);}}else {if(c->choice>=0)view_text(clip,x+5,y+4,v->doc->option[c->option+c->choice].label,fg,w-24);view_text(clip,x+w-16,y+4,"v",fg,8);}return;}
     int cols=br_max(1,(w-12)/8),rows=br_max(1,(h-8)/16),start=0;
-    if(focused){if(c->type!=BC_AREA)start=af_offset(&control_field,w);else {int line=0,col=0;for(int i=0;i<control_field.caret;i++){if(c->value[i]=='\n'||++col>=cols){line++;col=0;}}int skip=br_max(0,line-rows+1);for(int i=0;i<skip;i++)start=tw_wrap(c->value,start,cols);}}
+    if(focused){if(c->type!=BC_AREA){af_offset(&control_field,w);start=control_field.offset;}else {int line=0,col=0;for(int i=0;i<control_field.caret;i++){if(c->value[i]=='\n'||++col>=cols){line++;col=0;}}int skip=br_max(0,line-rows+1);for(int i=0;i<skip;i++)start=tw_wrap(c->value,start,cols);}}
     int row=0,col=0,len=tw_len(c->value);
     for(int p=start;p<=len&&row<rows;p++){
         if(focused&&p==control_field.caret&&*api->gui_blink)view_fill(clip,x+5+col*8,y+4+row*16,1,15,fg);

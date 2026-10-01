@@ -25,6 +25,7 @@ int mx, my;
 u8 gui_dirty;
 u8 gui_blink;
 u8 gui_up;
+u8 gui_full_beats = 60;
 static u8 bar_dirty, top_dirty;
 static u16 win_dirty;
 
@@ -147,15 +148,6 @@ static int app_cat(int type)
 
     if (d->category >= APP_CAT_PROGRAMS && d->category <= APP_CAT_DEV)
         return d->category - APP_CAT_PROGRAMS;
-    static const char *const sys[] = {
-        "System Info", "Memory Map", "Memory Editor",
-        "Benchmark", "Settings", "About"
-    };
-    static const char *const game[] = { "Minesweeper", "Reversi", "Snake" };
-    for (int i = 0; i < (int)(sizeof sys / sizeof sys[0]); i++)
-        if (!strcmp(d->title, sys[i])) return CAT_SYS;
-    for (int i = 0; i < (int)(sizeof game / sizeof game[0]); i++)
-        if (!strcmp(d->title, game[i])) return CAT_GAME;
     return CAT_PROG;
 }
 
@@ -673,14 +665,13 @@ __attribute__((minsize)) void gui_tick(void)
         }
         gui_dirty = 1;
     }
-    static u32 last, lasta;
-    static u8 beat;
+    static u32 last, lasta, beat;
     if ((u32)(ticks - last) >= 50) {
         last = ticks;
         gui_blink ^= 1;
         char sec = clockstr[7];
         update_clock();
-        if (tick_full(++beat)) gui_dirty = 1;
+        if (tick_full(++beat, gui_full_beats)) gui_dirty = 1;
         else {
             if (clockstr[7] != sec) bar_dirty = 1;
             if (focused() >= 0 && !(app_draw_flags(wins[zord[nz - 1]].type) & APP_NO_CARET))
@@ -719,11 +710,13 @@ static PumpBtn pump_btn;
 
 static volatile u8  pump_inside;
 static volatile int pump_thr = -1;
+int gui_pumping(void) { return pump_thr == thr_self; }
 
 void worker_unwind(int preempt_snap)
 {
     keyboard_unwind();
     debug_unwind();
+    usb_unwind();
     u32 f = irq_save();
     if (pump_thr == thr_self)    { pump_inside = 0; pump_thr = -1; }
     if (present_thr == thr_self) { presenting = 0; present_thr = -1; }
@@ -746,7 +739,8 @@ __attribute__((minsize)) int gui_pump(void)
     if (esc) esc_latched = 1;
 
     u32 pk;
-    while (mouse_pop(&pk, 0)) {
+    int mc = mouse_claim();
+    while (mc && mouse_pop(&pk, 0)) {
         u8 b0 = pk, b1 = pk >> 8, b2 = pk >> 16;
         int dx = b1 - ((b0 & 0x10) ? 256 : 0);
         int dy = b2 - ((b0 & 0x20) ? 256 : 0);
@@ -754,6 +748,7 @@ __attribute__((minsize)) int gui_pump(void)
         gui_mouse(dx, -dy, pb_pump(&pump_btn, b0 & 7), ticks);
         if ((u8)(pk >> 24)) gui_wheel(-(int)(i8)(pk >> 24));
     }
+    if (mc == 1) mouse_release();
 
     gui_tick();
 
@@ -771,10 +766,27 @@ __attribute__((minsize)) int gui_pump(void)
     return app_current_window()>=0?app_cancel_pending():esc;
 }
 
+static __attribute__((noinline,minsize)) int ov_call(int ev)
+{
+    int (*cur)(int, int, int) = ov_mouse;
+    volatile int keep = 1, died = 0;
+    int resident = kext_current();
+    kext_enter(ov_owner);
+    FAULT_GUARD(keep = cur(mx, my, ev),
+        { died = 1; klog("overlay mouse handler faulted - overlay closed\n"); });
+    kext_enter(resident);
+    if (died) { ov_drop(); return -1; }
+    return keep;
+}
+
 __attribute__((minsize)) void gui_wheel(int dz)
 {
     if(busy_update||kupd_critical)return;
     if (input_dismiss()) return;
+    if (ov_mouse) {
+        gui_dirty = 1;
+        if (ov_call(dz > 0 ? EV_WHEELUP : EV_WHEELDN) != 2) return;
+    }
     int f = focused();
     if (f >= 0) { app_wheel(&wins[f], dz); win_redraw(wins[f].type,wins[f].inst); }
 }
@@ -795,7 +807,7 @@ static __attribute__((noinline,minsize)) void screenshot(void)
     u32 fsz = bmpw_head(iobuf, SW, SH, pal);
     if (fsz > IOBUF_SZ) return;
     for (int y = 0; y < SH; y++)
-        memcpy(bmpw_row(iobuf, SW, SH, y), BACKBUF + y * SPITCH, SW);
+        memcpy(bmpw_row(iobuf, SW, SH, y), BACKBUF + y * SW, SW);
 
     shot_on_usb = fat_mount();
     char name[16];
@@ -958,20 +970,15 @@ __attribute__((minsize)) void gui_mouse(int dx, int dy, u8 btn, u32 when)
 
     if (ov_mouse) {
         int (*cur)(int, int, int) = ov_mouse;
-        volatile int keep = 1, died = 0;
-        int resident = kext_current();
-        kext_enter(ov_owner);
-        FAULT_GUARD({
-            if (lpress)                    keep = cur(mx, my, EV_PRESS);
-            else if (rpress)               keep = cur(mx, my, EV_RPRESS);
-            else if ((btn & 1) && (was & 1))      cur(mx, my, EV_DRAG);
-            else if (!(btn & 1) && (was & 1)) keep = cur(mx, my, EV_RELEASE);
-        }, { died = 1; klog("overlay mouse handler faulted - overlay closed\n"); });
-        kext_enter(resident);
-        if (died) ov_drop();
-        else if (keep!=1 && ov_mouse == cur)
+        int keep = 1;
+        if (lpress)                           keep = ov_call(EV_PRESS);
+        else if (rpress)                      keep = ov_call(EV_RPRESS);
+        else if ((btn & 1) && (was & 1))      keep = ov_call(EV_DRAG) < 0 ? -1 : 1;
+        else if (!(btn & 1) && (was & 1))     keep = ov_call(EV_RELEASE);
+        if (keep < 0) return;
+        if (keep!=1 && ov_mouse == cur)
             ov_drop();
-        if (died || keep!=2) return;
+        if (keep!=2) return;
     }
 
     if (drag_win >= 0) {

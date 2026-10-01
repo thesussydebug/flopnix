@@ -2,6 +2,7 @@
 #include "os.h"
 #include "ioguard.inc"
 #include "usbdebounce.inc"
+#include "kextspace.inc"
 
 #define USBCMD   0x00
 #define USBSTS   0x02
@@ -93,6 +94,21 @@ static u16 find_uhci(void)
 }
 
 static IoGuard usb_guard;
+static int usb_guard_thr = -1, usb_resync;
+
+static int usb_take(void)
+{
+    if (!io_acquire(&usb_guard)) return 0;
+    usb_guard_thr = thr_self;
+    return 1;
+}
+static void usb_give(void) { usb_guard_thr = -1; io_release(&usb_guard); }
+
+int usb_held_by_self(void) { return io_held(&usb_guard) && usb_guard_thr == thr_self; }
+void usb_unwind(void)
+{
+    if (usb_held_by_self()) { usb_resync = 1; usb_give(); }
+}
 
 volatile int usb_quiet;
 
@@ -241,6 +257,8 @@ static int bulk(int in, void *buf, int len)
 }
 
 static u32 cbw_tag = 1;
+/* App private windows are not identity mapped, so their bytes go through this. */
+static u8 dma_bounce[512];
 
 static int scsi(const u8 *cmd, int cmdlen, int in, u8 *data, u32 dlen)
 {
@@ -260,7 +278,10 @@ static int scsi(const u8 *cmd, int cmdlen, int in, u8 *data, u32 dlen)
         u32 off = 0;
         while (off < dlen) {
             u32 chunk = dlen - off > 512 ? 512 : dlen - off;
-            if (bulk(in, data + off, chunk) != 0) { data_err = 1; break; }
+            u8 *p = data + off, *io = (u32)p + chunk > KEXT_PRIV_VA ? dma_bounce : p;
+            if (io != p && !in) memcpy(io, p, chunk);
+            if (bulk(in, io, chunk) != 0) { data_err = 1; break; }
+            if (io != p && in) memcpy(p, io, chunk);
             off += chunk;
         }
     }
@@ -485,11 +506,12 @@ void usb_poll(void)
 
     if (connected) {
 
-        if (!io_acquire(&usb_guard)) return;
+        if (!usb_take()) return;
         ms_delay(150);
         dev_ok = enumerate();
         if (!dev_ok) { ms_delay(100); dev_ok = enumerate(); }
-        io_release(&usb_guard);
+        usb_resync = 0;
+        usb_give();
     } else {
         dev_ok = 0;
     }
@@ -506,7 +528,8 @@ u32 usb_capacity_sectors(void) { return dev_ok ? dev_blocks : 0; }
 static int usb_read_inner(u32 lba, u32 count, u8 *buf)
 {
     if (!dev_ok) return -1;
-    if (!io_acquire(&usb_guard)) return -1;
+    if (!usb_take()) return -1;
+    if (usb_resync) { usb_resync = 0; bot_reset(); }
     int rc = 0;
     while (count) {
         u32 n = count > 64 ? 64 : count;
@@ -523,14 +546,15 @@ static int usb_read_inner(u32 lba, u32 count, u8 *buf)
         app_note_io();
         lba += n; buf += n * 512; count -= n;
     }
-    io_release(&usb_guard);
+    usb_give();
     return rc;
 }
 
 static int usb_write_inner(u32 lba, u32 count, const u8 *buf)
 {
     if (!dev_ok) return -1;
-    if (!io_acquire(&usb_guard)) return -1;
+    if (!usb_take()) return -1;
+    if (usb_resync) { usb_resync = 0; bot_reset(); }
     int rc = 0;
     while (count) {
         u32 n = count > 64 ? 64 : count;
@@ -547,7 +571,7 @@ static int usb_write_inner(u32 lba, u32 count, const u8 *buf)
         app_note_io();
         lba += n; buf += n * 512; count -= n;
     }
-    io_release(&usb_guard);
+    usb_give();
     return rc;
 }
 

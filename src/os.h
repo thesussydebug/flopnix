@@ -9,11 +9,14 @@ typedef __builtin_va_list va_list;
 #define va_arg(v, t)   __builtin_va_arg(v, t)
 
 #define OS_NAME    "FLOPNIX"
-#define OS_VER     "0.8.8"
+#define OS_VER     "0.8.9"
 #ifndef OS_BUILD_DATE
 #define OS_BUILD_DATE "unknown"
 #endif
-#define OS_RELEASE "flopnix " OS_VER " #1 i386 (built " OS_BUILD_DATE ")"
+#ifndef OS_BUILD_NUM
+#define OS_BUILD_NUM "0"
+#endif
+#define OS_RELEASE "flopnix " OS_VER " #" OS_BUILD_NUM " i386 (built " OS_BUILD_DATE ")"
 
 typedef struct __attribute__((packed)) {
     u16 w, h, pitch;
@@ -164,12 +167,22 @@ const u8 *font_glyph(char ch);
 void palette_set(int idx, u8 r, u8 g, u8 b);
 void flip(void);
 void flip_area(int x0, int y0, int x1, int y1);
-enum { EM_REPORT, EM_DOUBLE, EM_STALL, EM_NMI };
+enum { EM_REPORT, EM_DOUBLE, EM_STALL, EM_NMI, EM_BREAK };
 extern volatile u32 panic_active;
+extern volatile u32 em_age;
+extern const u32 *panic_frame;
+extern volatile u8 brk_req;
+extern volatile u32 brk_since;
+void input_mute(void);
+void app_break_poll(void);
+int usb_held_by_self(void);
 void emergency_init(void);
 void emergency_video(u32 base,int w,int h,int pitch,int bank);
 void emergency_heartbeat(void);
 void emergency_watch_start(void);
+void emergency_clock(u32 mhz);
+void emergency_chime(int emergency);
+__attribute__((noreturn)) void panic_test(int emergency);
 void emergency_panic_begin(u32 vec,u32 err,u32 eip);
 int emergency_irq(u32 vec,u32 eip);
 __attribute__((noreturn)) void emergency_enter(u32 vec,u32 err,u32 eip,u32 cr2,u32 reason);
@@ -274,6 +287,7 @@ void *kmalloc(u32 n);
 void *krealloc(void *p, u32 n);
 void kfree(void *p);
 u32  heap_avail(void);
+u32  heap_free(void);
 u32  heap_largest(void);
 u32  heap_blocks(void);
 u32  heap_base(void);
@@ -358,8 +372,10 @@ void app_network_lock(void);
 void app_network_unlock(void);
 void app_cancel_window(int win);
 int app_cancel_pending(void);
-void handle_sc(u8 sc);
+void handle_sc(u8 sc, int mute);
 int pump_keyboard(void);
+int mouse_claim(void);
+void mouse_release(void);
 void keyboard_unwind(void);
 void app_forget_window(int win);
 void app_local_progress(const char *title,const char *msg,int frac);
@@ -374,9 +390,12 @@ void preempt_enable(void);
 int  preempt_depth(void);
 void preempt_restore(int d);
 void worker_unwind(int preempt_snap);
+void usb_unwind(void);
+int  usb_read_locked(u32 lba, u32 count, u8 *buf);
+int  usb_write_locked(u32 lba, u32 count, const u8 *buf);
 
-typedef struct { int held, owner, depth; } Mutex;
-#define MUTEX_INIT { 0, -1, 0 }
+typedef struct { int held, owner, depth, want; } Mutex;
+#define MUTEX_INIT { 0, -1, 0, 0 }
 void mtx_lock(Mutex *m);
 void mtx_unlock(Mutex *m);
 int  mtx_held_count(void);
@@ -569,12 +588,12 @@ void present(void);
 int  present_try(void);
 void present_done(void);
 int  gui_pump(void);
+int  gui_pumping(void);
 int  gui_launch_pending(void);
 
 void esc_arm(void);
 int  esc_pending(void);
 
-void apps_init(void);
 int  register_app(const AppDesc *d);
 int  app_count(void);
 const AppDesc *app_desc(int type);
@@ -629,6 +648,7 @@ int  timer_add(u32 interval, void (*fn)(void *ctx), void *ctx);
 void timer_del(int id);
 void timers_poll(void);
 int kext_timer_busy(int owner);
+const char *timer_slowest(void);
 int  register_key_hook(int (*fn)(int k));
 void unregister_key_hook(int (*fn)(int k));
 int  key_hook_dispatch(int k);

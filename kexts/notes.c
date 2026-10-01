@@ -14,7 +14,8 @@ static int my_type = -1;
 #define PADY     6
 #define LINEH    16
 #define COLW     8
-#define NOTES_LST "sys/tmp/notes.lst"
+#define NOTES_DIR "sys/config/"
+#define NOTES_LST "sys/config/notes.lst"
 #define FLUSH_TICKS 100
 
 typedef struct {
@@ -38,7 +39,7 @@ static int  inst_of[NMAX];
 static int nl_save(void);
 static int note_dir(void)
 {
-    const char *dirs[2]={"sys","sys/tmp"};
+    const char *dirs[2]={"sys","sys/config"};
     for(int d=0;d<2;d++){
         int found=0;
         for(int i=0;i<FS_NFILES;i++){
@@ -52,7 +53,7 @@ static int note_dir(void)
 static int note_name(char *name,int cap)
 {
     for(int n=1;n<=128;n++){
-        api->kfmt(name,cap,"sys/tmp/note%d.txt",n);
+        api->kfmt(name,cap,NOTES_DIR "note%d.txt",n);
         if(api->fs_exists(name))continue;
         int used=0;for(int i=0;i<NMAX;i++)if(notes[i].used&&!api->strcmp(notes[i].file,name))used=1;
         if(!used)return 1;
@@ -64,13 +65,15 @@ static void nl_load(void)
 {
     loaded = 1;
     char buf[NMAX * 64];
-    int n = api->fs_read(NOTES_LST, (u8 *)buf, sizeof buf);
-    int legacy=n<0&&!api->fs_exists(NOTES_LST);
-    if(legacy)n=api->fs_read("notes.lst",(u8 *)buf,sizeof buf);
-    else if(n<6||n>=(int)sizeof buf||api->strncmp(buf+n-6,"\n!end\n",6)){storage_failed=1;return;}
-    else n-=6;
+    static const char *const lists[3]={NOTES_LST,"sys/tmp/notes.lst","notes.lst"};
+    int legacy=0,n=api->fs_read(lists[0],(u8 *)buf,sizeof buf);
+    while(n<0&&legacy<2&&!api->fs_exists(lists[legacy])){legacy++;n=api->fs_read(lists[legacy],(u8 *)buf,sizeof buf);}
+    if(n<0){storage_failed=api->fs_exists(lists[legacy]);return;}
+    if(legacy<2){
+        if(n<6||n>=(int)sizeof buf||api->strncmp(buf+n-6,"\n!end\n",6)){storage_failed=1;return;}
+        n-=6;
+    }
     if(n>=(int)sizeof buf){storage_failed=1;return;}
-    if (n < 0) {storage_failed=api->fs_exists(NOTES_LST)||api->fs_exists("notes.lst");return;}
     buf[n] = 0;
     int slot = 0;
     char *p = buf;
@@ -103,7 +106,7 @@ static void nl_load(void)
     if(legacy&&note_dir()){
         char old[NMAX][NL_NAMEMAX];int migrated=1;
         for(int i=0;i<slot;i++)api->strlcpy(old[i],notes[i].file,NL_NAMEMAX);
-        for(int i=0;i<slot;i++)if(api->strncmp(notes[i].file,"sys/tmp/",8)){
+        for(int i=0;i<slot;i++)if(api->strncmp(notes[i].file,NOTES_DIR,sizeof NOTES_DIR-1)){
             char dst[NL_NAMEMAX];
             if(notes[i].read_failed||!note_name(dst,sizeof dst)){migrated=0;break;}
             api->strlcpy(notes[i].file,dst,sizeof notes[i].file);
@@ -111,6 +114,14 @@ static void nl_load(void)
         }
         if(!migrated||!nl_save())for(int i=0;i<slot;i++)
             api->strlcpy(notes[i].file,old[i],NL_NAMEMAX);
+        else {
+            // copies landed, bin the old ones
+            for(int i=0;i<slot;i++)if(api->strcmp(old[i],notes[i].file))api->fs_delete(old[i]);
+            api->fs_delete(lists[legacy]);
+            int left=0;
+            for(int i=0;i<FS_NFILES&&!left;i++){const FsEnt *e=api->fs_slot(i);left=e&&e->used&&!api->strncmp(e->name,"sys/tmp/",8);}
+            if(!left)api->fs_delete("sys/tmp");
+        }
     }
 }
 

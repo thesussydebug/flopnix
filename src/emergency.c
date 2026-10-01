@@ -15,13 +15,16 @@ u32 emergency_pd[1024] __attribute__((aligned(4096)));
 volatile u32 panic_active;
 static EmergencyVideo em_video;
 static u8 em_font[96*16];
-static volatile u32 em_age;
+volatile u32 em_age;
 static volatile int em_armed;
 static u32 em_vec, em_err, em_eip, em_cr2;
 static int em_x, em_y, em_bank, em_draw;
+static u32 em_cycles_ms;
 
 static inline u32 em_read_cr2(void)
 { u32 v; __asm__ volatile("mov %%cr2,%0" : "=r"(v)); return v; }
+static inline u32 em_tsc(void)
+{ u32 v; __asm__ volatile("rdtsc" : "=a"(v) :: "edx"); return v; }
 
 void emergency_init(void)
 {
@@ -34,6 +37,23 @@ void emergency_video(u32 base, int w, int h, int pitch, int bank)
     em_video.pitch=pitch; em_video.bank=bank;
     em_video.check=em_video_check(&em_video);
     for (unsigned i=0;i<sizeof em_font;i++) em_font[i]=((volatile u8 *)FONT8x16)[32*16+i];
+}
+void emergency_clock(u32 mhz)
+{
+    if (!panic_active) em_cycles_ms=em_ms_cycles(mhz);
+}
+void emergency_chime(int emergency)
+{
+    const u16 *t=emergency ? em_emergency_tune : em_panic_tune;
+    unsigned n=emergency ? EM_TUNE_NOTES(em_emergency_tune) : EM_TUNE_NOTES(em_panic_tune);
+    u32 per=em_cycles_ms, at=em_tsc();
+    for (unsigned i=0;per && i<n;i++,t+=2) {
+        u32 div=em_tone_div(t[0]);
+        if (div) { outb(0x43,0xb6); outb(0x42,(u8)div); outb(0x42,(u8)(div>>8)); outb(0x61,inb(0x61)|3); }
+        else outb(0x61,inb(0x61)&0xfc);
+        for (u32 ms=t[1];ms;ms--) { at+=per; while ((i32)(em_tsc()-at)<0) ; }
+    }
+    outb(0x61,inb(0x61)&0xfc);
 }
 void emergency_watch_start(void)
 { em_age=0; em_armed=1; }
@@ -103,7 +123,7 @@ __attribute__((noreturn)) void emergency_render(u32 vec,u32 err,u32 eip,u32 cr2,
     em_x=16; em_y=0;
     em_draw=0;
     em_line("FLOPNIX EMERGENCY KERNEL PANIC",C_WHITE);
-    if (vec!=0xffffffffu) em_field("P",vec,0); else em_line("Watchdog deadline exceeded",C_WHITE);
+    if (vec!=0xffffffffu) em_field("P",vec,0); else em_line(reason==EM_BREAK ? "Stopped with Ctrl+Break" : "Watchdog deadline exceeded",C_WHITE);
     em_field("Instruction: ",eip,1); em_field("Error bits: ",err,1);
     em_field("Memory address: ",cr2,1);
     if (original==1) {
@@ -122,13 +142,14 @@ __attribute__((noreturn)) void emergency_render(u32 vec,u32 err,u32 eip,u32 cr2,
     em_line("FLOPNIX stopped",C_WHITE);
     if (em_video_valid(&em_video)) for (u32 x=em_x;x<em_video.width-(u32)em_x;x++) em_pixel(x,em_y-1,C_WHITE);
     em_line("EMERGENCY KERNEL PANIC",C_YELLOW);
-    em_line(reason==EM_DOUBLE ? "P8: Double fault" : reason==EM_STALL ? "Kernel stopped responding" : reason==EM_NMI ? "P2: Critical hardware interrupt" : "Exception reporting failed",C_WHITE);
+    em_line(reason==EM_DOUBLE ? "P8: Double fault" : reason==EM_STALL ? "Kernel stopped responding" : reason==EM_NMI ? "P2: Critical hardware interrupt" : reason==EM_BREAK ? "Stopped with Ctrl+Break" : "Exception reporting failed",C_WHITE);
     em_field("Instruction: ",eip,1);
     em_field("Error bits: ",err,1);
     if (original==1) { em_field("Original exception: P",em_vec,0); em_field("Original instruction: ",em_eip,1); if (em_vec==14) em_field("Original memory: ",em_cr2,1); }
     else { if (vec!=0xffffffffu) em_field("Exception: P",vec,0); else em_line("No processor exception was raised.",C_WHITE); em_field("Memory address: ",cr2,1); }
     em_line("System execution has been halted.",C_WHITE);
     em_line(panic_monitor ? "Starting LAN crash debugger..." : "Record these details, then restart.",C_WHITE);
+    emergency_chime(1);
     if(panic_monitor)panic_monitor->emergency(vec,err,eip,cr2,reason,original,em_vec,em_err,em_eip,em_cr2);
     for (;;) hlt();
 }

@@ -1,6 +1,7 @@
 /* Draws terminal windows and sends commands to the kernel shell. */
 #include "kapi.h"
 #include "shpath.h"
+#include "panictest.h"
 #include "net_wire.inc"
 #include "ramtest.inc"
 #include "shcwd.inc"
@@ -110,8 +111,8 @@ static void resolve(const char *in, char *out, int cap);
 static void os_release(void)
 {
     char r[80];
-    kfmt(r, sizeof r, "flopnix %s #1 i386 (built %s)",
-         api->os_version, api->os_build_date);
+    kfmt(r, sizeof r, "flopnix %s #%s i386 (built %s)",
+         api->os_version, api->os_build_num, api->os_build_date);
     tprint(r);
 }
 
@@ -214,7 +215,7 @@ static void do_fetch(void)
     for (int i = 0; i < 8; i++) {
         switch (i) {
         case 0: kfmt(r, sizeof r, "root@flopnix"); break;
-        case 1: kfmt(r, sizeof r, "os:      %s %s", OS_NAME, OS_VER); break;
+        case 1: kfmt(r, sizeof r, "os:      %s %s build %s", OS_NAME, OS_VER, api->os_build_num); break;
         case 2: kfmt(r, sizeof r, "kernel:  flopnix %s i386", OS_VER); break;
         case 3: kfmt(r, sizeof r, "uptime:  %u:%02u:%02u", s / 3600, (s / 60) % 60, s % 60); break;
         case 4: kfmt(r, sizeof r, "memory:  %u MB", api->boot_info(BI_MEM_KB) / 1024); break;
@@ -830,7 +831,7 @@ static void sh_exec(char *cmd)
         tprint("Power:    reboot shutdown\n");
         tprint("Checks:   bios lspci testram bench ring3\n");
         tprint("Debug:    peek - read memory; poke - write memory\n");
-        tprint("          crash - test a panic (stops the system)\n");
+        tprint("          panic normal|emergency - test a panic (stops the system)\n");
         tprint("Fun:      matrix rainbow beep\n");
         tprint("Text filters: > file saves; >> file appends.\n");
         tprint("Try <command> -h too. PgUp/PgDn or wheel scrolls.\n");
@@ -1486,9 +1487,9 @@ static void sh_exec(char *cmd)
         if (st >= 0) win_open(st);
         else tprint("settings: not loaded (settings.kx missing?)\n");
     } else if (!strcmp(cmd, "about")) {
-        int t = app_find("About");
+        int t = app_find("System Info");
         if (t >= 0) win_open(t);
-        else tprint("about: not loaded (about.kx missing?)\n");
+        else tprint("about: not loaded (sysinfo.kx missing?)\n");
     } else if (!strcmp(cmd, "kext") || !strncmp(cmd, "kext ", 5)) {
         if (!strncmp(cargs, "load ", 5)) {
             const char *fn = cargs + 5;
@@ -1609,10 +1610,14 @@ static void sh_exec(char *cmd)
     } else if (!strcmp(cmd, "testram")) {
         u32 limit = api->mem_info(MI_HEAP_LIMIT);
         u32 capacity = api->mem_info(MI_HEAP_CAPACITY);
-        u32 bytes = api->heap_avail() + (limit > capacity ? limit - capacity : 0);
-        u32 reserve = bytes / 4;
+        u32 room = limit > capacity ? limit - capacity : 0;
+        u32 largest = api->mem_info(MI_HEAP_LARGEST);
+        u32 avail = api->heap_avail();
+        u32 reserve = avail / 4;
         if (reserve > 0x100000u) reserve = 0x100000u;
-        bytes = (bytes - reserve) & ~7u;
+        u32 bytes = avail - reserve;
+        if (bytes > (room > largest ? room : largest)) bytes = room > largest ? room : largest;
+        bytes &= ~7u;
         void *test = 0;
         while (bytes >= 4096u) {
             test = api->kmalloc(bytes);
@@ -1657,9 +1662,15 @@ static void sh_exec(char *cmd)
         else           tprint("memory ok\n");
     } else if (!strcmp(cmd, "reboot")) {
         reboot();
-    } else if (!strcmp(cmd, "crash")) {
-        tprint("triggering a test exception (P6)...\n");
-        __asm__ volatile("ud2");
+    } else if (!strcmp(cmd, "panic") || !strncmp(cmd, "panic ", 6)) {
+        const PanicTestOps *pt = api->service_get("panic.test");
+        int em = !strcmp(cargs, "emergency");
+        if (!em && strcmp(cargs, "normal")) tprint("usage: panic normal|emergency\n");
+        else if (!pt || pt->abi != PANIC_TEST_ABI || !pt->stop) tprint("panic: this kernel has no panic test\n");
+        else {
+            tprint(em ? "stopping with an emergency panic...\n" : "stopping with a kernel panic...\n");
+            pt->stop(em);
+        }
     } else if (sh_usage(c0)) {
 
         kfmt(buf, sizeof buf, "usage: %s\n", sh_usage(c0));

@@ -1,7 +1,7 @@
 #pragma once
 #include "kapi.h"
 
-#define PANIC_MONITOR_ABI 0x324d5046u
+#define PANIC_MONITOR_ABI 0x334d5046u
 typedef struct {
     u32 edi, esi, ebp, esp, ebx, edx, ecx, eax;
     u32 vec, err, eip, cs, eflags;
@@ -29,4 +29,7 @@ typedef struct {
     u32 kernel_end;
     const void *threads, *buffers;
     u32 thread_bytes;
+    void (*show)(const char *a, const char *b, const char *c, u32 fill, u32 lit);
 } PanicCore;
+
+void panic_show(const char *a, const char *b, const char *c, u32 fill, u32 lit);

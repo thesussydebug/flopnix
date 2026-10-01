@@ -1,6 +1,23 @@
 static const NetUpdateOps *push_transport;
 static int push_listening;
 static u32 push_progress;
+static struct { u32 crc, sect, i; u8 *buf; } boot_sum = {0, 1, 0, 0};
+/* reads one more track of the installed kernel: 1 = more left, 0 = done, -1 = failed. */
+static int boot_sum_step(void)
+{
+    const FloppyOps *disk=api->service_get("disk.floppy");
+    int batch=disk&&disk->abi==FLOPPY_ABI;u32 count=batch?FLOPPY_TRACK_SECTORS:1;
+    if(!boot_sum.buf){
+        if(!(boot_sum.buf=api->kmalloc(FLOPPY_TRACK_SECTORS*512)))return -1;
+        api->mem_track("Kernel comparison",boot_sum.buf,FLOPPY_TRACK_SECTORS*512);
+    }
+    u32 i=boot_sum.i,n=boot_sum.sect-i,track=FLOPPY_TRACK_SECTORS-(i+1)%FLOPPY_TRACK_SECTORS;
+    if(n>count)n=count;if(n>track)n=track;
+    if(batch?disk->read(i+1,boot_sum.buf,n):api->disk_read(i+1,boot_sum.buf))return -1;
+    if(!i){boot_sum.sect=(u32)(boot_sum.buf[6]|boot_sum.buf[7]<<8);if(boot_sum.buf[0]!=0xeb||boot_sum.sect<8||boot_sum.sect>255)return -1;}
+    boot_sum.crc=ku_crc_feed(boot_sum.crc,boot_sum.buf,n*512);boot_sum.i=i+n;
+    return boot_sum.i<boot_sum.sect;
+}
 static int push_data(const u8 *data,int n,void *ctx)
 {
     Download *d=ctx;if(!receive(data,n,ctx))return 0;
@@ -20,8 +37,9 @@ static void push_tick(void *ctx)
     const NetHttpOps *http=api->service_get("net.http");
     if(!push_transport||push_transport->abi!=NET_UPDATE_ABI||!http||http->abi!=NET_HTTP_ABI)return;
     if(!push_listening){
-        u32 crc=0,size=0;installed_checksum(&crc,&size,0);
-        push_transport->listen(crc);push_listening=1;
+        int r=boot_sum_step();if(r>0)return;
+        api->kfree(boot_sum.buf);boot_sum.buf=0;
+        push_transport->listen(r?0:boot_sum.crc);push_listening=1;
     }
     KuOffer offer;if(!push_transport->take(&offer))return;
     busy=1;closing=0;ready=0;release=offer.release;push_progress=~0u;

@@ -6,6 +6,7 @@
 #include "ramtest.inc"
 #include "appq.inc"
 #include "busycore.inc"
+#include "brkkey.inc"
 #include "shcwd.inc"
 #include "shellstream.h"
 #include "shellterm.h"
@@ -49,7 +50,7 @@ u32 used_kb(void)
     u32 bss = (u32)__bss_end - (u32)__bss_start;
     return (img + bss + IOBUF_SZ + (u32)(SW * SH) + 1023 +
             kapi.mem_info(MI_ARENA_RO) + kapi.mem_info(MI_ARENA_RW) +
-            kapi.mem_info(MI_POOL_USED) + heap_capacity() - heap_avail()) / 1024 + 120;
+            kapi.mem_info(MI_POOL_USED) + heap_capacity() - heap_free()) / 1024 + 120;
 }
 
 void shell_print(const char *s) { tprint(s); }
@@ -216,41 +217,6 @@ void threads_print(void)
         kfmt(b, sizeof b, "\nSaved to USB as THREADS.TXT (%u bytes)\n",
              (u32)strlen(rep));
         tprint(b);
-    }
-}
-
-const char *cpu_brand(void);
-u32 cpu_mhz(void);
-
-static void sysinfo_draw(Win *w, int cx, int cy)
-{
-    int cw = w->w - 6;
-    char b[96], hs[20];
-    int x = cx + 10, y = cy + 8;
-    draw_text(x, y, OS_NAME " " OS_VER, C_NAVY);
-    hline(cx + 8, cy + 29, cw - 16, C_SHAD);
-    y += 32;
-    const char *labels[7] = {"Processor", "Memory", "Screen", "Floppy", "USB storage", "Network", "Running for"};
-    for (int i = 0; i < 7; i++, y += 24) {
-        if (!(i & 1)) fill_rect(cx + 8, y - 3, cw - 16, 22, C_G0 + 7);
-        switch (i) {
-        case 0: kfmt(b, sizeof b, "%s, %u MHz", cpu_brand(), cpu_mhz()); break;
-        case 1: human_size_kb(BOOTINFO->mem_kb, hs, sizeof hs); kfmt(b, sizeof b, "%s usable RAM", hs); break;
-        case 2: kfmt(b, sizeof b, "%d x %d, 256 colours", SW, SH); break;
-        case 3: strlcpy(b, "A: - 1.44 MB", sizeof b); break;
-        case 4: strlcpy(b, usb_present() ? usb_model() : "No drive connected", sizeof b); break;
-        case 5: {
-            u32 ip = net_get(NET_IP);
-            if (!net_up()) strlcpy(b, "No supported network card", sizeof b);
-            else if (!ip) strlcpy(b, "Waiting for an address", sizeof b);
-            else kfmt(b, sizeof b, "%u.%u.%u.%u (%s)", ip & 255, ip >> 8 & 255, ip >> 16 & 255, ip >> 24,
-                      net_get(NET_DHCP_OK) ? "automatic" : "manual");
-            break;
-        }
-        default: { u32 secs = ticks / 100; kfmt(b, sizeof b, "%u h %u min %u sec", secs / 3600, secs / 60 % 60, secs % 60); }
-        }
-        draw_text(x, y, labels[i], C_G0 + 2);
-        draw_text_clip(x + 110, y, b, C_BLACK, cw - 138);
     }
 }
 
@@ -425,15 +391,13 @@ int app_live_draw(int t) { return app_draw_flags(t) & APP_LIVE_DRAW; }
 int app_draw_flags(int t) { return t >= 0 && t < nregs ? regs[t].live_draw : 0; }
 
 extern void fault_show_banner(const char *msg);
-static volatile u8 hang_ended;
 
 static void app_recover(Win *w)
 {
     char msg[128];
     const FaultRec *fault = fault_get(0);
     const char *nm = w->tbuf_on ? w->tbuf : w->title;
-    if (hang_ended) {
-        hang_ended = 0;
+    if (fault_vec == FAULT_VEC_HANG) {
         kfmt(msg, sizeof msg, "%s stopped responding - ended", nm);
     } else {
         kfmt(msg, sizeof msg, "P%u %s - window closed",
@@ -516,11 +480,37 @@ void app_kill_request(int win)
 void app_kill_poll(void)
 {
     int t=thr_self;
-    if(kupd_critical||!jobs[t].active||!jobs[t].kill||!fault_armed[t])return;
+    if(kupd_critical||!jobs[t].active||!jobs[t].kill||!fault_armed[t]||gui_pumping())return;
     if(mtx_held_count()>(jobs[t].legacy?1:0))return;
-    jobs[t].kill=0;hang_ended=1;Win *w=&wins[jobs[t].win];
+    jobs[t].kill=0;Win *w=&wins[jobs[t].win];
     fault_record_hang(w->tbuf_on?w->tbuf:w->title);fault_armed[t]=0;
     in_irq=0;fj_long(&fault_ctx[t],1);
+}
+static u8 brk_beep;
+void app_break_poll(void)
+{
+    if (brk_beep && !--brk_beep) speaker_off();
+    if (!brk_req) return;
+    BrkIn b = { em_age, brk_since, brk_req, thr_self == 0, (u8)fault_armed[0], (u8)mtx_held_count(),
+                (u8)usb_held_by_self(), (u8)gui_pumping() };
+    int d = brk_decide(&b);
+    if (d == BRK_WAIT) return;
+    brk_req = 0;
+    u32 eip = panic_frame[10];
+    if (d == BRK_EMERGENCY) emergency_enter(0xffffffffu, 0, eip, 0, EM_BREAK);
+    if (d == BRK_REFUSE) { speaker_tone(BRK_BEEP_HZ); brk_beep = BRK_BEEP_TICKS; }
+    if (d != BRK_SOFT) return;
+    const KextInfo *k = kext_get(kext_current());
+    fault_record_hang(k ? path_base(k->name) : "kernel");
+    FaultRec *r = (FaultRec *)fault_get(0);
+    r->eip = eip;
+    fault_symbol(eip, r->location, sizeof r->location);
+    char msg[80];
+    kfmt(msg, sizeof msg, "%s stopped with Pause", r->owner);
+    klog(msg); klog("\n"); fault_show_banner(msg);
+    input_mute();
+    busy_end();
+    fault_armed[0] = 0; in_irq = 0; fj_long(&fault_ctx[0], 1);
 }
 u32 app_q_dropped(void){return aq_dropped;}
 int app_q_depth(void){return aq_n;}
@@ -679,18 +669,4 @@ void app_drop(Win *w,int lx,int ly,const char *type,const char *data)
     AppDrop *p=kmalloc(sizeof *p);if(!p){fault_show_banner("E42 - File drop could not be queued.");return;}
     p->x=lx;p->y=ly;strlcpy(p->type,type,sizeof p->type);strlcpy(p->data,data,sizeof p->data);
     if(!aq_post(AE_DROP,w-wins,(int)p,0,0,0,0)){kfree(p);fault_show_banner("E42 - Input queue is full.");}
-}
-
-static void sysinfo_csize(int inst, int *w, int *h)
-{ (void)inst; *w = 438; *h = 214; }
-static void sysinfo_draw_w(Win *w, int cx, int cy, int cw, int ch)
-{ (void)cw; (void)ch; sysinfo_draw(w, cx, cy); }
-
-void apps_init(void)
-{
-    static const AppDesc dsys = {
-        .title = "System Info", .max_inst = 1, .in_menu = 1,
-        .draw = sysinfo_draw_w, .client_size = sysinfo_csize, .live_draw = APP_POINTER_FREE | APP_NO_CARET,
-    };
-    register_app(&dsys);
 }

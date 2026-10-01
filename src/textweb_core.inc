@@ -77,9 +77,62 @@ static int tw_local(const char *s,char *out)
     int usb=s[0]=='u'||s[0]=='U',n=tw_len(s);
     if(n<3||n>=TW_URL||s[n-1]=='/'||s[n-1]=='\\')return 0;
     for(int i=2;i<n;i++)if((u8)s[i]<32||s[i]==':'||s[i]=='"')return 0;
-    char path[128];if(!sc_resolve("",s+2,path,sizeof path)||!path[0]||(!usb&&tw_len(path)>=24))return 0;
+    char path[128];if(!sc_resolve("",s+2,path,sizeof path)||!path[0]||(!usb&&tw_len(path)>=FS_NAMELEN))return 0;
     out[0]=usb?'u':'a';out[1]=':';if(usb)out[2]='/';
     return tw_copy(out+2+usb,TW_URL-2-usb,path,tw_len(path));
+}
+// finds "key url" in the search list, # lines are ignored
+static const char *tw_engine(const char *cfg,const char *key,int kn,int *un)
+{
+    for(const char *l=cfg;l&&*l;){
+        const char *e=l;while(*e&&*e!='\n')e++;
+        const char *w=l;while(w<e&&(*w==' '||*w=='\t'))w++;
+        const char *p=w;while(p<e&&*p!=' '&&*p!='\t')p++;
+        const char *u=p;while(u<e&&(*u==' '||*u=='\t'))u++;
+        const char *ue=e;while(ue>u&&(ue[-1]=='\r'||ue[-1]==' '||ue[-1]=='\t'))ue--;
+        int same=p-w==kn&&*w!='#'&&ue>u;
+        for(int i=0;same&&i<kn;i++){int a=w[i],b=key[i];if(a>='A'&&a<='Z')a+=32;if(b>='A'&&b<='Z')b+=32;same=a==b;}
+        if(same){*un=(int)(ue-u);return u;}
+        l=*e?e+1:e;
+    }
+    return 0;
+}
+static int tw_search_url(const char *typed,const char *cfg,char *out)
+{
+    while(*typed==' ')typed++;
+    int n=tw_len(typed);while(n&&typed[n-1]==' ')n--;
+    char t[TW_URL],local[TW_URL];TwUrl u;
+    if(!n||!tw_copy(t,TW_URL,typed,n)||tw_url(t,&u)||tw_local(t,local))return 0;
+    int space=0,dot=0,colon=0;for(int i=0;i<n;i++){space|=t[i]==' ';dot|=t[i]=='.';colon|=t[i]==':';}
+    if(!space&&dot&&!colon)return tw_copy(out,TW_URL,"http://",7)&&tw_copy(out+7,TW_URL-7,t,n);
+    if(colon&&!space)return 0;
+    const char *q=t,*e=0;int en=0,k=0;
+    while(k<n&&t[k]!=' ')k++;
+    if(k<n){const char *r=t+k;while(*r==' ')r++;if(*r&&(e=tw_engine(cfg,t,k,&en)))q=r;}
+    if(!e&&!(e=tw_engine(cfg,"default",7,&en)))return -1;
+    int at=0,plus=0;while(at<en-1&&!(e[at]=='%'&&e[at+1]=='s'))plus|=e[at++]=='?';
+    if(at>=en-1){at=en;plus=0;for(int i=0;i<en;i++)plus|=e[i]=='?';}
+    if(!tw_copy(out,TW_URL,e,at))return 0;
+    int o=at;
+    for(;*q;q++){
+        u8 c=(u8)*q;
+        if((c>='a'&&c<='z')||(c>='A'&&c<='Z')||(c>='0'&&c<='9')||c=='-'||c=='_'||c=='.'||c=='~'){if(o+1>=TW_URL)return 0;out[o++]=(char)c;}
+        else if(c==' '&&plus){if(o+1>=TW_URL)return 0;out[o++]='+';}
+        else {if(o+3>=TW_URL)return 0;out[o++]='%';out[o++]="0123456789ABCDEF"[c>>4];out[o++]="0123456789ABCDEF"[c&15];}
+    }
+    int rest=at<en?en-at-2:0;
+    if(rest>0&&!tw_copy(out+o,TW_URL-o,e+at+2,rest))return 0;
+    out[o+(rest>0?rest:0)]=0;return 1;
+}
+#define TW_VERSION "1.0"
+static int tw_agent(char *out,int cap,const char *os)
+{
+    static const char tail[]=" textweb/" TW_VERSION;
+    int n=0;while(os&&n<16&&(u8)os[n]>32&&(u8)os[n]<127)n++;
+    int o=7+(n?n+1:0),t=(int)sizeof tail-1;
+    if(o+t>=cap)return 0;
+    tw_copy(out,cap,"FLOPNIX/",n?8:7);tw_copy(out+8,cap-8,os,n);
+    return tw_copy(out+o,cap-o,tail,t);
 }
 static int tw_local_ref(const char *base,const char *ref,char *out)
 {
@@ -168,6 +221,13 @@ static void tw_put(TwPage *p,int c,int collapse)
     }
     if(!tw_room(p,1)){p->clipped=1;return;}p->text[p->len++]=(char)c;p->text[p->len]=0;
 }
+static int tw_glyph(const char *s,int n,int entities,int *used,char *out);
+static int tw_put_text(TwPage *p,const char *s,int n,int entities,int collapse)
+{
+    char g[4];int used,k=tw_glyph(s,n,entities,&used,g);
+    for(int i=0;i<k;i++)tw_put(p,(u8)g[i],collapse);
+    return used;
+}
 static void tw_number(TwPage *p,int n)
 {
     char d[6];int k=0;do{d[k++]=(char)('0'+n%10);n/=10;}while(n&&k<6);
@@ -181,6 +241,18 @@ static int tw_addlink(TwPage *p,const char *url,const char *label,int len)
     if(len>79)len=79;tw_copy(l->label,80,label,len);
     tw_number(p,p->links+1);return p->links++;
 }
+static const char tw_ent_names[]=
+    "nbsp iexcl cent pound curren yen brvbar sect uml copy ordf laquo not shy reg macr deg plusmn "
+    "sup2 sup3 acute micro para middot cedil sup1 ordm raquo frac14 frac12 frac34 iquest Agrave Aacute "
+    "Acirc Atilde Auml Aring AElig Ccedil Egrave Eacute Ecirc Euml Igrave Iacute Icirc Iuml ETH Ntilde "
+    "Ograve Oacute Ocirc Otilde Ouml times Oslash Ugrave Uacute Ucirc Uuml Yacute THORN szlig agrave "
+    "aacute acirc atilde auml aring aelig ccedil egrave eacute ecirc euml igrave iacute icirc iuml eth "
+    "ntilde ograve oacute ocirc otilde ouml divide oslash ugrave uacute ucirc uuml yacute thorn yuml "
+    "ndash mdash lsquo rsquo sbquo ldquo rdquo bdquo hellip bull trade euro minus larr rarr uarr darr "
+    "thinsp ensp emsp zwnj zwj lrm rlm prime Prime lsaquo rsaquo";
+static const unsigned short tw_ent_more[]={0x2013,0x2014,0x2018,0x2019,0x201A,0x201C,0x201D,0x201E,
+    0x2026,0x2022,0x2122,0x20AC,0x2212,0x2190,0x2192,0x2191,0x2193,0x2009,0x2002,0x2003,0x200C,0x200D,
+    0x200E,0x200F,0x2032,0x2033,0x2039,0x203A};
 static int tw_entity(const char *s,int *used)
 {
     int n=0;while(s[n]&&s[n]!=';'&&n<10)n++;if(s[n]!=';')return 0;
@@ -188,14 +260,72 @@ static int tw_entity(const char *s,int *used)
     if(n==3&&tw_ci(s,"amp",3))return '&';
     if(n==2&&tw_ci(s,"lt",2))return '<';if(n==2&&tw_ci(s,"gt",2))return '>';
     if(n==4&&tw_ci(s,"quot",4))return '"';if(n==4&&tw_ci(s,"apos",4))return '\'';
-    if(n==4&&tw_ci(s,"nbsp",4))return ' ';
     if(s[0]=='#'){
         int i=1,v=0,base=10;if(s[i]=='x'||s[i]=='X'){base=16;i++;}
         if(i==n)return 0;
-        for(;i<n;i++){int d=tw_hex(s[i]);if(d<0||d>=base)return 0;v=v*base+d;if(v>255)return '?';}
+        for(;i<n;i++){int d=tw_hex(s[i]);if(d<0||d>=base)return 0;v=v*base+d;if(v>0x10FFFF)return '?';}
         return v>=32?v:' ';
     }
+    const char *t=tw_ent_names;
+    for(int k=0;*t;k++){
+        int len=0;while(t[len]&&t[len]!=' ')len++;
+        if(len==n){int i=0;while(i<n&&t[i]==s[i])i++;if(i==n)return k<96?0xA0+k:tw_ent_more[k-96];}
+        t+=len;if(*t)t++;
+    }
     return 0;
+}
+static const unsigned char tw_latin[96]={' ',0xAD,0x9B,0x9C,'?',0x9D,'|','S','"',0,0xA6,0xAE,0xAA,0,0,'-',
+    0xF8,0xF1,0xFD,'3','\'',0xE6,'P',0xFA,',','1',0xA7,0xAF,0xAC,0xAB,0,0xA8,
+    'A','A','A','A',0x8E,0x8F,0x92,0x80,'E',0x90,'E','E','I','I','I','I',
+    'D',0xA5,'O','O','O','O',0x99,'x','O','U','U','U',0x9A,'Y',0,0xE1,
+    0x85,0xA0,0x83,'a',0x84,0x86,0x91,0x87,0x8A,0x82,0x88,0x89,0x8D,0xA1,0x8C,0x8B,
+    'd',0xA4,0x95,0xA2,0x93,'o',0x94,0xF6,'o',0x97,0xA3,0x96,0x81,'y',0,0x98};
+static const unsigned short tw_cp1252[32]={0x20AC,'?',0x201A,0x192,0x201E,0x2026,'+','+','^','%','S',0x2039,
+    0x152,'?','Z','?','?',0x2018,0x2019,0x201C,0x201D,0x2022,0x2013,0x2014,'~',0x2122,'s',0x203A,0x153,'?','z','Y'};
+static const unsigned short tw_sym[]={0x3B1,0x3B2,0x393,0x3C0,0x3A3,0x3C3,0x3BC,0x3C4,0x3A6,0x398,0x3A9,0x3B4,
+    0x221E,0x3C6,0x3B5,0x2229,0x2261,0x2265,0x2264,0x2248,0x221A,0x207F,0x25A0,0x192,0x2022,0x2219,0x2039,0x203A};
+static const char tw_sym_cp[]="\xE0\xE1\xE2\xE3\xE4\xE5\xE6\xE7\xE8\xE9\xEA\xEB\xEC\xED\xEE\xEF\xF0\xF2\xF3\xF7\xFB\xFC\xFE\x9F\xF9\xF9<>";
+/* Writes a code point as text in the CP437 screen font; returns 0 to 3 bytes. */
+static int tw_uni(u32 c,char *out)
+{
+    const char *s="?";
+    if(c<0x80){out[0]=(char)c;return 1;}
+    if(c<0xA0)c=tw_cp1252[c-0x80];
+    if(c<0x80){out[0]=(char)c;return 1;}
+    if(c<0x100){
+        if(tw_latin[c-0xA0]){out[0]=(char)tw_latin[c-0xA0];return 1;}
+        s=c==0xA9?"(c)":c==0xAE?"(R)":c==0xBE?"3/4":c==0xDE?"Th":c==0xFE?"th":"";
+    }else if(c>=0x2010&&c<=0x2015)s="-";
+    else if(c==0x2212)s="-";
+    else if(c>=0x2018&&c<=0x201B)s="'";
+    else if(c>=0x201C&&c<=0x201F)s="\"";
+    else if(c==0x2032)s="'";else if(c==0x2033)s="\"";
+    else if(c==0x2026)s="...";else if(c==0x20AC)s="EUR";else if(c==0x2122)s="TM";
+    else if(c==0x2190)s="<-";else if(c==0x2192)s="->";else if(c==0x2191)s="^";else if(c==0x2193)s="v";
+    else if((c>=0x2000&&c<=0x200A)||c==0x202F||c==0x205F||c==0x3000)s=" ";
+    else if((c>=0x200B&&c<=0x200F)||c==0x2060||c==0xFEFF||c==0x00AD)s="";
+    else for(unsigned i=0;i<sizeof tw_sym/sizeof tw_sym[0];i++)if(tw_sym[i]==c){out[0]=tw_sym_cp[i];return 1;}
+    int n=0;while(s[n]){out[n]=s[n];n++;}return n;
+}
+static int tw_utf8(const char *s,int n,u32 *cp)
+{
+    const unsigned char *u=(const unsigned char *)s;
+    int k=u[0]>=0xC2&&u[0]<0xE0?2:u[0]>=0xE0&&u[0]<0xF0?3:u[0]>=0xF0&&u[0]<0xF5?4:0;
+    if(!k||k>n)return 0;
+    u32 c=u[0]&(0x7F>>k);
+    for(int i=1;i<k;i++){if((u[i]&0xC0)!=0x80)return 0;c=c<<6|(u[i]&0x3F);}
+    if((k==3&&c<0x800)||(k==4&&c<0x10000)||(c>=0xD800&&c<0xE000))return 0;
+    *cp=c;return k;
+}
+/* An entity, UTF-8 sequence or stray Latin-1 byte becomes screen text. */
+static int tw_glyph(const char *s,int n,int entities,int *used,char *out)
+{
+    u32 c=(unsigned char)s[0];*used=1;
+    if(c=='&'&&entities){
+        char e[12];int k=0;while(k<11&&k+1<n&&s[k+1]){e[k]=s[k+1];k++;if(e[k-1]==';')break;}e[k]=0;
+        int v=tw_entity(e,&k);if(v){*used=k+1;c=(u32)v;}
+    }else if(c>=0x80){u32 cp;int k=tw_utf8(s,n,&cp);if(k){*used=k;c=cp;}}
+    return tw_uni(c,out);
 }
 
 static void tw_render(TwPage *p,const char *s,int mode,const char *base)
@@ -205,7 +335,7 @@ static void tw_render(TwPage *p,const char *s,int mode,const char *base)
         while(*s){
             const char *end=s;while(*end&&*end!='\n'&&*end!='\r')end++;int n=(int)(end-s);
             if(n==1&&s[0]=='.')break;
-            if(mode==3){int i=n>1&&s[0]=='.'&&s[1]=='.';for(;i<n;i++)tw_put(p,(u8)s[i],0);}
+            if(mode==3){int i=n>1&&s[0]=='.'&&s[1]=='.';while(i<n)i+=tw_put_text(p,s+i,n-i,0,0);}
             else if(n){
                 int tab[4],nt=0;for(int i=1;i<n&&nt<4;i++)if(s[i]=='\t')tab[nt++]=i;
                 int label=nt?tab[0]-1:n-1;
@@ -226,7 +356,7 @@ static void tw_render(TwPage *p,const char *s,int mode,const char *base)
                         }else p->clipped=1;
                     }
                 }
-                for(int i=0;i<label;i++)tw_put(p,(u8)s[1+i],0);
+                for(int i=0;i<label;)i+=tw_put_text(p,s+1+i,label-i,0,0);
             }
             tw_put(p,'\n',0);s=end;if(*s=='\r')s++;if(*s=='\n')s++;
         }
@@ -265,8 +395,9 @@ static void tw_render(TwPage *p,const char *s,int mode,const char *base)
             i=e+1;continue;
         }
         if(!skip){
-            if(mode==1&&s[i]=='&'){int used=0,c=tw_entity(s+i+1,&used);if(c){tw_put(p,c,1);i+=used+1;continue;}}
-            int c=(u8)s[i];if(mode==1&&(c=='\n'||c=='\r'||c=='\t'))c=' ';tw_put(p,c,mode==1);
+            int c=(u8)s[i];
+            if(c>=0x80||(mode==1&&c=='&')){i+=tw_put_text(p,s+i,0x7FFFFFFF,mode==1,mode==1);continue;}
+            if(mode==1&&(c=='\n'||c=='\r'||c=='\t'))c=' ';tw_put(p,c,mode==1);
         }
         i++;
     }

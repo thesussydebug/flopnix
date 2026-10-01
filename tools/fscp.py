@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-'Usage: fscp.py IMAGE SOURCE [DEST], IMAGE --list, or IMAGE --upgrade OUTPUT.'
+'Usage: fscp.py IMAGE SOURCE [DEST], IMAGE --into DIR/ SOURCE..., IMAGE --list, or IMAGE --upgrade OUTPUT.'
 
 import sys, os, struct, datetime
 
@@ -90,8 +90,17 @@ def encode_name(name, namelen=NAMELEN):
     return encoded
 
 def do_copy(img, src, dstname):
+    do_copy_many(img, [(src, dstname)])
+
+def do_copy_many(img, pairs):
     d = load(img)
     ensure_fs(d)
+    for src, dstname in pairs:
+        put(d, img, src, dstname)
+    with open(img, "wb") as target:
+        target.write(d)
+
+def put(d, img, src, dstname):
     _, namelen, entsz, _ = layout(d)
     encoded = encode_name(dstname, namelen)
     with open(src, "rb") as source:
@@ -123,8 +132,6 @@ def do_copy(img, src, dstname):
     tail = start*512 + len(data)
     pad = (nsect*512) - len(data)
     d[tail:tail+pad] = b"\0" * pad
-    with open(img, "wb") as target:
-        target.write(d)
     print("copied %s -> %s:%s (%d bytes, LBA %d)" %
           (src, os.path.basename(img), dstname, len(data), start))
 
@@ -169,6 +176,8 @@ if __name__ == "__main__":
         do_upgrade(a[0], a[2])
     elif len(a) == 2 and a[1] == "--list":
         do_list(a[0])
+    elif len(a) >= 4 and a[1] == "--into":
+        do_copy_many(a[0], [(src, a[2] + os.path.basename(src)) for src in a[3:]])
     elif len(a) in (2, 3):
         img, src = a[0], a[1]
         dst = a[2] if len(a) == 3 else os.path.basename(src)

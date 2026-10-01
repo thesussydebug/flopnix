@@ -433,6 +433,15 @@ static void tm_key(int inst, int k)
     }
 }
 
+static void tm_wheel(int inst, int dz)
+{
+    (void)inst;
+    if (view == 1 || sbd.active) return;
+    int *sc = (view == 2) ? &mscroll : &scroll;
+    *sc -= dz * 3;
+    if (*sc < 0) *sc = 0;
+}
+
 static void tm_mouse(int inst, int lx, int ly, int ev, int cw, int ch)
 {
     (void)inst;
@@ -533,7 +542,7 @@ int kext_entry(const Kapi *k)
     gfx = gdi_bind(k, 11);
     static const AppDesc d = {.live_draw=APP_INDEPENDENT|APP_POINTER_FREE|APP_NO_CARET,
         .title = "Task Manager", .max_inst = 1, .in_menu = 1, .resizable = 1,
-        .open = tm_open, .draw = tm_draw, .mouse = tm_mouse, .key = tm_key, .close = tm_close,
+        .open = tm_open, .draw = tm_draw, .mouse = tm_mouse, .wheel = tm_wheel, .key = tm_key, .close = tm_close,
         .client_size = tm_csize, .min_client=tm_min, .category = APP_CAT_DEV,
     };
     my_type = k->register_app(&d);

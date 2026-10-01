@@ -189,6 +189,7 @@ int kext_entry(const Kapi *k)
     gfx = gdi_bind(k, 11);
     static const AppDesc d = {.live_draw=APP_INDEPENDENT|APP_NO_CARET,
         .title = "Reversi", .max_inst = 1, .in_menu = 1,
+        .category = APP_CAT_GAMES,
         .open = reset, .draw = rv_draw, .mouse = rv_mouse,
         .client_size = rv_csize,
     };

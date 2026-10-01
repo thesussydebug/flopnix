@@ -15,12 +15,48 @@ mkdir -p out built/kexts
 exec 9>out/.build.lock
 flock 9
 
+JOBS=${JOBS:-$(nproc)}
+
+job_list=() job_running=0 job_fail=0 job_next=0
+job_reap() {
+    wait -n || job_fail=1
+    job_running=$((job_running - 1))
+    while (( job_next < ${#job_list[@]} )) && [ -e "out/.job.${job_list[job_next]}.done" ]; do
+        cat "out/.job.${job_list[job_next]}.log"
+        job_next=$((job_next + 1))
+    done
+}
+spawn() {
+    if (( job_fail )); then return; fi
+    ( "$1" "$2" >"out/.job.$2.log" 2>&1 && rc=0 || rc=$?
+      : >"out/.job.$2.done"; exit $rc ) 9>&- &
+    job_list+=("$2")
+    job_running=$((job_running + 1))
+    if (( job_running >= JOBS )); then job_reap; fi
+}
+drain() {
+    local fail
+    while (( job_running > 0 )); do job_reap; done
+    fail=$job_fail
+    rm -f out/.job.*
+    job_list=() job_fail=0 job_next=0
+    return $fail
+}
+
 osver=$(sed -n 's/.*#define OS_VER  *"\([^"]*\)".*/\1/p' src/os.h)
 if ! [[ "$osver" =~ ^[0-9]+\.[0-9]+\.[0-9]+(_[0-9]+)?$ ]]; then
     echo "src/os.h must define a valid OS_VER" >&2
     exit 1
 fi
+kapi=$(sed -n 's/^#define KAPI_VERSION  *\([0-9]*\).*/\1/p' src/kapi.h)
 
+
+buildnum=$(( $(cat build.num 2>/dev/null || echo 0) + 1 ))
+CFLAGS="$CFLAGS -DOS_BUILD_NUM=\"$buildnum\""
+echo "== flopnix $osver, kapi $kapi, build $buildnum"
+
+echo "== checking..."
+echo "   -shell command usage"
 # Check that every shell command has usage text.
 missing=""
 for c in $(grep -oE 'strn?cmp\(cmd, "[a-z]+ ?"' src/apps.c |
@@ -33,31 +69,40 @@ if [ -n "$missing" ]; then
     exit 1
 fi
 
+echo "   -net.c nic presence tests"
 if grep -nE 'if \(!?io\)' kexts/net.c | grep -qv 'nic_kind'; then
     echo "kexts/net.c tests \`io\` as NIC presence - use net_up() instead:" >&2
     grep -nE 'if \(!?io\)' kexts/net.c | grep -v 'nic_kind' >&2
     exit 1
 fi
 
+echo "   -app catalog"
 python tools/appcatalog.py || exit 1
 
-echo "== assembling"
+echo "== assembling..."
+echo "   boot/boot.asm"
 nasm -f bin boot/boot.asm -o out/boot.bin
-kapi=$(sed -n 's/^#define KAPI_VERSION  *\([0-9]*\).*/\1/p' src/kapi.h)
+echo "   boot/stub.asm"
 nasm -f elf32 ${STUBDEF:-} -DKERNEL_API="$kapi" -DKERNEL_VERSION="\"$osver\"" boot/stub.asm -o out/stub.o
+for s in setjmp switch emergency; do echo "   src/$s.S"; done
 clang --target=i386-unknown-none-elf -c src/setjmp.S -o out/setjmp.o
 clang --target=i386-unknown-none-elf -c src/switch.S -o out/switch.o
 clang --target=i386-unknown-none-elf -c src/emergency.S -o out/emergency_entry.o
 
-echo "== compiling"
+echo "== compiling kernel..."
 
-for f in emergency util hw cpu mtrr paging ring3 fdc fs uhci services uisvc config gfx gui apps kext heap kupdate debug fault thread cpuacct kernel; do
-    SZ=
+cc_kernel() {
+    local f=$1 SZ=
     case $f in fs|fdc|cpuacct|kernel|uhci|paging|apps|debug|emergency|cpu|mtrr|ring3|config|kupdate|fault|kext|uisvc|services) SZ=-Oz;; hw|heap|thread) SZ=-Os;; gui) SZ=-Oz;; esac
-    clang $CFLAGS $SZ -c src/$f.c -o out/$f.o
+    clang $CFLAGS $SZ -c src/$f.c -o out/$f.o || return 1
+    echo "   $f.o: $(stat -c%s out/$f.o) bytes ${SZ:--O2}"
+}
+for f in emergency util hw cpu mtrr paging ring3 fdc fs uhci services uisvc config gfx gui apps kext heap kupdate debug fault thread cpuacct kernel; do
+    spawn cc_kernel $f
 done
+drain
 
-echo "== kexts"
+echo "== compiling kexts..."
 rm -f built/kexts/*.kx
 
 # Extensions must have no unresolved symbols.
@@ -76,27 +121,33 @@ for sym in $(undefs out/emergency.o); do
         *) echo "emergency.o: unsafe recovery dependency: $sym" >&2; exit 1;;
     esac
 done
-for n in debug fat net remote dialogs notes diskhealth opl2 midi gdi g3d desktop edit files settings paint about calc clock calendar memmap memedit minesweeper reversi snake pong tetris shell crashsim taskmgr serialmon faultlog kextview clipview bench charmap game2048 baseconv archive textweb breakout update; do
-    SZ=
-    case $n in debug|charmap|game2048|baseconv|archive|textweb|breakout|update) SZ=-Os;; esac
-    clang $CFLAGS $SZ -c "kexts/$n.c" -o "out/$n.kxo"
-    llvm-objcopy --strip-debug "out/$n.kxo" "built/kexts/$n.kx"
+echo "   emergency.o"
+cc_kext() {
+    local n=$1 SZ= undef
+    case $n in debug|charmap|game2048|baseconv|archive|textweb|breakout|update|imgview) SZ=-Os;; image) SZ=-Oz;; esac
+    clang $CFLAGS $SZ -c "kexts/$n.c" -o "out/$n.kxo" || return 1
+    llvm-objcopy --strip-debug "out/$n.kxo" "built/kexts/$n.kx" || return 1
 
     undef=$(undefs "out/$n.kxo")
     if [ -n "$undef" ]; then
         echo "   $n.kx: E41 - unresolved symbols (would fail to load):" >&2
         echo "$undef" | sed 's/^/       /' >&2
-        exit 1
+        return 1
     fi
-    echo "   $n.kx: $(stat -c%s built/kexts/$n.kx) bytes"
+    echo "   $n.kx: $(stat -c%s built/kexts/$n.kx) bytes ${SZ:--O2}"
+}
+for n in debug fat net remote dialogs sysinfo notes diskhealth opl2 midi gdi g3d image imgview desktop edit files settings paint calc clock calendar memmap memedit minesweeper reversi snake pong tetris shell crashsim taskmgr serialmon faultlog kextview clipview bench charmap game2048 baseconv archive textweb breakout update; do
+    spawn cc_kext $n
 done
+drain
 
-echo "== linking"
+echo "== linking out/kernel.elf..."
 ld.lld -m elf_i386 -T linker.ld -nostdlib -o out/kernel.elf \
     out/stub.o out/emergency.o out/emergency_entry.o out/util.o out/hw.o out/cpu.o out/mtrr.o out/paging.o out/ring3.o out/fdc.o out/fs.o out/uhci.o \
     out/services.o out/uisvc.o out/config.o out/gfx.o out/gui.o out/apps.o \
     out/kext.o out/heap.o out/kupdate.o out/debug.o out/fault.o out/setjmp.o out/switch.o \
     out/thread.o out/cpuacct.o out/kernel.o
+echo "== flattening to built/flopnix.ku..."
 llvm-objcopy -O binary -j .stub -j .text -j .rodata -j .data out/kernel.elf built/flopnix.ku
 
 # Stamp the sector count and the checksum read by the boot stub.
@@ -119,23 +170,25 @@ EOF
 KSIZE=$(stat -c%s built/flopnix.ku)
 SECT=$(( (KSIZE + 511) / 512 ))
 if [ $SECT -gt 255 ]; then
-    echo "kernel too big: $KSIZE bytes overlaps config sector at LBA 256"; exit 1
+    echo "kernel too big!: $KSIZE bytes overlaps config sector at LBA 256"; exit 1
 fi
-echo "== kernel: $KSIZE bytes ($SECT sectors)"
+echo "== kernel is.. $KSIZE bytes! ($SECT sectors)"
+echo "== updating metadata.."
 python tools/update_meta.py
 
+echo "== patching boot sector.. kernel is $SECT sectors!"
 printf "$(printf '\\x%02x\\x%02x' $((SECT & 0xFF)) $((SECT >> 8)))" \
     | dd of=out/boot.bin bs=1 seek=506 conv=notrunc status=none
 
-echo "== creating built/flopnix.img (1.44M)"
+echo "== creating built/flopnix.img... "
 dd if=/dev/zero of=built/flopnix.img bs=512 count=2880 status=none
+echo "   boot sector at lba 0"
 dd if=out/boot.bin of=built/flopnix.img conv=notrunc status=none
+echo "   kernel at lba 1"
 dd if=built/flopnix.ku of=built/flopnix.img bs=512 seek=1 conv=notrunc status=none
 
-echo "== installing extensions (sys/)"
-for k in built/kexts/*.kx; do
-    python tools/fscp.py built/flopnix.img "$k" "sys/$(basename "$k")" >/dev/null
-done
+echo "== installing extensions... (sys/)"
+python tools/fscp.py built/flopnix.img --into sys/ built/kexts/*.kx >/dev/null
 echo "   $(ls built/kexts/*.kx | xargs -n1 basename | tr '\n' ' ')"
 
 want=$(ls built/kexts/*.kx | wc -l)
@@ -147,8 +200,14 @@ if [ "$want" != "$got" ]; then
     echo "missing: $(comm -23 out/.fx_want out/.fx_got | tr '\n' ' ')" >&2
     exit 1
 fi
+echo "   verified!! $got extensions on image"
 
-echo "== done:"
-echo "   built/flopnix.img  $(stat -c%s built/flopnix.img) bytes  (full OS image - write to floppy)"
-echo "   built/flopnix.ku   $(stat -c%s built/flopnix.ku) bytes   (kernel update - fscp onto an existing floppy)"
+echo "== installing config... (sys/config/)"
+python tools/fscp.py built/flopnix.img --into sys/config/ config/*.cfg >/dev/null || exit 1
+echo "   $(ls config/*.cfg | xargs -n1 basename | tr '\n' ' ')"
+
+echo "$buildnum" > build.num
+echo "== done! - build $buildnum"
+echo "   built/flopnix.img  $(stat -c%s built/flopnix.img) bytes  (full OS image)"
+echo "   built/flopnix.ku   $(stat -c%s built/flopnix.ku) bytes   (kernel update)"
 echo "   built/kexts/       production extensions"

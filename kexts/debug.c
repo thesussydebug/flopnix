@@ -9,7 +9,7 @@ static int appid,focus,toprow,capture_busy,stop_pending;
 static char capture_status[88],capture_name[20];
 static u8 *capture_buf;
 static u32 capture_bank;
-static u32 fill[2],bank,packets,dropped,file_size,file_number,usb_gen,epoch,epoch_tick;
+static u32 fill[2],bank,packets,dropped,file_size,file_number,usb_gen,epoch,epoch_tick,flush_tick;
 static u32 alloc_count,fs_count,disk_count,guard_bad;
 static char alloc_line[2][88],fs_line[2][112],disk_line[4][112];
 static const char *labels[]={"Capture network to USB (.pcap)","Log memory allocation failures",
@@ -30,6 +30,7 @@ static void unlock(u32 f){__asm__ volatile("pushl %0; popfl"::"r"(f):"memory","c
 #include "debugheap.inc"
 #include "debugredraw.inc"
 #include "debugdiag.inc"
+#include "debugcap.inc"
 
 static void put32(u8 *p,u32 n){p[0]=n;p[1]=n>>8;p[2]=n>>16;p[3]=n>>24;}
 static u32 now_epoch(void)
@@ -146,7 +147,7 @@ static void capture_toggle(void)
             else if(!new_file())capture_error("Capture stopped: cannot create PCAP");
             else{
                 api->mem_track("Network capture",capture_buf,capture_bank*2);
-                epoch=now_epoch();epoch_tick=*api->ticks;capture_status[0]=0;ops.flags|=DBG_NET;
+                epoch=now_epoch();epoch_tick=flush_tick=*api->ticks;capture_status[0]=0;ops.flags|=DBG_NET;
             }
             if(!(ops.flags&DBG_NET)){api->kfree(capture_buf);capture_buf=0;}
         }
@@ -189,10 +190,12 @@ static void poll(void *ctx)
     diagnostics_poll();
     if(ops.flags&DBG_STACK){u32 bad=core->guards();if(bad!=guard_bad){guard_bad=bad;api->gui_dirty();}}
     if((ops.flags&DBG_NET)&&!capture_busy){
-        u32 f=lock();if(capture_busy){unlock(f);return;}capture_busy=1;unlock(f);
-        u32 pending=fill[bank];flush_capture();capture_busy=0;
+        u32 f=lock();u32 pending=fill[bank];
+        if(capture_busy||!cap_due(pending,capture_bank,*api->ticks-flush_tick,stop_pending)){unlock(f);return;}
+        capture_busy=1;unlock(f);
+        flush_capture();flush_tick=*api->ticks;capture_busy=0;
         if(stop_pending){stop_pending=0;if(ops.flags&DBG_NET)capture_toggle();}
-        if(pending)api->gui_dirty();
+        if(pending)api->win_redraw(appid,0);
     }
 }
 static void shutdown(void)

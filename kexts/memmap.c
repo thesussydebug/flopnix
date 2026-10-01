@@ -99,7 +99,7 @@ static void totals(int ch)
 static void draw(Win *w,int x,int y,int cw,int ch)
 {
     (void)w;totals(ch);api->fill_rect(x,y,cw,ch,C_FACE);
-    char s[96],a[24];api->human_size(api->mem_info(MI_HEAP_FREE),a,sizeof a);
+    char s[96],a[24];api->human_size(api->heap_avail(),a,sizeof a);
     api->kfmt(s,sizeof s,"Heap free: %s",a);ui_header(x,y,cw,s);
     api->human_size(api->mem_info(MI_HEAP_LARGEST),a,sizeof a);api->kfmt(s,sizeof s,"Largest block: %s",a);ui_header_right(x,y,cw,s,C_NAVY);
     const char *tabs[3]={"Overview","Components","Regions"};

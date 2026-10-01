@@ -23,3 +23,12 @@ typedef struct {
     int (*post)(u32 ip,u16 port,const char *host,const char *path,const char *body,
                 int (*sink)(const u8 *,int,void *),void *ctx,u32 timeout,NetHttpInfo *info);
 } NetHttpFormOps;
+
+#define NET_HTTP_AGENT_ABI 1u
+typedef struct {
+    u32 abi;
+    int (*get)(u32 ip,u16 port,const char *host,const char *path,const char *agent,
+               int (*sink)(const u8 *,int,void *),void *ctx,u32 timeout,NetHttpInfo *info);
+    int (*post)(u32 ip,u16 port,const char *host,const char *path,const char *body,const char *agent,
+                int (*sink)(const u8 *,int,void *),void *ctx,u32 timeout,NetHttpInfo *info);
+} NetHttpAgentOps;

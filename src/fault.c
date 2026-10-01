@@ -1,4 +1,4 @@
-/* Records faults and recovers when the affected context allows it. */
+/* records faults and recovers if its allowed. */
 #include "os.h"
 #include "faultring.inc"
 #include "panicnet.h"
@@ -67,6 +67,16 @@ void fault_record_hang(const char *who)
     kfmt(tm, sizeof tm, "HANG ended in %s", r->owner);
     ktrace(tm);
     fault_recoveries++;
+}
+
+/* emergency panic tester by running on a null page */
+__attribute__((noreturn)) void panic_test(int emergency)
+{
+    if (emergency && ring3_active()) __asm__ volatile("cli\n\tmovl $0x1000,%%esp\n\tud2" ::: "memory");
+    if (emergency) emergency_panic_begin(6,0,0);
+    fault_armed[thr_self]=0;
+    __asm__ volatile("ud2");
+    __builtin_unreachable();
 }
 
 void fault_handle(const u32 *frame)

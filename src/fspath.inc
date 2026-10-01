@@ -1,4 +1,9 @@
 /* Builds and checks FLOPFS folder paths. */
+static inline const char *fs_new_folder(int n)
+{
+    return n > 1 ? "New folder %d" : "New folder";
+}
+
 static inline int fs_dir_of(const char *name, char *out, int cap)
 {
     int i = 0;

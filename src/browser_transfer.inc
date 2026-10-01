@@ -18,12 +18,17 @@ static int br_media(const char *type,const char *wanted)
 {
     int n=tw_len(wanted);return tw_len(type)>=n&&tw_ci(type,wanted,n)&&(!type[n]||type[n]==';'||type[n]==' ');
 }
+static int br_textish(const char *t)
+{
+    int n=0;while(t[n]&&t[n]!=';'&&t[n]!=' ')n++;
+    return (n>5&&tw_ci(t,"text/",5))||(n>=4&&tw_ci(t+n-4,"json",4))||(n>=3&&tw_ci(t+n-3,"xml",3))||(n>=10&&tw_ci(t+n-10,"javascript",10));
+}
 static int br_mode(const TwUrl *u,const NetHttpInfo *info,const u8 *data,int length)
 {
     if(!u->http){if(u->type=='1'||u->type=='7')return 2;if(u->type=='0')return 3;if(u->type=='h')return 1;return -1;}
     if(info->filename[0])return -1;
     if(br_media(info->type,"text/html")||br_media(info->type,"application/xhtml+xml"))return 1;
-    if(info->type[0]&&!br_media(info->type,"text/plain")&&!br_media(info->type,"text/css"))return -1;
+    if(info->type[0]&&!br_textish(info->type))return -1;
     for(int i=0;i<length;i++)if(!data[i]||(data[i]<9)||(data[i]>13&&data[i]<32))return -1;
     if(!info->type[0]){int i=0;while(i<length&&br_space(data[i]))i++;if(i<length&&data[i]=='<')return 1;}
     return 0;

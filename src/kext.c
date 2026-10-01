@@ -520,7 +520,7 @@ static int file_kind(const char *name)
     if (n < (int)sizeof(Ehdr)) return -1;
     KextHeader hdr;
     if (peek_header(iobuf, (u32)n, &hdr) != 0) return -1;
-    return hdr.kind;
+    return hdr.pad & KEXT_ON_DEMAND ? 0 : hdr.kind;
 }
 
 static void boot_pass(int kind, const char *kindname)
@@ -569,7 +569,7 @@ void kext_boot(void)
 
     boot_pass(KEXT_KIND_KERNEL, "kernel");
     lazy_catalog();
-    if (lazy_present("sys/tmp/notes.lst") || lazy_present("notes.lst")) { int nt = app_find("Notes"); if (nt >= 0) app_ensure_loaded(nt); }
+    if (lazy_present("sys/config/notes.lst") || lazy_present("sys/tmp/notes.lst") || lazy_present("notes.lst")) { int nt = app_find("Notes"); if (nt >= 0) app_ensure_loaded(nt); }
     boot_pass(KEXT_KIND_APP, "app");
     fs_cache_clear();
 
@@ -703,7 +703,7 @@ int shell_fallback(const char *line)
     return 1;
 }
 
-#define MAX_OPENERS 8
+#define MAX_OPENERS 12
 static struct {
     const char *ext;
     int (*fn)(const char *name, const char *fullpath, const u8 *data, int n);
@@ -784,8 +784,10 @@ static struct {
     void *ctx;
     int owner;
 } timers[NTIMERS];
-static int timer_owner=-1;
+static int timer_owner=-1,timer_slow=-1;
+static u32 timer_slow_cyc;
 int kext_timer_busy(int owner){return owner>=0&&timer_owner==owner;}
+const char *timer_slowest(void){return timer_slow>=0&&timer_slow<nkexts?kexts[timer_slow].hname:"?";}
 
 int timer_add(u32 interval, void (*fn)(void *), void *ctx)
 {
@@ -825,6 +827,7 @@ void timers_poll(void)
 {
     if (!timer_alive) return;
     int resident = kext_current();
+    timer_slow = -1; timer_slow_cyc = 0;
     for (int i = 0; i < NTIMERS; i++) {
         u32 flags=irq_save();
         void (*fn)(void *) = timers[i].fn;
@@ -834,15 +837,21 @@ void timers_poll(void)
         irq_restore(flags);
         int cpu_prev = cpu_context(app_type_owned(timers[i].owner));
         kext_enter(timers[i].owner);
+        int owner = timers[i].owner;
+        u32 t0 = cpu_now();
         FAULT_GUARD(fn(timers[i].ctx), ({
-            char msg[128];
-            const FaultRec *fault = fault_get(0);
-            kfmt(msg, sizeof msg, "P%u %s - timer stopped",
-                 fault_vec, fault ? fault->location : "unknown");
-            klog(msg);
-            if (!fault_fallback[thr_self]) fault_show_banner(msg);
+            if (fault_vec != FAULT_VEC_HANG) {
+                char msg[128];
+                const FaultRec *fault = fault_get(0);
+                kfmt(msg, sizeof msg, "P%u %s - timer stopped",
+                     fault_vec, fault ? fault->location : "unknown");
+                klog(msg);
+                if (!fault_fallback[thr_self]) fault_show_banner(msg);
+            }
             timers[i].fn = 0;
         }));
+        u32 took = cpu_now() - t0;
+        if (took > timer_slow_cyc) { timer_slow_cyc = took; timer_slow = owner; }
         timer_owner=-1;
         cpu_context(cpu_prev);
     }
@@ -962,6 +971,7 @@ int register_service(const char *name, const void *ops)
 
 #include "manager.h"
 #include "inputpost.h"
+#include "panictest.h"
 extern int win_request_close(int index);
 
 const void *service_get(const char *name)
@@ -971,6 +981,8 @@ const void *service_get(const char *name)
     if(!strcmp(name,"manager.core"))return &manager;
     static const InputOps input={INPUT_ABI,input_post};
     if(!strcmp(name,"input.core"))return &input;
+    static const PanicTestOps ptest={PANIC_TEST_ABI,panic_test};
+    if(!strcmp(name,"panic.test"))return &ptest;
     static const KextFileOps files={KEXT_FILE_ABI,peek_header,fs_replace};
     if(!strcmp(name,"kext.files"))return &files;
     if(!strcmp(name,"shell.stream"))return &shell_stream_ops;
@@ -986,7 +998,8 @@ const void *service_get(const char *name)
     static const PanicCore pc={PANIC_MONITOR_ABI,&panic_monitor,&panic_frame,
         panic_controls,panic_tss,kexts,&nkexts,kext_ids,kext_priv_phys,kext_priv_len,&arena_rw,
         klog_buf,trace_buf,(const u32 *)&memory,&heap_top,&grow_base,&grow_top,
-        fault_hist,&fault_recoveries,(u32)__bss_end,panic_threads,panic_buffers,THR_MAX*32};
+        fault_hist,&fault_recoveries,(u32)__bss_end,panic_threads,panic_buffers,THR_MAX*32,
+        panic_show};
     if(!strcmp(name,"panic.core"))return &pc;
     for (int i = 0; i < NSERV; i++)
         if (servs[i].ops && !strcmp(servs[i].name, name)) return servs[i].ops;
@@ -1170,7 +1183,7 @@ static u32 mem_stat(int what)
     case MI_POOL_USED:    return kext_pool_used;
     case MI_HEAP_BASE:    return heap_base();
     case MI_HEAP_END:     return heap_end();
-    case MI_HEAP_FREE:    return heap_avail();
+    case MI_HEAP_FREE:    return heap_free();
     case MI_HEAP_LARGEST: return heap_largest();
     case MI_HEAP_BLOCKS:  return heap_blocks();
     case MI_HEAP_GROW_BASE: return heap_grow_base();
@@ -1247,8 +1260,8 @@ Kapi kapi = {
     .net_mac        = net_mac_get,
 
     .usb_present    = usb_present,
-    .usb_read       = usb_read,
-    .usb_write      = usb_write,
+    .usb_read       = usb_read_locked,
+    .usb_write      = usb_write_locked,
     .usb_capacity_kb = usb_capacity_kb,
     .usb_capacity_sectors = usb_capacity_sectors,
     .usb_model      = usb_model,
@@ -1481,4 +1494,5 @@ Kapi kapi = {
     .network_lock = app_network_lock, .network_unlock = app_network_unlock,
     .krealloc = krealloc,
     .fault_symbol = fault_symbol,
+    .os_build_num = OS_BUILD_NUM,
 };

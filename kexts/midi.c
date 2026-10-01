@@ -33,6 +33,7 @@ static int div_ppqn;
 static u32 us_per_qn = 500000;
 
 static int  playing, cur;
+static int  timer_id = -1;
 static u32  play_t0;
 static u32  song_ticks;
 static u8   sounding[128];
@@ -220,7 +221,7 @@ static int load_midi(const char *spec)
 static void midi_tick(void *ctx)
 {
     (void)ctx;
-    if (!playing) return;
+    if (!playing) { api->timer_del(timer_id); timer_id = -1; return; }
     u32 rate = mf_tickrate(us_per_qn, div_ppqn);
     if (!rate) { playing = 0; all_off(); return; }
     u32 elapsed = (u32)(*api->ticks - play_t0);
@@ -255,7 +256,7 @@ static void picked(const char *spec, void *ctx)
     all_off();
     load_midi(spec);
     cur = 0;
-    api->gui_dirty();
+    api->win_redraw(my_type, 0);
 }
 
 static UiRect b_open(void) { return ui_r(22,       GA_Y + UI_GTOP, 92, UI_BTNH); }
@@ -338,18 +339,22 @@ static void m_mouse(int inst, int lx, int ly, int ev, int cw, int ch)
         else {
             if (cur >= nev) cur = 0;
 
-            u32 rate = mf_tickrate(us_per_qn, div_ppqn);
-            u32 back = rate ? (cur < nev ? evs[cur].tick : 0) * rate / 1000 : 0;
-            play_t0 = *api->ticks - back;
-            playing = 1;
-            msg[0] = 0;
+            if (timer_id < 0) timer_id = api->timer_add(1, midi_tick, 0);
+            if (timer_id < 0) api->strlcpy(msg, "no free timer; close another app", sizeof msg);
+            else {
+                u32 rate = mf_tickrate(us_per_qn, div_ppqn);
+                u32 back = rate ? (cur < nev ? evs[cur].tick : 0) * rate / 1000 : 0;
+                play_t0 = *api->ticks - back;
+                playing = 1;
+                msg[0] = 0;
+            }
         }
     } else if (ui_hit(b_stop(), lx, ly)) {
         playing = 0;
         cur = 0;
         all_off();
     }
-    api->gui_dirty();
+    api->win_redraw(my_type, 0);
 }
 
 static int mid_opener(const char *name, const char *fullpath,
@@ -370,7 +375,7 @@ static void m_close(int inst) { (void)inst; playing = 0; all_off(); db_free(api,
 static void m_csize(int inst, int *w, int *h) { (void)inst; *w = WINW; *h = WINH; }
 
 const KextHeader kext_header = {
-    KEXT_MAGIC, KAPI_VERSION, KEXT_KIND_APP, 0, "MIDI Player"
+    KEXT_MAGIC, KAPI_VERSION, KEXT_KIND_APP, KEXT_RECLAIMABLE, "MIDI Player"
 };
 
 int kext_entry(const Kapi *k)
@@ -392,6 +397,5 @@ int kext_entry(const Kapi *k)
     if (my_type < 0) return 1;
     k->register_opener("mid", mid_opener);
     k->register_opener("midi", mid_opener);
-    k->timer_add(1, midi_tick, 0);
     return 0;
 }

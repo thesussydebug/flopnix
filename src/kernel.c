@@ -9,7 +9,7 @@
 #include "hangwatch.inc"
 #include "axline.inc"
 
-static KbSt kb = { 0, 0, 0, 0, 0, KB_NUMLOCK_DEFAULT, 0, 0 };
+static KbSt kb = { 0, 0, 0, 0, 0, KB_NUMLOCK_DEFAULT, 0, 0, 0 };
 
 int kbd_mods(void)
 {
@@ -41,24 +41,31 @@ int key_is_down(int k)
 
 void key_clear_held(void) { memset(keydown, 0, sizeof keydown); }
 
-void handle_sc(u8 sc)
+void handle_sc(u8 sc, int mute)
 {
 
     int track, down;
     int deliver = kb_feed(&kb, sc, &track, &down);
     if (track) key_state(track, down);
-    if (deliver) gui_key(deliver);
+    if (deliver && !mute) gui_key(deliver);
 }
 
 static volatile int keyboard_owner=-1;
 int pump_keyboard(void)
 {
     u32 f=irq_save();if(keyboard_owner>=0){irq_restore(f);return 0;}keyboard_owner=thr_self;irq_restore(f);
-    u8 sc;int count=0;
-    while(count<32&&kbd_pop(&sc)){count++;handle_sc(sc);}
+    u8 sc;int count=0,r;
+    while(count<32&&(r=kbd_pop(&sc))){count++;handle_sc(sc,r>1);}
     keyboard_owner=-1;return count;
 }
-void keyboard_unwind(void){if(keyboard_owner==thr_self)keyboard_owner=-1;}
+static volatile int mouse_owner=-1;
+/* 0 = another thread is reading the mouse queue, 1 = claimed, 2 = already in use */
+int mouse_claim(void)
+{
+    u32 f=irq_save();int r=mouse_owner<0?1:mouse_owner==thr_self?2:0;if(r==1)mouse_owner=thr_self;irq_restore(f);return r;
+}
+void mouse_release(void){if(mouse_owner==thr_self)mouse_owner=-1;}
+void keyboard_unwind(void){if(keyboard_owner==thr_self)keyboard_owner=-1;mouse_release();}
 
 u8 timer_alive;
 char boot_errs[48];
@@ -231,7 +238,7 @@ void kmain(void)
     idt_init();
 
     emergency_init();
-    memory = memory_layout(BOOTINFO->mem_kb);
+    memory = memory_layout(BOOTINFO->mem_kb, (u32)BOOTINFO->w * BOOTINFO->h);
     pic_init();
     mmx_init();
 
@@ -257,7 +264,7 @@ void kmain(void)
     {
         char vb[96];
         kfmt(vb, sizeof vb, "FLOPNIX " OS_VER " self-check (kernel " OS_VER
-             ", KAPI v%d, built " OS_BUILD_DATE ")\n", KAPI_VERSION);
+             ", KAPI v%d, build " OS_BUILD_NUM ", built " OS_BUILD_DATE ")\n", KAPI_VERSION);
         bprint(vb);
     }
     checks_active = 1;
@@ -325,6 +332,7 @@ void kmain(void)
 
     bprint("cpu ");
     cpu_init();
+    emergency_clock(cpu_mhz());
     {
         char b[64];
         if (cpu_mhz()) kfmt(b, sizeof b, " ok (%s @ %u MHz)\n", cpu_brand(), cpu_mhz());
@@ -357,7 +365,6 @@ void kmain(void)
     }
 
     heap_init();
-    apps_init();
 
     bprint("base kernel ok\n");
     kext_boot();
@@ -408,7 +415,8 @@ void kmain(void)
         u32 ts[11]; int nts = 0;
         ts[nts++] = cpu_now();
         if(pump_keyboard())work=1;
-        while (mouse_pop(&pk, &mwhen)) {
+        int mc = mouse_claim();
+        while (mc && mouse_pop(&pk, &mwhen)) {
             work = 1;
             u8 b0 = pk, b1 = pk >> 8, b2 = pk >> 16, b3 = pk >> 24;
             int dx = b1 - ((b0 & 0x10) ? 256 : 0);
@@ -419,6 +427,7 @@ void kmain(void)
                 gui_wheel(-dz);
             }
         }
+        mouse_release();
         ts[nts++] = cpu_now();
         if (gui_launch_pending()) work = 1;
         if (app_q_ready()) thr_yield();
@@ -467,9 +476,10 @@ void kmain(void)
 
         if (total > lp_thresh && (u32)(ticks - lp_last_log) >= 50) {
             lp_last_log = ticks;
-            char m[80];
-            kfmt(m, sizeof m, "loop stall: %ums total, %s %ums (worst %ums)",
-                 total / lp_cyc_ms, lp_name[pi], pworst / lp_cyc_ms,
+            char m[96], who[24] = "";
+            if (pi == 5) kfmt(who, sizeof who, " in %s", timer_slowest());
+            kfmt(m, sizeof m, "loop stall: %ums total, %s %ums%s (worst %ums)",
+                 total / lp_cyc_ms, lp_name[pi], pworst / lp_cyc_ms, who,
                  lp_worst / lp_cyc_ms);
             klog(m); klog("\n");
         }

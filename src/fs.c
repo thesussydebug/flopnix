@@ -417,7 +417,8 @@ const char *ext_type(const char *name)
         !strcasecmp(e, "cmd")) return "Script";
     if (!strcasecmp(e, "bin") || !strcasecmp(e, "img") ||
         !strcasecmp(e, "dat")) return "Binary";
-    if (!strcasecmp(e, "bmp") || !strcasecmp(e, "raw")) return "Image";
+    if (!strcasecmp(e, "bmp") || !strcasecmp(e, "raw") || !strcasecmp(e, "png") ||
+        !strcasecmp(e, "jpg") || !strcasecmp(e, "jpeg") || !strcasecmp(e, "gif")) return "Image";
     if (!strcasecmp(e, "mid") || !strcasecmp(e, "midi")) return "Music";
     if (!strcasecmp(e, "kx")) return "KExt";
     return "File";

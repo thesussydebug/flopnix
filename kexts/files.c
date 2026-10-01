@@ -16,6 +16,8 @@
 static const Kapi *api;
 #include "deltree.inc"
 #include "fileprops.inc"
+#include "image.h"
+#include "imgnav.inc"
 static const GdiOps *gfx;
 static int files_type = -1;
 
@@ -138,6 +140,9 @@ typedef struct {
     int menu, menu_sel, menu_n;
     const char *menu_items[12];
     u8 menu_actions[12];
+    u8  *qv;
+    int  qvw, qvh;
+    u8   qv_eat;
 } Fm;
 
 static Fm fms[MAXINST];
@@ -199,6 +204,7 @@ static const struct { int action; int icon; const char *label; } TB[6] = {
 static const char *const MENUS[4] = { "File", "Edit", "View", "Go" };
 #define NMENU  4
 #define MPAD   8
+#define DROP_W 224
 
 static void fileman_client_size(int *w, int *h) { *w = dcliW; *h = dcliH; }
 
@@ -403,8 +409,73 @@ static int find_sel(void)
     return -1;
 }
 
+static void qv_close(void)
+{
+    if (!F->qv) return;
+    api->kfree(F->qv);
+    F->qv = 0;
+    F->fm_msg[0] = 0;
+}
+
+static int qv_step(void *ctx, int frac)
+{
+    (void)ctx;
+    api->busy_set("Quick View", "Opening picture", frac);
+    return api->esc_pending();
+}
+
+static int qv_picture(int i)
+{
+    return i >= 0 && i < F->nrows && !F->rows[i].is_dir && nav_is_picture(F->rows[i].name);
+}
+
+/* Decodes the selected picture, shrunk to fit beside the sidebar, for the Space key preview. */
+static void qv_show_locked(int i)
+{
+    qv_close();
+    if (!qv_picture(i)) { strlcpy(F->fm_msg, "Quick View shows pictures only", sizeof F->fm_msg); return; }
+    const ImageOps *io = img_bind(api);
+    if (!io) { strlcpy(F->fm_msg, "Quick View needs sys/image.kx", sizeof F->fm_msg); return; }
+    Row *r = &F->rows[i];
+    char full[192];
+    if (F->cur_drive == 0) strlcpy(full, r->name, sizeof full);
+    else if (strlen(F->cur_path) > 1) kfmt(full, sizeof full, "%s/%s", F->cur_path, r->name);
+    else kfmt(full, sizeof full, "/%s", r->name);
+    FileData f;
+    int rc = fo_read(api, F->cur_drive, full, r->size, 0, &f);
+    if (rc) { strlcpy(F->fm_msg, fo_error(rc), sizeof F->fm_msg); return; }
+    int aw = F->cliW - SIDEBAR - 18, ah = F->cliH - TOP_H - FOOT_H - 16;
+    if (aw < 16) aw = 16;
+    if (ah < 16) ah = 16;
+    ImgInfo in;
+    u8 *px = 0;
+    int e = io->probe(f.data, f.size, &in), fw = 0, fh = 0;
+    if (!e) {
+        fw = in.w; fh = in.h;
+        if (fw > aw || fh > ah) img_fit(in.w, in.h, aw, ah, &fw, &fh);
+        px = api->kmalloc((u32)fw * (u32)fh);
+        if (!px) e = IMG_ENOMEM;
+    }
+    if (!e) {
+        ImgReq q;
+        memset(&q, 0, sizeof q);
+        q.dst = px; q.dw = q.pitch = fw; q.dh = fh; q.flags = IMG_DITHER; q.bg = C_G0 + 2;
+        u32 room = api->heap_avail() / 2;
+        q.budget = room > 24u * 1024 * 1024 ? 24u * 1024 * 1024 : room;
+        q.progress = qv_step;
+        e = io->decode(f.data, f.size, &q);
+        api->busy_end();
+    }
+    fo_release(api, &f);
+    if (e) { if (px) api->kfree(px); strlcpy(F->fm_msg, io->error(e), sizeof F->fm_msg); return; }
+    F->qv = px; F->qvw = fw; F->qvh = fh;
+    kfmt(F->fm_msg, sizeof F->fm_msg, "%dx%d %s - Space closes", in.w, in.h, r->name);
+}
+static void qv_show(int i) { api->buffer_lock(); qv_show_locked(i); api->buffer_unlock(); }
+
 static void nav_apply_fields(int drive, const char *adir, const char *path)
 {
+    qv_close();
     F->cur_drive = drive;
     strlcpy(F->a_dir, adir, sizeof F->a_dir);
     strlcpy(F->cur_path, path, sizeof F->cur_path);
@@ -636,27 +707,25 @@ static void act_newdir(void)
         }
         char full[128];
         int base_at_root = (F->cur_path[0] == '/' && !F->cur_path[1]);
-        for (int n = 0; n < 100; n++) {
-            if (n == 0) strlcpy(nm, "NEWDIR", sizeof nm);
-            else        kfmt(nm, sizeof nm, "NEWDIR%d", n);
+        r = -1;
+        for (int n = 1; n < 100; n++) {
+            kfmt(nm, sizeof nm, fs_new_folder(n), n);
             if (base_at_root) kfmt(full, sizeof full, "/%s", nm);
             else              kfmt(full, sizeof full, "%s/%s", F->cur_path, nm);
-            r = api->fat_mkdir(full);
-            if (r == 0) break;
-            if (r == -2) { strlcpy(F->fm_msg, "USB full", sizeof F->fm_msg); return; }
+            if (!api->fat_exists(full)) { r = api->fat_mkdir(full); break; }
         }
-        if (r != 0) { strlcpy(F->fm_msg, "could not create", sizeof F->fm_msg); return; }
-
-        for (int i = 0; nm[i]; i++)
-            if (nm[i] >= 'A' && nm[i] <= 'Z') nm[i] += 32;
+        if (r != 0) {
+            strlcpy(F->fm_msg, r == -2 ? "USB full" : "could not create", sizeof F->fm_msg);
+            return;
+        }
+        refresh();
         sel_set_single(nm);
-        F->need_refresh = 1;
-        strlcpy(F->fm_msg, "folder created", sizeof F->fm_msg);
+        begin_rename();
         return;
     }
     char base[16];
     for(int n=1;n<100;n++){
-        kfmt(base,sizeof base,n==1?"New folder":"Folder %d",n);
+        kfmt(base,sizeof base,fs_new_folder(n),n);
         if(strlen(F->a_dir)+(F->a_dir[0]?1:0)+strlen(base)>=(u32)ft_namecap(api)){strlcpy(F->fm_msg,"Folder path is too long",sizeof F->fm_msg);return;}
         kfmt(nm,sizeof nm,F->a_dir[0]?"%s/%s":"%s%s",F->a_dir,base);
         if(!fs_exists(nm))break;
@@ -799,7 +868,7 @@ static void commit_rename(void)
     F->renaming = 0;
     int i = find_sel();
     if (i < 0 || !F->rnlen) return;
-    if (!strcmp(F->rows[i].name, "..")) return;
+    if (!strcmp(F->rows[i].name, "..") || !strcmp(F->rnbuf, row_disp(&F->rows[i]))) return;
 
     if (F->cur_drive != 0) {
 
@@ -1066,19 +1135,19 @@ static void open_menu(int i, int ox, int oy)
 
 static int menu_left(void)
 {
-    int x=menu_x(F->menu-1);if(x+180>F->cliW)x=F->cliW-180;return x<0?0:x;
+    int x=menu_x(F->menu-1);if(x+DROP_W>F->cliW)x=F->cliW-DROP_W;return x<0?0:x;
 }
 static void draw_menu(int cx,int cy)
 {
     if(!F->menu)return;
     int x=cx+menu_left(),y=cy+MENU_H;
-    panel(x,y,180,F->menu_n*20+4,0);
-    menu_shade(api,x+2,y+2,176,F->menu_n*20,0);
+    panel(x,y,DROP_W,F->menu_n*20+4,0);
+    menu_shade(api,x+2,y+2,DROP_W-4,F->menu_n*20,0);
     for(int i=0;i<F->menu_n;i++){
         int yy=y+2+i*20;
-        int hov=F->menu_sel==i||(over&&mx>=x+2&&mx<x+178&&my>=yy&&my<yy+20);
-        if(hov)menu_shade(api,x+2,yy,176,20,1);
-        draw_text(x+10,yy+2,F->menu_items[i],hov?C_WHITE:C_BLACK);
+        int hov=F->menu_sel==i||(over&&mx>=x+2&&mx<x+DROP_W-2&&my>=yy&&my<yy+20);
+        if(hov)menu_shade(api,x+2,yy,DROP_W-4,20,1);
+        draw_text(x+22,yy+2,F->menu_items[i],hov?C_WHITE:C_BLACK);
     }
 }
 static int menu_input(int x,int y,int ev)
@@ -1092,7 +1161,7 @@ static int menu_input(int x,int y,int ev)
     if(ev==EV_DRAG){F->menu_sel=-1;return 1;}
     if(ev==EV_PRESS||ev==EV_RPRESS){
         int row=(y-MENU_H-2)/20;
-        int hit=x>=menu_left()+2&&x<menu_left()+178&&y>=MENU_H+2&&row<F->menu_n;
+        int hit=x>=menu_left()+2&&x<menu_left()+DROP_W-2&&y>=MENU_H+2&&row<F->menu_n;
         F->menu=0;if(hit&&ev==EV_PRESS)do_action(F->menu_actions[row]);
     }
     return 1;
@@ -1394,6 +1463,13 @@ static void fileman_draw(Win *w, int cx, int cy, int cw, int ch)
         fill_rect(lx0 + g.lw, list_y + g.list_h, SB_W, SB_W, C_FACE);
     }
 
+    if (F->qv) {
+        int ox = cx + SIDEBAR + 2, oy = cy + TOP_H, ow = cw - SIDEBAR - 2, oh = ch - TOP_H - FOOT_H;
+        int bw = F->qvw < ow ? F->qvw : ow, bh = F->qvh < oh ? F->qvh : oh;
+        fill_rect(ox, oy, ow, oh, C_G0 + 2);
+        if (bw > 0 && bh > 0) api->blit(ox + (ow - bw) / 2, oy + (oh - bh) / 2, bw, bh, F->qv, F->qvw);
+    }
+
     int fy = cy + ch - FOOT_H;
     fill_rect(cx, fy, cw, FOOT_H, C_FACE);
     hline(cx, fy, cw, C_LIGHT);
@@ -1438,6 +1514,19 @@ static void fileman_key(int inst, int k)
         return;
     }
     if (F->need_refresh) refresh();
+
+    if (F->qv && (k == K_UP || k == K_DOWN)) {
+        int d = k == K_UP ? -1 : 1, j = find_sel() + d;
+        while (j >= 0 && j < F->nrows && !qv_picture(j)) j += d;
+        if (j >= 0 && j < F->nrows) { sel_set_single(F->rows[j].name); qv_show(j); }
+        k = 0;
+    } else if (F->qv) {
+        qv_close();
+        if (k == ' ' || k == 27) return;
+    } else if (k == ' ') {
+        qv_show(find_sel());
+        return;
+    }
 
     int ctrl = api->kbd_mods() & 2;
 
@@ -1508,11 +1597,21 @@ static void fileman_mouse(int inst, int lx, int ly, int ev, int cw, int ch)
 {
     F = &fms[inst];
     F->cliW = cw; F->cliH = ch;
+    if (F->qv_eat) { if (ev == EV_RELEASE) F->qv_eat = 0; return; }
+    if (F->qv) { if (ev == EV_PRESS) { qv_close(); F->qv_eat = 1; } return; }
     int ox = mx - lx, oy = my - ly;
     if(menu_input(lx,ly,ev))return;
     FmGeo g;
     fm_geo(cw, ch, &g);
     int list_top = TOP_H + HDR_H;
+
+    if (F->renaming && (ev == EV_PRESS || ev == EV_RPRESS)) {
+        int on = ev == EV_PRESS && lx >= g.lx0 && lx < g.lx0 + g.lw &&
+                 ly >= list_top && ly < list_top + g.list_h &&
+                 (ly - list_top) / ROW_H + F->scroll == find_sel();
+        if (on) return;
+        commit_rename();
+    }
 
     if (F->sbdrag && ev != EV_PRESS) {
         if (ev == EV_RELEASE) { F->sbdrag = 0; return; }
@@ -1776,6 +1875,7 @@ static void fm_drop(int inst, int lx, int ly, const char *type, const char *data
 }
 
 static void files_csize(int inst, int *w, int *h) { (void)inst; fileman_client_size(w, h); }
+static void files_close(int inst) { Fm *prev = F; F = &fms[inst]; qv_close(); F = prev; }
 static void files_minc(int *w, int *h) { fileman_min_client(w, h); }
 
 static void folder_event(const char *event,const char *data)
@@ -1802,7 +1902,7 @@ int kext_entry(const Kapi *k)
         .open = fileman_open, .draw = fileman_draw, .key = fileman_key,
         .mouse = fileman_mouse, .wheel = fileman_wheel,
         .client_size = files_csize,
-        .min_client = files_minc, .drop = fm_drop,
+        .min_client = files_minc, .drop = fm_drop, .close = files_close,
     };
     files_type = api->register_app(&d);
     fp_register();

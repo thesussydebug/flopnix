@@ -689,6 +689,99 @@ static __attribute__((noinline,minsize)) const char *panic_write_report(u32 vec,
     return result;
 }
 
+#include "panicscreen.inc"
+static PanicLayout pl;
+
+static __attribute__((minsize)) void ps_text(int cx, int maxw, int y, const char *s, u8 c)
+{
+    int w = (int)strlen(s) * 8;
+    if (w > maxw) w = maxw;
+    draw_text_clip(cx - w / 2, y, s, c, maxw);
+}
+
+static __attribute__((minsize)) void ps_line(int y, const char *s, u8 c)
+{
+    ps_text(pl.cx, pl.text_w, y, s, c);
+}
+
+static __attribute__((minsize)) void ps_box(int x, int y, int w, int h, int t)
+{
+    fill_rect(x, y, w, t, C_WHITE);
+    fill_rect(x, y + h - t, w, t, C_WHITE);
+    fill_rect(x, y, t, h, C_WHITE);
+    fill_rect(x + w - t, y, t, h, C_WHITE);
+}
+
+static __attribute__((minsize)) void ps_slant(int x0, int y0, int x1, int y1, int t, int dx)
+{
+    for (int i = 0; i < t; i++) line(x0 + i * dx, y0, x1 + i * dx, y1, C_WHITE);
+}
+
+static __attribute__((minsize)) void ps_icon(int x, int y, int s)
+{
+    int t = s;
+    fill_rect(x, y, 34 * s, t, C_WHITE);
+    fill_rect(x, y, t, 40 * s, C_WHITE);
+    fill_rect(x, y + 40 * s - t, 40 * s, t, C_WHITE);
+    fill_rect(x + 40 * s - t, y + 6 * s, t, 34 * s, C_WHITE);
+    ps_slant(x + 34 * s - 1, y, x + 40 * s - 1, y + 6 * s, t, -1);
+    ps_box(x + 10 * s, y, 17 * s, 11 * s, t);
+    ps_box(x + 20 * s, y + 2 * s, 4 * s, 7 * s, t);
+    ps_box(x + 8 * s, y + 19 * s, 24 * s, 21 * s, t);
+    for (int k = 0; k < 3; k++) fill_rect(x + 12 * s, y + (24 + 4 * k) * s, 16 * s, t, C_WHITE);
+    fill_rect(x + 3 * s, y + 33 * s, s, 2 * s, C_WHITE);
+    fill_rect(x + 36 * s, y + 33 * s, s, 2 * s, C_WHITE);
+    fill_rect(x + 44 * s, y, 12 * s, t, C_WHITE);
+    ps_slant(x + 44 * s, y, x + 48 * s, y + 28 * s, t, 1);
+    ps_slant(x + 56 * s - 1, y, x + 52 * s - 1, y + 28 * s, t, -1);
+    fill_rect(x + 48 * s, y + 28 * s - t, 4 * s, t, C_WHITE);
+    fill_circle(x + 50 * s, y + 35 * s, 4 * s, C_WHITE);
+    fill_circle(x + 50 * s, y + 35 * s, 4 * s - t, C_NAVY);
+}
+
+static __attribute__((minsize)) void ps_arcs(u8 c)
+{
+    int t = pl.s;
+    for (int k = 1; k <= 3; k++) {
+        int r = pl.arc_r * k / 3, x = r, y = 0, err = 1 - r;
+        while (x >= y) {
+            fill_rect(pl.arc_x - x - t / 2, pl.arc_y + y - t / 2, t, t, c);
+            fill_rect(pl.arc_x - x - t / 2, pl.arc_y - y - t / 2, t, t, c);
+            y++;
+            if (err < 0) err += 2 * y + 1;
+            else { x--; err += 2 * (y - x) + 1; }
+        }
+    }
+}
+
+__attribute__((minsize)) void panic_show(const char *a, const char *b, const char *c, u32 fill, u32 lit)
+{
+    int fx = pl.cx - pl.text_w / 2, fh = pl.rep_y + 16 - pl.foot_y;
+    fill_rect(fx, pl.foot_y, pl.text_w, fh, C_NAVY);
+    ps_line(pl.foot_y, "The system will attempt an automatic", C_SILVER);
+    ps_line(pl.foot_y + pl.pitch, "restart after the dump is complete.", C_SILVER);
+    flip_area(fx, pl.foot_y, fx + pl.text_w, pl.foot_y + fh);
+    if (!pl.bar_w) {
+        ps_line(pl.rep_y, a, C_G0 + 5);
+        flip();
+        return;
+    }
+    int t = pl.border, iw = pl.bar_w - 2 * t, ih = pl.bar_h - 2 * t;
+    int full = ih * (int)(fill > 1000 ? 1000 : fill) / 1000;
+    ps_box(pl.bar_x, pl.bar_y, pl.bar_w, pl.bar_h, t);
+    fill_rect(pl.bar_x + t, pl.bar_y + t, iw, ih - full, C_G0 + 4);
+    fill_rect(pl.bar_x + t, pl.bar_y + t + ih - full, iw, full, C_BGREEN);
+    int ix = pl.info_cx - pl.info_w / 2, iy = pl.info_y, h = 2 * pl.pitch + 16;
+    fill_rect(ix, iy, pl.info_w, h, C_NAVY);
+    ps_text(pl.info_cx, pl.info_w, iy, a, C_SILVER);
+    ps_text(pl.info_cx, pl.info_w, iy + pl.pitch, b, C_SILVER);
+    ps_text(pl.info_cx, pl.info_w, iy + 2 * pl.pitch, c, C_SILVER);
+    ps_arcs(lit == 1 ? C_WHITE : lit == 2 ? C_NAVY : C_G0 + 3);
+    flip_area(ix < pl.bar_x ? ix : pl.bar_x, pl.bar_y, ix + pl.info_w, iy + h);
+    flip_area(pl.arc_x - pl.arc_r - pl.s, pl.arc_y - pl.arc_r, pl.arc_x + pl.s, pl.arc_y + pl.arc_r);
+    flip();
+}
+
 __attribute__((minsize)) void panic(u32 vec, u32 err, u32 eip)
 {
     emergency_panic_begin(vec,err,eip);
@@ -696,39 +789,41 @@ __attribute__((minsize)) void panic(u32 vec, u32 err, u32 eip)
     surface_unlock();
     clear_clip();
     fill_rect(0, 0, SW, SH, C_NAVY);
+    ps_layout(&pl, SW, SH, panic_monitor != 0);
     char buf[128];
-    int x = SW > 640 ? (SW - 608) / 2 : 16;
-    int width = SW - 2*x;
-    int y = SH > 220 ? (SH - 190) / 2 : 8;
-    draw_text(x, y, "FLOPNIX stopped", C_WHITE);
-    hline(x, y + 20, width, C_G0 + 3);
+    draw_text_scaled(pl.cx - 52 * pl.scale, pl.title_y, "KERNEL PANIC!", C_WHITE, pl.scale, pl.scale);
+    if (pl.s) ps_icon(pl.icon_x, pl.icon_y, pl.s);
+    ps_line(pl.stop_y, "FLOPNIX stopped.", C_WHITE);
+    ps_text(pl.cx + 1, pl.text_w, pl.stop_y, "FLOPNIX stopped.", C_WHITE);
     const char *nm = vec < 20 ? exc_name[vec] : "exception";
     kfmt(buf, sizeof buf, "P%u: %s", vec, nm);
-    draw_text_clip(x, y + 28, buf, C_WHITE, width);
+    ps_line(pl.line_y, buf, C_WHITE);
     kfmt(buf, sizeof buf, "Instruction address: %08x", eip);
-    draw_text(x, y + 44, buf, C_WHITE);
+    ps_line(pl.line_y + pl.pitch, buf, C_WHITE);
     char location[96];fault_symbol(eip,location,sizeof location);
     kfmt(buf, sizeof buf, "Location: %s", location);
-    draw_text_clip(x, y + 58, buf, C_WHITE, width);
+    ps_line(pl.line_y + 2 * pl.pitch, buf, C_WHITE);
     const KextInfo *active = kext_get(kext_current());
     kfmt(buf, sizeof buf, "Active context: %s", active ? active->name : "kernel");
-    draw_text_clip(x, y + 72, buf, C_SILVER, width);
+    ps_line(pl.line_y + 3 * pl.pitch, buf, C_SILVER);
     kfmt(buf, sizeof buf, "Error bits: %08x", err);
-    draw_text(x, y + 86, buf, C_WHITE);
+    ps_line(pl.err_y, buf, C_WHITE);
     if (vec == 14) {
         kfmt(buf, sizeof buf, "Memory address: %08x", fault_cr2);
-        draw_text(x, y + 100, buf, C_YELLOW);
-        draw_text_clip(x, y + 114, panic_pf_reason(err), C_YELLOW, width);
+        ps_line(pl.err_y + pl.pitch, buf, C_YELLOW);
+        ps_line(pl.err_y + 2 * pl.pitch, panic_pf_reason(err), C_YELLOW);
     }
-    draw_text_clip(x, y + 138, "Restart to continue. Save this screen", C_SILVER, width);
-    draw_text(x, y + 152, "when reporting the problem.", C_SILVER);
+    ps_line(pl.foot_y, "Restart to continue. Save this screen", C_SILVER);
+    ps_line(pl.foot_y + pl.pitch, "when reporting the problem.", C_SILVER);
     if(panic_monitor)
-        draw_text_clip(x, y + 176, "Starting LAN crash debugger...", C_G0 + 5, width);
+        ps_line(pl.rep_y, "Starting LAN crash debugger...", C_G0 + 5);
     flip();
     cli();
+    emergency_chime(0);
     if(panic_monitor)panic_monitor->enter(fault_snapshot);
     const char *rep = panic_write_report(vec, err, eip);
-    draw_text_clip(x, y + 176, rep, C_G0 + 5, width);
+    fill_rect(pl.cx - pl.text_w / 2, pl.rep_y, pl.text_w, 16, C_NAVY);
+    ps_line(pl.rep_y, rep, C_G0 + 5);
     flip();
 
     cli();

@@ -266,7 +266,7 @@ static void managed_mutate(const char *action,const char *args)
 }
 static void managed_info(void)
 {
-    mj("{\"protocol\":1");mj_text("os",api->os_version);mj_text("build",api->os_build_date);
+    mj("{\"protocol\":1");mj_text("os",api->os_version);mj_text("build",api->os_build_date);mj_text("build_number",api->os_build_num);
     mj_value("api",api->version);mj_value("uptime_seconds",ticks/100);
     mj_text("cpu",api->cpu_brand());mj_value("cpu_mhz",api->cpu_mhz());
     mj_value("system_idle_per_mille",api->cpu_usage(-1));

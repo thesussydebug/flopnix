@@ -9,6 +9,8 @@
 
 static const Kapi *api;
 #include "appfield.h"
+#include "fileopen.inc"
+#include "image.h"
 static int paint_type = -1;
 
 #define SW              (*api->screen_w)
@@ -517,6 +519,55 @@ static void paint_bind(Paint *p, const char *spec)
     p->has_file = 1;
 }
 
+static int paint_img_step(void *ctx, int frac)
+{
+    (void)ctx;
+    api->busy_set("Paint", "Opening picture", frac);
+    return api->esc_pending();
+}
+
+/* Other formats go through image.kx and are not bound to their file, since Save writes BMP. */
+static int paint_decode_mem(Paint *p, const u8 *data, u32 n)
+{
+    const ImageOps *io = img_bind(api);
+    if (!io) return -1;
+    ImgInfo in;
+    u8 *px = 0;
+    int r = io->probe(data, n, &in);
+    if (!r && (in.w > PCW_MAX || in.h > PCH_MAX)) r = IMG_ETOOBIG;
+    if (!r && !(px = api->kmalloc((u32)in.w * (u32)in.h))) r = IMG_ENOMEM;
+    if (!r) {
+        ImgReq q;
+        memset(&q, 0, sizeof q);
+        q.dst = px; q.dw = q.pitch = in.w; q.dh = in.h; q.bg = C_WHITE;
+        u32 room = api->heap_avail() / 2;
+        q.budget = room > 24u * 1024 * 1024 ? 24u * 1024 * 1024 : room;
+        q.progress = paint_img_step;
+        r = io->decode(data, n, &q);
+        api->busy_end();
+    }
+    u32 size = r ? 0 : (u32)in.w * (u32)in.h;
+    if (!r && !db_reserve(api, &p->storage, size, 1, 4096, size, "Paint canvas")) r = IMG_ENOMEM;
+    p->canvas = p->storage.data;
+    if (r) { if (px) api->kfree(px); return -1; }
+    p->cw = in.w; p->ch = in.h;
+    memcpy(p->canvas, px, size);
+    api->kfree(px);
+    db_trim(api, &p->storage, size, 1); p->canvas = p->storage.data;
+    db_free(api, &undo_storage); undo_inst = -1;
+    p->ox = p->oy = 0; p->dragging = 0; p->lx = p->tx = -1; p->text[0] = 0;
+    return 1;
+}
+
+static int paint_load_image(Paint *p, int drive, const char *path)
+{
+    FileData f;
+    if (fo_load(api, drive, path, 0, &f, 0)) return -1;
+    int r = paint_decode_mem(p, f.data, f.size);
+    fo_release(api, &f);
+    return r;
+}
+
 static int paint_load_spec_locked(Paint *p, const char *spec)
 {
     int drive;
@@ -525,12 +576,12 @@ static int paint_load_spec_locked(Paint *p, const char *spec)
     u8 head[54];
     int n = drive == 1 ? fat_read(path, head, sizeof head)
                        : api->fs_read(path, head, sizeof head);
-    if (n != sizeof head || head[0] != 'B' || head[1] != 'M') return -1;
+    if (n != sizeof head || head[0] != 'B' || head[1] != 'M') return paint_load_image(p, drive, path);
     int w=(int)get32(head+18), h=(int)get32(head+22);
     u32 bpp=get16(head+28), off=get32(head+10);
     if (h == (-2147483647-1)) return -1;
     if (h < 0) h=-h;
-    if(w<1||h<1||w>PCW_MAX||h>PCH_MAX||(bpp!=8&&bpp!=24))return -1;
+    if(w<1||h<1||w>PCW_MAX||h>PCH_MAX||(bpp!=8&&bpp!=24))return paint_load_image(p, drive, path);
     u32 bytes=(((u32)w*(bpp/8)+3)&~3u)*(u32)h;
     if(off>0x7FFFFFFFu-bytes)return -1;
     u32 size=off+bytes;
@@ -551,10 +602,14 @@ static void paint_opened(const char *spec, void *ctx)
 {
     Paint *p = (Paint *)ctx;
     if (!spec) return;
-    if (paint_load_spec(p, spec) == 0) {
+    int r = paint_load_spec(p, spec);
+    if (r == 0) {
         p->modified=0;kfmt(p->msg, sizeof p->msg, "opened %dx%d", p->cw, p->ch);
+    } else if (r == 1) {
+        p->modified=0;p->has_file=0;p->fpath[0]=0;
+        kfmt(p->msg, sizeof p->msg, "opened %dx%d - Save writes a BMP", p->cw, p->ch);
     }
-    else strlcpy(p->msg, "Open failed: invalid BMP, over 4096px, or low memory.", sizeof p->msg);
+    else strlcpy(p->msg, "Open failed: not a picture, too large, or low memory.", sizeof p->msg);
     win_fit_client(WT_PAINT, (int)(p - paints), paint_fit_w(p), paint_fit_h(p));
     api->gui_dirty();
 }
@@ -597,7 +652,7 @@ static void paint_perform(Paint *p, int action)
         memset(p->canvas, C_WHITE, (u32)p->cw*p->ch);
         p->has_file = 0; p->fpath[0] = 0;p->modified=0; break;
     case A_OPEN:
-        api->file_picker("Open picture", "bmp", 0, paint_opened, p); break;
+        api->file_picker("Open picture", "", 0, paint_opened, p); break;
     case A_SAVE:
         if (p->has_file) { if(!paint_save_to(p,p->fsrc,p->fpath))paint_continue(p);else p->pending=0;break; }
 
@@ -1068,11 +1123,16 @@ static int bmp_opener(const char *name, const char *fullpath,
         sh_spec_make(fullpath!=0,fullpath?fullpath:name,p->open_path,sizeof p->open_path);
         paint_action(p,A_OPEN_PATH);return 0;
     }
-    if (paint_parse_bmp(p, data, n) != 0) return -1;
-    p->has_file = 1;
-    if (fullpath) { p->fsrc = 1; strlcpy(p->fpath, fullpath, sizeof p->fpath); }
-    else          { p->fsrc = 0; strlcpy(p->fpath, name, sizeof p->fpath); }
-    kfmt(p->msg, sizeof p->msg, "opened %s", pbase(p->fpath));
+    if (paint_parse_bmp(p, data, n) != 0) {
+        if (n <= 0 || paint_decode_mem(p, data, (u32)n) != 1) return -1;
+        p->has_file = 0; p->fpath[0] = 0;
+        kfmt(p->msg, sizeof p->msg, "opened %dx%d - Save writes a BMP", p->cw, p->ch);
+    } else {
+        p->has_file = 1;
+        if (fullpath) { p->fsrc = 1; strlcpy(p->fpath, fullpath, sizeof p->fpath); }
+        else          { p->fsrc = 0; strlcpy(p->fpath, name, sizeof p->fpath); }
+        kfmt(p->msg, sizeof p->msg, "opened %s", pbase(p->fpath));
+    }
     p->modified=0;
     p->mode = PM_NORM;
     win_fit_client(paint_type, inst, paint_fit_w(p), paint_fit_h(p));

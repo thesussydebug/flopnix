@@ -104,11 +104,11 @@ static int br_layout_table(const BrPage *b,BrLayout *l,int oi,int x,int y,int wi
 }
 static int br_layout_range(const BrPage *b,BrLayout *l,int start,int end,int x,int y,int width,int depth)
 {
-    if(depth>4){l->clipped=1;return 16;}int origin=y,right=x+width,lx=x,xx=x,lh=16,first=l->count,align=0,bol=1;
+    if(depth>4){l->clipped=1;return 16;}int origin=y,right=x+width,lx=x,xx=x,lh=16,first=l->count,align=0,bol=1,hard=1;
     for(int p=start;p<end&&br_box_room(l);){
         int ri=br_run_at(b,p);BrStyle st=b->runs?b->run[ri].style:(BrStyle){0,15,0,0};
         if(bol){lx=x+br_indent(st,width);xx=lx;align=st.align;bol=0;}
-        if(b->page.text[p]=='\n'){br_align_line(l,first,lx,right-lx,xx-lx,align);y+=lh;lh=16;first=l->count;bol=1;p++;continue;}
+        if(b->page.text[p]=='\n'){br_align_line(l,first,lx,right-lx,xx-lx,align);y+=lh;lh=16;first=l->count;bol=hard=1;p++;continue;}
         if(b->page.text[p]==1){int oi=br_object_at(b,p);if(oi<0){p++;continue;}const BrObject *o=&b->object[oi];
             if(o->kind==BR_TABLE){if(xx>lx){br_align_line(l,first,lx,right-lx,xx-lx,align);y+=lh;}y+=br_layout_table(b,l,oi,lx,y,right-lx,depth)+4;lh=16;first=l->count;bol=1;p=br_max(p+1,(int)o->end);continue;}
             int w=br_min(right-lx,br_px(o->width,right-lx,o->kind==BR_RULE?right-lx:96)),h=o->height?o->height:o->kind==BR_RULE?8:48;
@@ -116,14 +116,14 @@ static int br_layout_range(const BrPage *b,BrLayout *l,int start,int end,int x,i
             if(xx>lx&&xx+w>right){br_align_line(l,first,lx,right-lx,xx-lx,align);y+=lh;xx=lx;lh=16;first=l->count;}
             br_box(l,xx,y,w,h,p,p+1,oi);xx+=w+4;lh=br_max(lh,h+4);p++;continue;
         }
-        if(b->page.text[p]==' '&&xx==lx&&!(st.flags&4)){p++;continue;}
+        if(b->page.text[p]==' '&&xx==lx&&!(st.flags&4)&&!(hard&&(st.flags&128))){p++;continue;}
         int limit=br_max(1,(right-xx)/8),q=p,run_end=ri+1<b->runs?(int)b->run[ri+1].start:end;
         if(!(st.flags&4)&&b->page.text[p]!=' '){int word=p;while(word<end&&b->page.text[word]>32&&b->page.text[word]!=1)word++;if((word-p)*8>right-xx&&xx>lx){br_align_line(l,first,lx,right-lx,xx-lx,align);y+=lh;xx=lx;lh=16;first=l->count;continue;}}
         while(q<end&&q<run_end&&q-p<limit&&b->page.text[q]!='\n'&&b->page.text[q]!=1){q++;if(!(st.flags&4)&&b->page.text[q-1]==' ')break;}
         if(q==p)q++;int prev=l->count-1;
         if(prev>=first&&l->box[prev].object==-1&&l->box[prev].y==y&&l->box[prev].x+l->box[prev].w==xx&&l->box[prev].end==(u32)p&&br_run_at(b,(int)l->box[prev].start)==ri){l->box[prev].end=(u32)q;l->box[prev].w+=(q-p)*8;}
-        else br_box(l,xx,y,(q-p)*8,16,p,q,-1);xx+=(q-p)*8;p=q;
-        if(xx+8>right){br_align_line(l,first,lx,right-lx,xx-lx,align);y+=lh;xx=lx;lh=16;first=l->count;}
+        else br_box(l,xx,y,(q-p)*8,16,p,q,-1);xx+=(q-p)*8;p=q;if(b->page.text[q-1]!=' ')hard=0;
+        if(xx+8>right){br_align_line(l,first,lx,right-lx,xx-lx,align);y+=lh;xx=lx;lh=16;first=l->count;if(p<end&&b->page.text[p]=='\n'){p++;bol=hard=1;}}
     }
     br_align_line(l,first,lx,right-lx,xx-lx,align);return y-origin+(xx>lx?lh:0);
 }

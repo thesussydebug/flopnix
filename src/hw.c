@@ -3,6 +3,7 @@
 #include "ring3.inc"
 #include "ms2core.inc"
 #include "inputpost.h"
+#include "brkkey.inc"
 
 volatile u32 ticks;
 
@@ -82,13 +83,18 @@ static volatile u32 kq_h, kq_t;
 static volatile u32 mq[32];
 static volatile u32 mq_time[32];
 static volatile u32 mq_h, mq_t;
+static volatile u32 kq_mute, mq_mute;
 
+void input_mute(void) { kq_mute = kq_t; mq_mute = mq_t; }
+
+/* 2 = a key typed while the system was frozen, to be decoded but not delivered */
 int kbd_pop(u8 *sc)
 {
     if (kq_h == kq_t) return 0;
     *sc = kq[kq_h & 63];
+    int r = (i32)(kq_mute - kq_h) > 0 ? 2 : 1;
     kq_h++;
-    return 1;
+    return r;
 }
 
 int kbd_cancel_pending(void)
@@ -107,7 +113,7 @@ int mouse_pop(u32 *pk, u32 *when)
 {
     if (mq_h == mq_t) return 0;
     *pk = mq[mq_h & 31];
-
+    if ((i32)(mq_mute - mq_h) > 0) *pk &= ~7u;
     if (when) *when = mq_time[mq_h & 31];
     mq_h++;
     mouse_ax = -1;
@@ -137,6 +143,9 @@ static u8 mouse_wheel;
 int mouse_has_wheel(void) { return mouse_wheel; }
 
 static Ms2Asm masm;
+static u32 brk_st;
+volatile u8 brk_req;
+volatile u32 brk_since;
 __attribute__((minsize)) static void drain_8042(void)
 {
     for (;;) {
@@ -151,9 +160,13 @@ __attribute__((minsize)) static void drain_8042(void)
                 mq_time[mq_t & 31] = ticks;
                 mq_t++;
             }
-        } else if ((u32)(kq_t - kq_h) < 64) {
-            kq[kq_t & 63] = b;
-            kq_t++;
+        } else {
+            int k = brk_accept(brk_scan(&brk_st, b), em_age, kupd_critical);
+            if ((u32)(kq_t - kq_h) < 64) {
+                kq[kq_t & 63] = b;
+                kq_t++;
+            }
+            if (k) { brk_req = (u8)k; brk_since = em_age; input_mute(); }
         }
     }
 }

@@ -108,6 +108,17 @@ static int heap_grow(u32 n)
     return 1;
 }
 
+static void heap_trim(void)
+{
+    Blk *prev = 0, *last = freelist;
+    while (last->next) { prev = last; last = last->next; }
+    if (prev && last->free && (u32)last >= grow_base &&
+        (u32)(last + 1) + last->size == grow_top) {
+        prev->next = 0;
+        grow_top = (u32)last;
+    }
+}
+
 static int heap_contains(u32 p)
 {
     return !(p & 7u) && ((p >= HEAP_BASE && p <= heap_top - sizeof(Blk)) ||
@@ -173,6 +184,7 @@ __attribute__((minsize)) void *krealloc(void *p, u32 n)
         panic_buffers[i].size = n;
     }
     if (next != p) kfree(p);
+    else heap_trim();
     irq_restore(flags);
     return next;
 }
@@ -193,10 +205,11 @@ void kfree(void *p)
             s->size += sizeof(Blk) + s->next->size;
             s->next = s->next->next;
         }
+    heap_trim();
     irq_restore(flags);
 }
 
-u32 heap_avail(void)
+u32 heap_free(void)
 {
     u32 total = 0;
     if (!heap_on) return 0;
@@ -204,6 +217,11 @@ u32 heap_avail(void)
     for (Blk *b = freelist; b; b = b->next)
         if (b->free) total += b->size;
     irq_restore(flags);return total;
+}
+
+u32 heap_avail(void)
+{
+    return heap_on ? heap_free() + grow_limit - grow_top : 0;
 }
 
 u32 heap_largest(void)

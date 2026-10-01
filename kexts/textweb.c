@@ -22,7 +22,7 @@ static void *br_realloc(void *p,u32 n)
     if(!n){api->kfree(p);return 0;}if(!p)return br_malloc(n);
     void *r;while(!(r=api->krealloc(p,n))&&bc_evict_one(&cache)){}return r;
 }
-#include "browser_image.inc"
+#include "image.h"
 typedef struct BrView BrView;
 typedef struct {u8 *pixels;int w,h;BrView *child;} BrMedia;
 struct BrView {BrPage *doc;BrLayout *layout;BrMedia media[BR_OBJECTS];BrView *parent;char url[TW_URL];int scroll,depth,post,viewport;};
@@ -35,7 +35,8 @@ static void view_free(BrView *v);
 static BrPage *page;
 static int browser_type,alive;
 
-static char address[TW_URL],current[TW_URL],search_url[TW_URL],status[128];
+static char address[TW_URL],current[TW_URL],search_url[TW_URL],status[128],engines[1024];
+#define SEARCH_CFG "sys/config/search.cfg"
 static AppField field;
 typedef struct {char url[TW_URL];int scroll;} History;
 static History history[8];
@@ -44,7 +45,8 @@ static int line_cols;
 typedef struct {u8 *data;u32 len,cap;int full;u32 tick;NetHttpInfo info;} Transfer;
 static Transfer pending;
 static char save_name[13],save_path[132];static int save_drive;
-static void say(const char *s){api->strlcpy(status,s,sizeof status);api->gui_dirty();}
+static void redraw(void){api->win_redraw(browser_type,0);}
+static void say(const char *s){api->strlcpy(status,s,sizeof status);redraw();}
 static int back_target(void){return at_home?hpos:hpos-1;}
 static void set_address(const char *s){af_set(&field,address,sizeof address,s);}
 static void release(Transfer *d){if(d->data)api->kfree(d->data);api->memset(d,0,sizeof *d);}
@@ -83,6 +85,8 @@ static int fetch(char *url,TwUrl *u,Transfer *d,const char *body)
     if(!api->net_up()||!api->net_get(NET_IP)){say("Network is not ready. Check Network in Settings.");return 0;}
     const NetHttpFormOps *forms=api->service_get("net.http.form");
     const NetHttpOps *http=api->service_get("net.http");const NetTextOps *text=api->service_get("net.text");
+    const NetHttpAgentOps *agent=api->service_get("net.http.agent");if(agent&&agent->abi!=NET_HTTP_AGENT_ABI)agent=0;
+    char ua[48];if(!tw_agent(ua,sizeof ua,api->os_version))agent=0;
     api->esc_arm();
     for(int hop=0;hop<6;hop++){
         if(!tw_url(url,u)){say("This address needs HTTP or Gopher. HTTPS is not supported.");return 0;}
@@ -91,7 +95,7 @@ static int fetch(char *url,TwUrl *u,Transfer *d,const char *body)
         u32 ip=api->net_dns(u->host,400);if(closing||api->esc_pending()){say("Stopped. The previous page is still available.");return 0;}
         if(!ip){say("Server not found. Check the address and DNS settings.");return 0;}
         d->len=0;d->full=0;d->data[0]=0;api->memset(&d->info,0,sizeof d->info);int result;
-        if(u->http){char host[90];if(u->port==80)api->strlcpy(host,u->host,sizeof host);else api->kfmt(host,sizeof host,"%s:%u",u->host,u->port);if(body){if(!forms||forms->abi!=NET_HTTP_FORM_ABI||!forms->post){say("POST forms need the matching net.kx extension.");return 0;}result=forms->post(ip,u->port,host,u->path,body,receive,d,800,&d->info);}else result=http->get(ip,u->port,host,u->path,receive,d,800,&d->info);}
+        if(u->http){char host[90];if(u->port==80)api->strlcpy(host,u->host,sizeof host);else api->kfmt(host,sizeof host,"%s:%u",u->host,u->port);if(body&&agent)result=agent->post(ip,u->port,host,u->path,body,ua,receive,d,800,&d->info);else if(body){if(!forms||forms->abi!=NET_HTTP_FORM_ABI||!forms->post){say("POST forms need the matching net.kx extension.");return 0;}result=forms->post(ip,u->port,host,u->path,body,receive,d,800,&d->info);}else result=agent?agent->get(ip,u->port,host,u->path,ua,receive,d,800,&d->info):http->get(ip,u->port,host,u->path,receive,d,800,&d->info);}
         else {char request[180];api->kfmt(request,sizeof request,"%s\r\n",u->path);result=text->request(ip,u->port,request,receive,d,800);}
         api->busy_end();fetch_status=result;
         if(closing||api->esc_pending()){say("Stopped. The previous page is still available.");return 0;}
@@ -107,7 +111,7 @@ static int fetch(char *url,TwUrl *u,Transfer *d,const char *body)
         if((u->http&&result>=200&&result<206)||(!u->http&&result==0))return 1;
         if(result==-5)say("Another network transfer is busy. Try again shortly.");
         else if(result==-6)say("Server used unsupported compression. Nothing was saved.");
-        else if(result>0){api->kfmt(status,sizeof status,"HTTP %d. The previous page is still available.",result);api->gui_dirty();}
+        else if(result>0){api->kfmt(status,sizeof status,"HTTP %d. The previous page is still available.",result);redraw();}
         else say("The transfer was incomplete. Nothing was saved; try again.");
         return 0;
     }
@@ -150,6 +154,7 @@ static int follow_refresh(const BrPage *doc,int hops,char *requested,char *local
     if(!(nl?read_local(nlocal,d):fetch(nreq,&nu,d,0)))return -1;
     api->strlcpy(requested,nreq,TW_URL);api->strlcpy(localpath,nlocal,TW_URL);*local=nl;api->memcpy(u,&nu,sizeof nu);return 1;
 }
+static void offer_save(Transfer *d,const char *url,int html);
 #include "browser_view.inc"
 static void save_picker(void);
 static void choose_again(int result,void *ctx)
@@ -161,7 +166,7 @@ static void save_write(void)
     if(!pending.data)return;busy=1;api->busy_set("Browser","Saving download...",0);
     int r=save_drive?api->fat_write(save_path,pending.data,pending.len):api->fs_write(save_path,pending.data,pending.len);
     api->busy_end();busy=0;
-    if(!r){api->kfmt(status,sizeof status,"Saved %u bytes to %s:%s",pending.len,save_drive?"u":"a",save_path);api->gui_dirty();api->broadcast("fs.changed",save_path);release(&pending);}
+    if(!r){api->kfmt(status,sizeof status,"Saved %u bytes to %s:%s",pending.len,save_drive?"u":"a",save_path);redraw();api->broadcast("fs.changed",save_path);release(&pending);}
     else {
         say(r==-2?"The drive is full. Download is still in memory.":"Could not save the download. It is still in memory.");
         if(!closing)api->msgbox("Download not saved","Choose another destination? The downloaded data has been retained.",MB_OKCANCEL,choose_again,0);
@@ -189,7 +194,7 @@ static void offer_save(Transfer *d,const char *url,int html)
 }
 static void visit(const char *url,int target,int download)
 {
-    if(busy||pending.data)return;if(!download&&page&&view_anchor(&root_view,url)){api->gui_dirty();return;}char requested[TW_URL],localpath[TW_URL];TwUrl u;int local;
+    if(busy||pending.data)return;if(!download&&page&&view_anchor(&root_view,url)){redraw();return;}char requested[TW_URL],localpath[TW_URL];TwUrl u;int local;
     if(!target_url(url,requested,localpath,&local,&u)){say("Enter HTTP, Gopher, or a local path such as a:page.html or u:/page.htm.");return;}
     if(!local&&!download&&!u.http&&u.type=='7'&&!tw_contains(u.path,"\t")){
         api->strlcpy(search_url,requested,sizeof search_url);set_address("");searching=focus=1;say("Type your search words, then press Enter.");return;
@@ -224,7 +229,7 @@ static void visit(const char *url,int target,int download)
         }
         break;
     }
-    release(&d);busy=0;if(closing)dispose();api->gui_dirty();
+    release(&d);busy=0;if(closing)dispose();redraw();
 }
 static void picked(const char *path,void *ctx)
 {
@@ -254,11 +259,11 @@ static void go(void)
         if(!address[0]){say("Enter some search words first.");return;}
         if(!tw_encoded(encoded,sizeof encoded,address)||n+3+tw_len(encoded)>=TW_URL){say("Search is too long.");return;}
         api->kfmt(url,sizeof url,"%s%%09%s",search_url,encoded);visit(url,-1,0);
-    }else visit(address,-1,0);
+    }else {char url[TW_URL];int r=tw_search_url(address,engines,url);if(r>0){set_address(url);visit(url,-1,0);}else if(r<0)say("No search site for that. Add one to a:" SEARCH_CFG ".");else visit(address,-1,0);}
 }
 static void navigate_view(BrView *v,const char *url,const char *body)
 {
-    if(!body&&view_anchor(v,url)){api->gui_dirty();return;}
+    if(!body&&view_anchor(v,url)){redraw();return;}
     if(v==&root_view&&!body){visit(url,-1,0);return;}
     char copy[TW_URL];if(!tw_copy(copy,sizeof copy,url,tw_len(url)))return;
     busy=1;resource_count=resource_failures=0;document_count=1;api->esc_arm();
@@ -267,7 +272,7 @@ static void navigate_view(BrView *v,const char *url,const char *body)
         if(v==&root_view){page=v->doc;set_address(v->url);api->strlcpy(current,v->url,sizeof current);at_home=searching=links_view=gopher=0;
             hcount=hpos+1;if(hcount==8){api->memmove(history,history+1,7*sizeof history[0]);hcount--;}hpos=hcount++;api->strlcpy(history[hpos].url,v->url,TW_URL);history[hpos].scroll=0;}
         say("Page loaded.");}
-    api->gui_dirty();
+    redraw();
 }
 static void follow(void)
 {
@@ -284,7 +289,7 @@ static void download(void)
 }
 static void control_focus(BrView *v,int ci)
 {
-    active_view=v;active_control=ci;selected=-1;focus=0;BrControl *c=&v->doc->control[ci];af_set(&control_field,c->value,sizeof c->value,c->value);api->gui_dirty();
+    active_view=v;active_control=ci;selected=-1;focus=0;BrControl *c=&v->doc->control[ci];af_set(&control_field,c->value,sizeof c->value,c->value);redraw();
 }
 static void submit_form(BrView *v,int form,int button)
 {
@@ -301,7 +306,7 @@ static void select_popup(void);
 static void select_picked(int index,void *ctx)
 {
     (void)ctx;if(!alive||select_serial!=nav_serial||index<0||index>=select_count)return;
-    if(select_map[index]<0){select_popup();return;}BrControl *c=&select_view->doc->control[select_ci];c->choice=select_map[index];api->gui_dirty();
+    if(select_map[index]<0){select_popup();return;}BrControl *c=&select_view->doc->control[select_ci];c->choice=select_map[index];redraw();
 }
 static void select_popup(void)
 {
@@ -318,7 +323,7 @@ static void activate_control(BrView *v,int ci,int row)
     else if(c->type==BC_RESET){br_form_reset(v->doc,c->form);active_control=-1;}
     else if(c->type==BC_SUBMIT)submit_form(v,c->form,ci);
     else if(c->type==BC_SELECT){if(c->multiple){row+=br_max(0,c->choice)/5*5;if(row>=0&&row<c->count&&!v->doc->option[c->option+row].disabled){c->choice=row;v->doc->option[c->option+row].selected^=1;}}else for(int i=1;i<=c->count;i++){int next=(c->choice+i)%c->count;if(!v->doc->option[c->option+next].disabled){c->choice=next;break;}}}
-    api->gui_dirty();
+    redraw();
 }
 static void copy_text(void)
 {
@@ -329,8 +334,8 @@ static void copy_text(void)
 static void home(void)
 {
     if(busy||pending.data)return;if(hpos>=0&&!at_home)history[hpos].scroll=top;
-    const char *welcome="Browser\n\nEnter an http:// or gopher:// address, or a local path such as a:page.html or u:/page.htm. Use Open or Ctrl+O to choose a file.\n\nClick a link to open it. Right-click a link to select it for Download; click blank page space to clear the selection.\n\nGopher menus, documents, searches and downloads are supported. The Links button is shown on Gopher pages.\n\nCtrl+L selects the address. Ctrl+C copies page text. Back and Forward revisit pages.\n\nBasic HTML and embedded or inline CSS are supported. Images, tables, frames, forms and external stylesheets are supported. HTTPS, scripts and file uploads are not supported. GIFs display their first frame.\n\nPages and downloads grow as available memory permits. Local files can be opened as available memory permits. Downloads saved to A: can be up to 512 KiB.";
-    formatting=1;nav_serial++;view_free(&root_view);root_view.doc=page=br_zalloc(sizeof *page);root_view.layout=br_zalloc(sizeof *root_view.layout);if(!page||!root_view.layout){view_free(&root_view);page=0;formatting=0;say("Not enough memory to open Browser.");return;}root_view.layout->width=0;active_view=&root_view;active_control=-1;br_render(page,welcome,0,"",0);formatting=0;set_address("http://");field.anchor=0;field.caret=field.len;current[0]=0;top=links_view=searching=gopher=0;selected=-1;focus=at_home=1;line_cols=0;say("Enter an address, then press Enter or Go.");
+    const char *welcome="Browser\n\nEnter an http:// or gopher:// address, or a local path such as a:page.html or u:/page.htm. Use Open or Ctrl+O to choose a file.\n\nType words instead of an address to search. Search sites are listed in a:" SEARCH_CFG ", one per line: a keyword, then an address with %s where the words go. Plain words use the default line; wp floppy disk uses the wp line.\n\nClick a link to open it. Right-click a link to select it for Download; click blank page space to clear the selection.\n\nGopher menus, documents, searches and downloads are supported. The Links button is shown on Gopher pages.\n\nCtrl+L selects the address. Ctrl+C copies page text. Back and Forward revisit pages.\n\nBasic HTML and embedded or inline CSS are supported. Images, tables, frames, forms and external stylesheets are supported. HTTPS, scripts and file uploads are not supported. GIFs display their first frame.\n\nPages and downloads grow as available memory permits. Local files can be opened as available memory permits. Downloads saved to A: can be up to 512 KiB.";
+    formatting=1;nav_serial++;view_free(&root_view);root_view.doc=page=br_zalloc(sizeof *page);root_view.layout=br_zalloc(sizeof *root_view.layout);if(!page||!root_view.layout){view_free(&root_view);page=0;formatting=0;say("Not enough memory to open Browser.");return;}root_view.layout->width=0;active_view=&root_view;active_control=-1;br_render(page,welcome,0,"",0);formatting=0;set_address("http://");field.anchor=0;field.caret=field.len;current[0]=0;top=links_view=searching=gopher=0;selected=-1;focus=at_home=1;line_cols=0;say("Enter an address or search words, then press Enter or Go.");
 }
 static int blink_timer=-1;static u8 blink_shown;
 static void blink_tick(void *ctx)
@@ -338,7 +343,7 @@ static void blink_tick(void *ctx)
     (void)ctx;if(!alive||(!focus&&active_control<0)||*api->gui_blink==blink_shown)return;
     for(int i=0;i<api->win_max();i++){const Win *w=api->win_slot(i);if(w&&w->type==browser_type&&api->win_is_focused((Win *)w)){blink_shown=*api->gui_blink;api->win_redraw(browser_type,0);}}
 }
-static void opened(int i){(void)i;alive=1;if(blink_timer<0)blink_timer=api->timer_add(5,blink_tick,0);if(!page)home();}
+static void opened(int i){(void)i;alive=1;int n=api->fs_read(SEARCH_CFG,(u8 *)engines,sizeof engines-1);engines[n>0?n:0]=0;if(blink_timer<0)blink_timer=api->timer_add(5,blink_tick,0);if(!page)home();}
 static void closed(int i){(void)i;alive=0;if(blink_timer>=0){api->timer_del(blink_timer);blink_timer=-1;}if(busy){closing=1;return;}dispose();}
 static void size(int *w,int *h){*w=584;*h=300;}
 static void initial(int i,int *w,int *h){(void)i;*w=600;*h=328;}
@@ -393,20 +398,23 @@ static void key(int i,int k)
     if(links_view){if(k==K_UP&&selected>0)selected--;else if(k==K_DOWN&&page&&selected+1<page->page.links)selected++;if(selected<top)top=selected;if(selected>=top+view_rows)top=selected-view_rows+1;if(page&&selected>=0)say(page->page.link[selected].url);}
     else if(k==K_UP)scroll_by(-16);else if(k==K_DOWN)scroll_by(16);else if(k==K_PGUP)scroll_by(-view_rows);else if(k==K_PGDN||k==' ')scroll_by(view_rows);else if(k==K_HOME)active_view->scroll=0;else if(k==K_END&&active_view&&active_view->layout)active_view->scroll=active_view->layout->height;
 }
+static int sbdrag;
+static void sb_to(int y,int ch){int total=page?(links_view?page->page.links:root_view.layout->height):0;top=api->sbar_from_pos(ch-98,total,view_rows,y-70);}
 static void mouse(int i,int x,int y,int ev,int cw,int ch)
 {
-    (void)i;if(busy||pending.data)return;
+    (void)i;if(ev==EV_PRESS||ev==EV_RELEASE)sbdrag=0;if(busy||pending.data)return;
+    if(sbdrag&&ev==EV_DRAG){sb_to(y,ch);return;}
     if(af_mouse(&field,76,37,cw-148,x,y,ev)){focus=1;active_control=-1;return;}
     if(ev==EV_PRESS)for(int n=0;n<(gopher&&!at_home?7:6);n++)if(ui_hit(button(n,cw),x,y)){
         if(!enabled(n))return;if(n==0){int t=back_target();visit(history[t].url,t,0);}else if(n==1)visit(history[hpos+1].url,hpos+1,0);else if(n==2){if(root_view.post)say("Use the form's Submit button to send it again.");else {reload_all=1;visit(current,hpos,0);reload_all=0;}}else if(n==3)home();else if(n==4)download();else if(n==5)open_file();else {links_view=!links_view;top=0;selected=0;focus=0;}return;
     }
     if(ev!=EV_PRESS&&ev!=EV_RPRESS&&ev!=EV_DRAG)return;
     if(ev==EV_PRESS&&ui_hit(ui_r(cw-66,37,54,24),x,y)){go();return;}
-    if(x>=cw-28&&x<cw-12&&y>=70&&y<ch-26){int total=page?(links_view?page->page.links:root_view.layout->height):0;top=api->sbar_from_pos(ch-98,total,view_rows,y-70);return;}
+    if(ev!=EV_DRAG&&x>=cw-28&&x<cw-12&&y>=70&&y<ch-26){sbdrag=ev==EV_PRESS;sb_to(y,ch);return;}
     if(!page||x<18||x>=cw-32||y<72||y>=ch-28)return;
     if(links_view){if(ev!=EV_PRESS&&ev!=EV_RPRESS)return;int row=top+(y-72)/16;selected=row<page->page.links?row:-1;active_view=&root_view;focus=0;active_control=-1;if(selected>=0){if(ev==EV_PRESS)follow();else say(page->page.link[selected].url);}return;}
     BrView *v=&root_view;int mx=x,my=y;BrBox *box=view_hit(&v,&mx,&my,&root_view,18,72,cw-52,ch-102);active_view=v;focus=0;
-    if(!box){if(ev==EV_PRESS){selected=-1;active_control=-1;}api->gui_dirty();return;}
+    if(!box){if(ev==EV_PRESS){selected=-1;active_control=-1;}redraw();return;}
     if(box->object>=0&&v->doc->object[box->object].kind==BR_CONTROL){int ci=v->doc->object[box->object].ref;BrControl *c=&v->doc->control[ci];int editable=c->type==BC_TEXT||c->type==BC_PASSWORD||c->type==BC_AREA;if(!editable){if(ev==EV_PRESS){if(c->type==BC_SELECT&&!c->multiple&&!c->disabled){control_focus(v,ci);select_view=v;select_ci=ci;select_start=0;select_serial=nav_serial;select_popup();}else activate_control(v,ci,(my-2)/20);}return;}if(ev==EV_PRESS&&!c->disabled)control_focus(v,ci);
         if(!c->disabled&&(c->type==BC_TEXT||c->type==BC_PASSWORD||c->type==BC_AREA)&&(ev==EV_PRESS||(ev==EV_DRAG&&active_control==ci))){int cols=br_max(1,(box->w-12)/8),pos=control_field.offset+br_max(0,(mx-5+4)/8);if(c->type==BC_AREA){int off=0,row=br_max(0,(my-4)/16);while(row--&&c->value[off])off=tw_wrap(c->value,off,cols);pos=off+br_max(0,(mx-5+4)/8);}control_field.caret=br_min(control_field.len,pos);if(ev==EV_PRESS)control_field.anchor=control_field.caret;}return;
     }

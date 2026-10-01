@@ -5,6 +5,7 @@
 #include "netconfig.inc"
 #include "bmp.inc"
 #include "wallpaper.inc"
+#include "image.h"
 
 #include "ui.inc"
 
@@ -218,6 +219,31 @@ static void wp_fill_rgb(int x, int y, int w, int h, const u8 *c)
     }
 }
 
+static const char *const pv_fmt[] = { "", "BMP", "PNG", "JPEG", "GIF" };
+
+static void pv_decode(u32 n)
+{
+    const ImageOps *io = img_bind(api);
+    if (!io) { strlcpy(wmsg, "image.kx not loaded; use an 8/24-bit BMP", sizeof wmsg); return; }
+    ImgInfo in;
+    int r = io->probe(api->iobuf, n, &in);
+    u8 *b = r ? 0 : api->kmalloc(PVW * PVH);
+    if (!r && !b) r = IMG_ENOMEM;
+    if (!r) {
+        ImgReq q;
+        memset(&q, 0, sizeof q);
+        q.dst = b; q.dw = q.pitch = PVW; q.dh = PVH; q.flags = IMG_DITHER; q.bg = C_G0 + 2;
+        u32 room = api->heap_avail() / 2;
+        q.budget = room > 24u * 1024 * 1024 ? 24u * 1024 * 1024 : room;
+        r = io->decode(api->iobuf, n, &q);
+    }
+    if (r) { if (b) api->kfree(b); strlcpy(wmsg, io->error(r), sizeof wmsg); return; }
+    if (api->mem_track) api->mem_track("Wallpaper preview", b, PVW * PVH);
+    pv = b;
+    strlcpy(pv_of, dpath, sizeof pv_of);
+    kfmt(wmsg, sizeof wmsg, "%dx%d %s", in.w, in.h, pv_fmt[in.format]);
+}
+
 static void pv_load_locked(void)
 {
     if (!settings_open) return;
@@ -233,10 +259,7 @@ static void pv_load_locked(void)
 
     BmpHead h;
     const u8 *bm = api->iobuf;
-    if (bmp_head(bm, (u32)n, &h) != 0) {
-        strlcpy(wmsg, "not an 8 or 24-bit BMP", sizeof wmsg);
-        return;
-    }
+    if (bmp_head(bm, (u32)n, &h) != 0) { pv_decode((u32)n); return; }
     u8 map[256];
     if (h.bpp == 8)
         for (int i = 0; i < 256; i++) {
@@ -392,7 +415,7 @@ static void wp_mouse(int lx, int ly)
         }
     if (dm == WP_BITMAP) {
         if (hit(wp_browse(), lx, ly)) {
-            api->file_picker("Choose a wallpaper", "bmp", 0, wp_picked, 0);
+            api->file_picker("Choose a wallpaper", "", 0, wp_picked, 0);
             return;
         }
     } else {
@@ -488,7 +511,7 @@ static void wp_draw(int cx, int cy, int cw)
                        dpath[0] ? dpath : "(no image chosen)", C_BLACK,
                        cw - b.x - b.w - 20);
         draw_text(cx + 12, cy + 244,
-                  "8 or 24-bit BMP. Paint saves these.", C_G0 + 4);
+                  "PNG, JPEG, GIF or BMP on the floppy.", C_G0 + 4);
         draw_text(cx + 12, cy + 260,
                   "The image is stretched to fill the screen.", C_G0 + 4);
     } else {
@@ -658,6 +681,7 @@ int kext_entry(const Kapi *k)
     k->register_cmd("confsec","confsec [raw] - inspect current settings",confsec);
     static const AppDesc d = {.live_draw=APP_INDEPENDENT,
         .title = "Settings", .max_inst = 1, .in_menu = 1,
+        .category = APP_CAT_SYSTEM,
         .draw = set_draw, .key = set_key, .mouse = set_mouse, .wheel = set_wheel,
         .client_size = set_csize, .open = set_open, .close = set_close,
     };

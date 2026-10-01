@@ -362,6 +362,12 @@ static void pk_draw(void)
 }
 static int pk_mouse(int px, int py, int ev)
 {
+    if (ev == EV_WHEELUP || ev == EV_WHEELDN) {
+        pk_scroll += ev == EV_WHEELUP ? -3 : 3;
+        if (pk_scroll > pk_n - PK_ROWS) pk_scroll = pk_n - PK_ROWS;
+        if (pk_scroll < 0) pk_scroll = 0;
+        return 1;
+    }
     if (ev != EV_PRESS) return 1;
     int x, y, w, h;
     pk_geo(&x, &y, &w, &h);

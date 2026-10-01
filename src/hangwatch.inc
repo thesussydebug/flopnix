@@ -10,6 +10,7 @@ typedef struct {
     u32 hard;
     u32 prog;
     u8  prompted;
+    u32 seen;
 } HangWatch;
 
 static inline void hw_io(HangWatch *h,int w,u32 elapsed)
@@ -20,7 +21,7 @@ static inline void hw_io(HangWatch *h,int w,u32 elapsed)
 static inline int hw_tick(HangWatch *h, int w, u32 elapsed, u32 prog)
 {
     if (w < 0) { h->win = -1; return 0; }
-    if (w != h->win) {
+    if (w != h->win || elapsed < h->seen) {
         h->win = w;
         h->next = HW_WAIT;
         h->hard = HW_HARD;
@@ -31,6 +32,7 @@ static inline int hw_tick(HangWatch *h, int w, u32 elapsed, u32 prog)
 
         if (elapsed + HW_WAIT > h->next) h->next = elapsed + HW_WAIT;
     }
+    h->seen = elapsed;
     if (h->prompted) return 0;
     if (elapsed >= h->next || elapsed >= h->hard) { h->prompted = 1; return 1; }
     return 0;

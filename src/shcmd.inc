@@ -64,7 +64,7 @@ static inline const char *sh_usage(const char *c)
     if (sc_eq(c, "dmesg"))    return "dmesg         - boot diagnostics";
     if (sc_eq(c, "threads"))  return "threads       - kernel threads and stack use";
     if (sc_eq(c, "kupdate"))  return "kupdate <.ku> - install a kernel update + reboot";
-    if (sc_eq(c, "crash"))    return "crash         - test the panic screen (halts!)";
+    if (sc_eq(c, "panic"))    return "panic normal|emergency - test a panic screen (halts!)";
     if (sc_eq(c, "kext"))     return "kext [load <file>] - list/load extensions";
     if (sc_eq(c, "defrag"))   return "defrag        - pack A:'s files contiguously";
     if (sc_eq(c, "fscan"))    return "fscan         - scan A: for bad sectors";
@@ -85,18 +85,18 @@ static inline const char *sh_usage(const char *c)
     if (sc_eq(c, "whoami"))   return "whoami        - the current user";
     if (sc_eq(c, "pwd"))      return "pwd           - the working directory";
     if (sc_eq(c, "settings")) return "settings      - open the Settings window";
-    if (sc_eq(c, "about"))    return "about         - open the About window";
+    if (sc_eq(c, "about"))    return "about         - open the System Info window";
     if (sc_eq(c, "reboot"))   return "reboot        - restart FLOPNIX";
     return 0;
 }
 
 static const char *const sh_names[] = {"uniq","strings","crc32","cmp",
     "about", "beep", "bios", "bootsec", "cal", "calc", "cat", "cd", "clear",
-    "cls", "cp", "crash", "date", "defrag", "disk", "dmesg", "dns", "du", "echo",
+    "cls", "cp", "date", "defrag", "disk", "dmesg", "dns", "du", "echo",
     "edit", "fetch", "find", "free", "fscan", "grep", "head", "help",
     "hexdump", "history", "ifconfig", "kext", "kill", "kupdate", "open", "confsec",
     "lspci",
-    "ls", "map", "matrix", "mkdir", "mv", "ntp", "pack", "ping", "ps", "pwd",
+    "ls", "map", "matrix", "mkdir", "mv", "ntp", "pack", "panic", "ping", "ps", "pwd",
     "rainbow",
     "reboot", "ring3", "rm", "rmdir", "set", "settings", "shutdown", "sort", "stat",
     "tail", "testram", "threads", "touch", "tree", "ucat", "ucp", "uls", "unpack",

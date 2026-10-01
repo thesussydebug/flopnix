@@ -12,19 +12,24 @@ static inline u32 memory_heap_limit(u32 kb, u32 lfb)
     if (lfb >= 0x400000u && lfb < end) end = lfb & ~0x3FFFFFu;
     return end & ~4095u;
 }
-static inline MemoryLayout memory_layout(u32 kb)
+static inline MemoryLayout memory_layout(u32 kb, u32 screen)
 {
-    MemoryLayout m = {0x400000u, 0x500000u, 0x600000u, 0x700000u,
-                      0x800000u, 0x900000u, 0x700000u, 0x800000u};
-    if (kb < 9216) {
-        m.fb = 0x190000u; m.fb_end = 0x1E0000u;
-        m.arena = 0x1E0000u; m.arena_end = MEM_IO_BASE;
-        m.pool = 0x30000u; m.pool_end = MEM_DMA_BASE;
-        m.heap = MEM_IO_END; m.heap_end = kb ? kb * 1024 : 0x400000u;
-        if (kb >= 5120) {
-            m.arena = MEM_IO_BASE - 0x100000u;
-            m.fb = MEM_IO_END; m.fb_end = m.heap = MEM_IO_END + 0x50000u;
-        }
+    MemoryLayout m = {MEM_IO_END, 0, MEM_IO_BASE - 0x100000u, MEM_IO_BASE,
+                      0, 0, 0x30000u, MEM_DMA_BASE};
+    if (kb >= 9216) {
+        if (screen < 640u * 480u) screen = 640u * 480u;
+        if (screen > 0x100000u) screen = 0x100000u;
+        m.fb_end = m.pool = m.fb + ((screen + 4095u) & ~4095u);
+        if (m.pool >> 22 != (m.pool + 0xFFFFFu) >> 22) m.pool = (m.pool + 0x3FFFFFu) & ~0x3FFFFFu;
+        m.pool_end = m.pool + 0x100000u;
+        return m;
+    }
+    m.fb = 0x170000u; m.fb_end = m.arena = 0x1C0000u;
+    m.pool = 0x30000u; m.pool_end = MEM_DMA_BASE;
+    m.heap = MEM_IO_END; m.heap_end = kb ? kb * 1024 : 0x400000u;
+    if (kb >= 5120) {
+        m.arena = MEM_IO_BASE - 0x100000u;
+        m.fb = MEM_IO_END; m.fb_end = m.heap = MEM_IO_END + 0x50000u;
     }
     if (m.heap_end < m.heap) m.heap_end = m.heap;
     return m;

@@ -13,6 +13,7 @@
 #include "gdi.h"
 #include "bmp.inc"
 #include "wallpaper.inc"
+#include "image.h"
 #include "marquee.inc"
 
 static const Kapi *api;
@@ -293,6 +294,77 @@ static void wp_free(void)
     wp_loaded[0] = 0;
 }
 
+static int wp_step(void *ctx, int frac)
+{
+    (void)ctx; (void)frac;
+    api->gui_pump();
+    return 0;
+}
+
+static void wp_bmp(const BmpHead *h, const u8 *bm, int n, u8 *px, int sw, int sh)
+{
+    u8 map[256];
+    if (h->bpp == 8) {
+        for (int i = 0; i < 256; i++) {
+            u32 e = h->paloff + (u32)i * 4;
+            map[i] = (e + 4 <= (u32)n) ? api->palette_nearest(bm[e + 2], bm[e + 1], bm[e])
+                                       : C_BLACK;
+        }
+    }
+    for (int y = 0; y < sh; y++) {
+        int sy = bmp_src_row(h, bmp_scale(y, sh, h->h));
+        if (!bmp_row_ok(h, sy, (u32)n)) continue;
+        const u8 *row = bm + h->off + (u32)sy * h->rowsz;
+        u8 *dst = px + (u32)y * (u32)sw;
+        for (int x = 0; x < sw; x++) {
+            int sx = bmp_scale(x, sw, h->w);
+            dst[x] = h->bpp == 8 ? map[row[sx]]
+                                : api->palette_nearest(row[sx * 3 + 2],
+                                                       row[sx * 3 + 1],
+                                                       row[sx * 3]);
+        }
+    }
+}
+
+static u8 wp_booting;
+
+/* BMPs the old parser reads skip image.kx; other pictures go through it. -1 = retry after boot. */
+static int wp_decode(const char *path, u8 *px, int sw, int sh)
+{
+    int other = api->strcasecmp(api->path_ext(path), "bmp") != 0;
+    if (other && wp_booting) return -1;
+    const ImageOps *io = other ? img_bind(api) : 0;
+    int n = api->fs_read(path, api->iobuf, api->iobuf_size);
+    if (n <= 0) return 0;
+    BmpHead h;
+    if (bmp_head(api->iobuf, (u32)n, &h) == 0) { wp_bmp(&h, api->iobuf, n, px, sw, sh); return 1; }
+    if (wp_booting) return -1;
+    if (!io) {
+        if (!(io = img_bind(api))) return 0;
+        n = api->fs_read(path, api->iobuf, api->iobuf_size);
+        if (n <= 0) return 0;
+    }
+    ImgReq q;
+    api->memset(&q, 0, sizeof q);
+    q.dst = px; q.dw = q.pitch = sw; q.dh = sh; q.flags = IMG_DITHER; q.bg = C_DESK;
+    u32 b = api->heap_avail() / 2;
+    q.budget = b > 24u * 1024 * 1024 ? 24u * 1024 * 1024 : b;
+    q.progress = wp_step;
+    int r = io->decode(api->iobuf, (u32)n, &q);
+    if (r) { char m[96]; api->kfmt(m, sizeof m, "wallpaper %s: %s\n", path, io->error(r)); api->klog(m); }
+    return r == IMG_OK;
+}
+
+static int wp_late_id = -1;
+static void wp_refresh(void);
+static void wp_late(void *ctx)
+{
+    (void)ctx;
+    api->timer_del(wp_late_id);
+    wp_late_id = -1;
+    wp_refresh();
+}
+
 static void wp_load(void)
 {
     int sw = api->boot_info(BI_SCREEN_W), sh = api->boot_info(BI_SCREEN_H) - 24;
@@ -304,39 +376,14 @@ static void wp_load(void)
     if (wp_pixels && !api->strcmp(path, wp_loaded)) return;
     wp_free();
 
-    int n = api->fs_read(path, api->iobuf, api->iobuf_size);
-    if (n <= 0) return;
-
-    BmpHead h;
-    const u8 *bm = api->iobuf;
-    if (bmp_head(bm, (u32)n, &h) != 0) return;
-
-    u8 map[256];
-    if (h.bpp == 8) {
-        for (int i = 0; i < 256; i++) {
-            u32 e = h.paloff + (u32)i * 4;
-            map[i] = (e + 4 <= (u32)n) ? api->palette_nearest(bm[e + 2], bm[e + 1], bm[e])
-                                       : C_BLACK;
-        }
-    }
-
     u8 *px = api->kmalloc((u32)sw * (u32)sh);
     if (!px) return;
     api->memset(px, C_DESK, (u32)sw * (u32)sh);
-
-    for (int y = 0; y < sh; y++) {
-        int sy = bmp_src_row(&h, bmp_scale(y, sh, h.h));
-        if (!bmp_row_ok(&h, sy, (u32)n)) continue;
-        const u8 *row = bm + h.off + (u32)sy * h.rowsz;
-        u8 *dst = px + (u32)y * (u32)sw;
-        for (int x = 0; x < sw; x++) {
-            int sx = bmp_scale(x, sw, h.w);
-            dst[x] = h.bpp == 8 ? map[row[sx]]
-                                : api->palette_nearest(row[sx * 3 + 2],
-                                                       row[sx * 3 + 1],
-                                                       row[sx * 3]);
-        }
-    }
+    api->buffer_lock();
+    int ok = wp_decode(path, px, sw, sh);
+    api->buffer_unlock();
+    if (ok < 0 && wp_late_id < 0) wp_late_id = api->timer_add(1, wp_late, 0);
+    if (ok <= 0) { api->kfree(px); return; }
     wp_pixels = px;
     api->strlcpy(wp_loaded, path, sizeof wp_loaded);
 }
@@ -684,7 +731,7 @@ static void desk_pick_now(int idx, void *ctx)
         }
     } else if(idx==2){
         char nm[FS_NAMELEN];for(int n=1;n<=FS_NFILES;n++){
-            api->kfmt(nm,sizeof nm,"desktop/Folder%d",n);
+            char leaf[16];api->kfmt(leaf,sizeof leaf,fs_new_folder(n),n);api->kfmt(nm,sizeof nm,"desktop/%s",leaf);
             if(!api->fs_exists(nm)&&!api->fs_dir_count(nm)){
                 if(!api->fs_mkdir(nm)){lst_touch();dsel_single(nm);api->strlcpy(sel,nm,sizeof sel);ren_begin(nm);}else say("Could not create folder");break;
             }
@@ -894,7 +941,9 @@ int kext_entry(const Kapi *k)
     lst_load();
     lst_sync();
 
+    wp_booting = 1;
     wp_refresh();
+    wp_booting = 0;
     k->on_event(wp_event);
     return 0;
 }

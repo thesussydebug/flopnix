@@ -904,7 +904,7 @@ static void http_deliver(const u8 *d, int n)
 static int net_transfer_locked(u32 ip, u16 port, const char *host,
                              const char *path,
                              int (*sink)(const u8 *, int, void *), void *ctx,
-                             u32 timeout,NetHttpInfo *info,const char *body)
+                             u32 timeout,NetHttpInfo *info,const char *body,const char *agent)
 {
     if (nic_kind == NIC_NONE || !net_ip) return -2;
     if (!timer_alive || !port || !ip || !path || !timeout) return -1;
@@ -917,11 +917,13 @@ static int net_transfer_locked(u32 ip, u16 port, const char *host,
     static char req[5120];
     if(strlen(path)>500 || (host&&strlen(host)>127)) {result=-1;goto finish;}
     if(host){
+        const char *ua=agent?agent:"FLOPNIX";
         for(const char *p=host;*p;p++)if((u8)*p<=32||*p==127){result=-1;goto finish;}
         for(const char *p=path;*p;p++)if((u8)*p<=32||*p==127){result=-1;goto finish;}
-        if(strlen(path)+strlen(host)+200+(body?strlen(body):0)>=sizeof req){result=-1;goto finish;}
-        if(body)kfmt(req,sizeof req,"POST %s HTTP/1.1\r\nHost: %s\r\nConnection: close\r\nAccept-Encoding: identity\r\nUser-Agent: FLOPNIX\r\nContent-Type: application/x-www-form-urlencoded\r\nContent-Length: %u\r\n\r\n%s",path,host,strlen(body),body);
-        else kfmt(req,sizeof req,"GET %s HTTP/1.1\r\nHost: %s\r\nConnection: keep-alive\r\nAccept-Encoding: identity\r\nUser-Agent: FLOPNIX\r\n\r\n",path,host);
+        for(const char *p=ua;*p;p++)if((u8)*p<32||*p==127){result=-1;goto finish;}
+        if(!*ua||strlen(ua)>127||strlen(path)+strlen(host)+strlen(ua)+200+(body?strlen(body):0)>=sizeof req){result=-1;goto finish;}
+        if(body)kfmt(req,sizeof req,"POST %s HTTP/1.1\r\nHost: %s\r\nConnection: close\r\nAccept-Encoding: identity\r\nUser-Agent: %s\r\nContent-Type: application/x-www-form-urlencoded\r\nContent-Length: %u\r\n\r\n%s",path,host,ua,strlen(body),body);
+        else kfmt(req,sizeof req,"GET %s HTTP/1.1\r\nHost: %s\r\nConnection: keep-alive\r\nAccept-Encoding: identity\r\nUser-Agent: %s\r\n\r\n",path,host,ua);
     }else strlcpy(req,path,sizeof req);
     net_cancel = 0;
     api->esc_arm();
@@ -1017,7 +1019,7 @@ finish:
     api->kfree(hs_queue);hs_queue=0;tcp_busy=0;
     return result;
 }
-static int net_transfer(u32 ip,u16 port,const char *host,const char *path,int (*sink)(const u8 *,int,void *),void *ctx,u32 timeout,NetHttpInfo *info){api->network_lock();int result=net_transfer_locked(ip,port,host,path,sink,ctx,timeout,info,0);api->network_unlock();return result;}
+static int net_transfer(u32 ip,u16 port,const char *host,const char *path,int (*sink)(const u8 *,int,void *),void *ctx,u32 timeout,NetHttpInfo *info){api->network_lock();int result=net_transfer_locked(ip,port,host,path,sink,ctx,timeout,info,0,0);api->network_unlock();return result;}
 
 
 static int net_http_get_impl(u32 ip,u16 port,const char *host,const char *path,
@@ -1038,9 +1040,20 @@ static const NetHttpOps http_ops={NET_HTTP_ABI,net_http_get_info};
 static int net_http_post(u32 ip,u16 port,const char *host,const char *path,const char *body,int (*sink)(const u8 *,int,void *),void *ctx,u32 timeout,NetHttpInfo *info)
 {
     if(!host||!body||strlen(body)>4096)return -1;if(info)memset(info,0,sizeof *info);
-    api->network_lock();int result=net_transfer_locked(ip,port,host,path,sink,ctx,timeout,info,body);api->network_unlock();return result;
+    api->network_lock();int result=net_transfer_locked(ip,port,host,path,sink,ctx,timeout,info,body,0);api->network_unlock();return result;
 }
 static const NetHttpFormOps http_form_ops={NET_HTTP_FORM_ABI,net_http_post};
+static int net_agent_get(u32 ip,u16 port,const char *host,const char *path,const char *agent,int (*sink)(const u8 *,int,void *),void *ctx,u32 timeout,NetHttpInfo *info)
+{
+    if(info)memset(info,0,sizeof *info);if(!host)return -1;
+    api->network_lock();int result=net_transfer_locked(ip,port,host,path,sink,ctx,timeout,info,0,agent);api->network_unlock();return result;
+}
+static int net_agent_post(u32 ip,u16 port,const char *host,const char *path,const char *body,const char *agent,int (*sink)(const u8 *,int,void *),void *ctx,u32 timeout,NetHttpInfo *info)
+{
+    if(!host||!body||strlen(body)>4096)return -1;if(info)memset(info,0,sizeof *info);
+    api->network_lock();int result=net_transfer_locked(ip,port,host,path,sink,ctx,timeout,info,body,agent);api->network_unlock();return result;
+}
+static const NetHttpAgentOps http_agent_ops={NET_HTTP_AGENT_ABI,net_agent_get,net_agent_post};
 
 static u32 dhcp_xid, dhcp_serial, dhcp_started, dhcp_due;
 static int dhcp_state, dhcp_auto, dhcp_busy, dhcp_attempts;
@@ -1708,6 +1721,7 @@ int kext_entry(const Kapi *k)
     api->register_service("net.listen",&listen_ops);
     api->register_service("net.http",&http_ops);
     api->register_service("net.http.form",&http_form_ops);
+    api->register_service("net.http.agent",&http_agent_ops);
     api->register_service("net.http.diag",&http_diag_ops);
     api->register_service("net.update",&push_ops);
     api->register_service("net.debug",&dn_ops);

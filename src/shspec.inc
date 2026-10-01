@@ -21,7 +21,7 @@ static inline int sp_resolve(const char *cwd,const char *arg,int *drive,char *ou
     if(!sc_resolve(base,p,out+(d?1:0),cap-(d?1:0)))return 0;
     if(d)out[0]='/';
     int n=0;for(;out[n];n++)if(out[n]==':'||out[n]=='"'||(unsigned char)out[n]<32)return 0;
-    if(!d&&n>=24)return 0;*drive=d;return 1;
+    if(!d&&n>=FS_NAMELEN)return 0;*drive=d;return 1;
 }
 static inline int sp_insert(char *line,int len,int cap,const char *list)
 {

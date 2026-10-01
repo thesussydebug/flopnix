@@ -183,6 +183,38 @@ static u32 fat_next(u32 c)
     return v >= 0xFF8 ? 0x0FFFFFFF : v;
 }
 
+/* Clusters from c that sit back to back on disk, up to what bytes needs; *next is the link after them. */
+static u32 run_len(u32 c, u32 bytes, u32 *next)
+{
+    u32 bytespc = (u32)spc * 512, n = 1;
+    *next = 0x0FFFFFFF;
+    while (n * bytespc < bytes) {
+        u32 nx = fat_next(c + n - 1);
+        if (nx != c + n) { *next = nx; break; }
+        n++;
+    }
+    return n;
+}
+
+static int io_write(u32 lba, u32 n, const u8 *data)
+{
+    if (cache_lba - lba < n) cache_lba = 0xFFFFFFFF;
+    if (usb_write(lba, n, data) == 0) return 0;
+    cache_lba = 0xFFFFFFFF;
+    return -1;
+}
+
+static int put_sectors(u32 lba, const u8 *data, u32 len)
+{
+    u32 full = len / 512, tail = len % 512;
+    if (full && io_write(lba, full, data) != 0) return -1;
+    if (!tail) return 0;
+    u8 sec[512];
+    memset(sec, 0, 512);
+    memcpy(sec, data + full * 512, tail);
+    return io_write(lba + full, 1, sec);
+}
+
 static void fmt_name(const u8 *raw, char *out)
 {
     int o = 0;
@@ -349,20 +381,19 @@ int fat_read(const char *path, u8 *buf, u32 max)
     u32 visited = 0, anchor=clus, span=1, walked=0;
     while (got < want) {
         if (!valid_cluster(clus) || ++visited > total_clus-1) return -1;
-        for (u32 s = 0; s < spc && got < want; s++) {
-            u32 full=(want-got)/512;
-            if(full){
-                if(full>spc-s)full=spc-s;
-                if(usb_read(clus_lba(clus)+s,full,buf+got))return -1;
-                got+=full*512;s+=full-1;continue;
-            }
-            if (rd(clus_lba(clus) + s) != 0) return -1;
-            u32 n = want - got < 512 ? want - got : 512;
-            memcpy(buf + got, secbuf, n);
-            got += n;
+        u32 next, n = run_len(clus, want - got, &next);
+        visited += n - 1;
+        u32 len = n * spc * 512 < want - got ? n * spc * 512 : want - got;
+        u32 full = len / 512, tail = len % 512;
+        if (full && usb_read(clus_lba(clus), full, buf + got)) return -1;
+        got += full * 512;
+        if (tail) {
+            if (rd(clus_lba(clus) + full) != 0) return -1;
+            memcpy(buf + got, secbuf, tail);
+            got += tail;
         }
         if (got < want) {
-            clus = fat_next(clus);
+            clus = next;
             if (clus == anchor) return -1;
             if (++walked == span) { anchor=clus; span*=2; walked=0; }
         }
@@ -478,47 +509,79 @@ static void free_chain(u32 c)
     }
 }
 
+static u8 abuf[512];
+static u32 abuf_sect = 0xFFFFFFFF;
+
+static int abuf_flush(void)
+{
+    u32 sect = abuf_sect;
+    abuf_sect = 0xFFFFFFFF;
+    if (sect == 0xFFFFFFFF) return 0;
+    for (u8 f = 0; f < nfat; f++)
+        if (wr(fat_lba + (u32)f * fatsz + sect, abuf) != 0) return -1;
+    return 0;
+}
+
+// batch fat edits per sector, one write per copy instead of four per cluster
+static int abuf_set(u32 c, u32 v)
+{
+    u32 off = fattype == 16 ? c * 2 : c * 4, sect = off / 512, o = off % 512;
+    if (sect != abuf_sect) {
+        if (abuf_flush() != 0 || rd(fat_lba + sect) != 0) return -1;
+        memcpy(abuf, secbuf, 512);
+        abuf_sect = sect;
+    }
+    if (fattype == 32) v = (rd32(abuf + o) & 0xF0000000) | (v & 0x0FFFFFFF);
+    abuf[o] = v; abuf[o + 1] = v >> 8;
+    if (fattype == 32) { abuf[o + 2] = v >> 16; abuf[o + 3] = v >> 24; }
+    return 0;
+}
+
+static u32 alloc_next(u32 c, u32 start, int *wrapped)
+{
+    c++;
+    if (!valid_cluster(c)) {
+        if (*wrapped) return 0;
+        c = 2;
+        *wrapped = 1;
+    }
+    return *wrapped && c >= start ? 0 : c;
+}
+
 static u32 alloc_chain(int n)
 {
     if (n <= 0 || total_clus < 2) return 0;
-    u32 first = 0, prev = 0;
     u32 start = valid_cluster(next_free) ? next_free : 2;
-    u32 c = start;
-    int wrapped = 0;
-    while (n > 0) {
+    int wrapped = 0, seen = 0;
+    for (u32 c = start; c && seen < n; c = alloc_next(c, start, &wrapped)) {
         u32 v = fat_get(c);
-        if (v == 0xFFFFFFFF) {
-            if (first) free_chain(first);
-            return 0;
-        }
-        if (v == 0) {
-
-            if (fat_set(c, EOC) != 0) {
-                if (first) free_chain(first);
-                return 0;
-            }
-            if (freec_ok && freec_cache) freec_cache--;
-            if (!first) first = c;
-            else if (fat_set(prev, c) != 0) {
-                fat_set(c, 0);
-                if (freec_ok) freec_cache++;
-                free_chain(first);
-                return 0;
-            }
-            prev = c;
-            n--;
-        }
-        c++;
-        if (!valid_cluster(c)) {
-            if (wrapped) break;
-            c = 2;
-            wrapped = 1;
-        }
-        if (wrapped && c >= start) break;
+        if (v == 0xFFFFFFFF) return 0;
+        if (!v) seen++;
     }
-    if (n > 0) { if (first) free_chain(first); return 0; }
+    if (seen < n) return 0;
+
+    u32 first = 0, prev = 0;
+    wrapped = 0;
+    abuf_sect = 0xFFFFFFFF;
+    for (u32 c = start; c && n > 0; c = alloc_next(c, start, &wrapped)) {
+        u32 v = fat_get(c);
+        if (v == 0xFFFFFFFF) goto fail;
+        if (v) continue;
+        if ((prev && abuf_set(prev, c) != 0) || abuf_set(c, EOC) != 0) goto fail;
+        if (!first) first = c;
+        prev = c;
+        n--;
+        if (freec_ok && freec_cache) freec_cache--;
+    }
+    if (n > 0 || abuf_flush() != 0) goto fail;
     next_free = prev + 1;
     return first;
+
+fail:
+    abuf_sect = 0xFFFFFFFF;
+    freec_ok = 0;
+    if (first) free_chain(first);
+    return 0;
 }
 
 static void to_83(const char *name, u8 raw[11])
@@ -664,6 +727,64 @@ static void split_path(const char *path, char *dir, int dcap, const char **fname
     *fname = path + slash + 1;
 }
 
+static int long_needed(const char *f)
+{
+    const char *dot=0;for(const char *p=f;*p;p++)if(*p=='.')dot=p;
+    return strlen(f)<=13&&(dot?dot-f>8||strlen(dot+1)>3:strlen(f)>8);
+}
+
+static char short_char(char c)
+{
+    if(c>='a'&&c<='z')return c-32;
+    if((u8)c>126||c=='+'||c==','||c==';'||c=='='||c=='['||c==']')return '_';
+    return c;
+}
+
+static int alias_for(u32 dclus, int r16, const char *f, u8 raw[11])
+{
+    char b[6];int n=0;const char *dot=0;
+    for(const char *p=f;*p;p++)if(*p=='.')dot=p;
+    for(const char *p=f;*p&&p!=dot&&n<6;p++)if(*p!=' '&&*p!='.')b[n++]=short_char(*p);
+    if(!n)b[n++]='_';
+    memset(raw,' ',11);
+    if(dot)for(int j=0,k=1;dot[k]&&j<3;k++)if(dot[k]!=' ')raw[8+j++]=short_char(dot[k]);
+    for(int k=1;k<100;k++){
+        int d=k<10?1:2,m=n<7-d?n:7-d;
+        memset(raw,' ',8);memcpy(raw,b,m);raw[m]='~';
+        if(d==2)raw[m+1]='0'+k/10;
+        raw[m+d]='0'+k%10;
+        u32 l,c;int o;int r=dir_slot(dclus,r16,raw,&l,&o,&c,0);
+        if(r!=1)return r==2;
+    }
+    return 0;
+}
+
+static int put_long(u8 *dsec,u32 slot_lba,int slot_off,u32 long_lba,int long_off,u32 end_lba,const u8 raw[11],const char *fname)
+{
+    if(end_lba==slot_lba)dsec[slot_off+32]=0;
+    else if(end_lba){u8 tail[512];if(rd(end_lba))return -1;memcpy(tail,secbuf,512);tail[0]=0;if(wr(end_lba,tail))return -1;}
+    u8 entry[32]={0};static const u8 pos[]={1,3,5,7,9,14,16,18,20,22,24,28,30};
+    entry[0]=0x41;entry[11]=15;entry[13]=lfn_checksum(raw);
+    u32 len=strlen(fname);
+    for(u32 i=0;i<13;i++){u16 ch=i<len?(u8)fname[i]:i==len?0:0xffff;entry[pos[i]]=ch;entry[pos[i]+1]=ch>>8;}
+    if(long_lba==slot_lba)memcpy(dsec+long_off,entry,32);
+    else{
+        u8 lsec[512];if(rd(long_lba))return -1;memcpy(lsec,secbuf,512);memcpy(lsec+long_off,entry,32);
+        if(wr(long_lba,lsec))return -1;
+    }
+    return 0;
+}
+
+static void drop_long(u8 *dsec, int off, const u8 raw[11])
+{
+    u8 want = lfn_checksum(raw);
+    for (int e = off - 32; e >= 0; e -= 32) {
+        u8 *pd = dsec + e;
+        if (pd[11] != 0x0F || pd[13] != want) break;
+        pd[0] = 0xE5;
+    }
+}
+
 u8 fat_dbg_step;
 
 int fat_write(const char *path, const u8 *buf, u32 size)
@@ -711,15 +832,11 @@ int fat_write(const char *path, const u8 *buf, u32 size)
     u32 off = 0, c = first;
     while (off < size) {
         if (!valid_cluster(c)) goto fail;
-        for (u32 s = 0; s < spc && off < size; s++) {
-            u8 sec[512];
-            memset(sec, 0, 512);
-            u32 n = size - off < 512 ? size - off : 512;
-            memcpy(sec, buf + off, n);
-            if (wr(clus_lba(c) + s, sec) != 0) goto fail;
-            off += n;
-        }
-        if (off < size) c = fat_next(c);
+        u32 next, n = run_len(c, size - off, &next);
+        u32 len = n * bytespc < size - off ? n * bytespc : size - off;
+        if (put_sectors(clus_lba(c), buf + off, len) != 0) goto fail;
+        off += len;
+        c = next;
     }
     fat_dbg_step = 3;
 
@@ -738,19 +855,7 @@ int fat_write(const char *path, const u8 *buf, u32 size)
     de[20] = (first >> 16) & 0xFF; de[21] = (first >> 24) & 0xFF;
     de[28] = size; de[29] = size >> 8; de[30] = size >> 16; de[31] = size >> 24;
 
-    if(longname){
-        if(end_lba==slot_lba)dsec[slot_off+32]=0;
-        else if(end_lba){u8 tail[512];if(rd(end_lba))goto fail;memcpy(tail,secbuf,512);tail[0]=0;if(wr(end_lba,tail))goto fail;}
-        u8 entry[32]={0};static const u8 pos[]={1,3,5,7,9,14,16,18,20,22,24,28,30};
-        entry[0]=0x41;entry[11]=15;entry[13]=lfn_checksum(raw);
-        u32 len=strlen(fname);
-        for(u32 i=0;i<13;i++){u16 ch=i<len?(u8)fname[i]:i==len?0:0xffff;entry[pos[i]]=ch;entry[pos[i]+1]=ch>>8;}
-        if(long_lba==slot_lba)memcpy(dsec+long_off,entry,32);
-        else{
-            u8 lsec[512];if(rd(long_lba))goto fail;memcpy(lsec,secbuf,512);memcpy(lsec+long_off,entry,32);
-            if(wr(long_lba,lsec))goto fail;
-        }
-    }
+    if(longname&&put_long(dsec,slot_lba,slot_off,long_lba,long_off,end_lba,raw,fname))goto fail;
     if (wr(slot_lba, dsec) != 0) return -1;
 
     if (found == 1 && oldc >= 2) free_chain(oldc);
@@ -829,30 +934,26 @@ int fat_append(const char *path, const u8 *buf, u32 size)
     }
     while (done < size) {
         if (!valid_cluster(c)) return -1;
-        u32 inclus = pos % bytespc;
-        u32 s = inclus / 512, soff = inclus % 512;
-        for (; s < spc && done < size; s++) {
-            u32 lba = clus_lba(c) + s;
-            u32 full=soff?0:(size-done)/512;
-            if(full){
-                if(full>spc-s)full=spc-s;
-                cache_lba=0xFFFFFFFF;
-                if(usb_write(lba,full,buf+done))return -1;
-                done+=full*512;pos+=full*512;s+=full-1;continue;
-            }
+        u32 inclus = pos % bytespc, soff = pos % 512;
+        if (soff) {
+            u32 lba = clus_lba(c) + inclus / 512;
             u8 sec[512];
-            memset(sec, 0, 512);
-            if (soff) {
-                if (rd(lba) != 0) return -1;
-                memcpy(sec, secbuf, 512);
-            }
+            if (rd(lba) != 0) return -1;
+            memcpy(sec, secbuf, 512);
             u32 n = 512 - soff;
             if (n > size - done) n = size - done;
             memcpy(sec + soff, buf + done, n);
             if (wr(lba, sec) != 0) return -1;
-            done += n; pos += n; soff = 0;
+            done += n; pos += n;
+            if (done < size && pos % bytespc == 0) c = fat_next(c);
+            continue;
         }
-        if (done < size) c = fat_next(c);
+        u32 next, n = run_len(c, inclus + size - done, &next);
+        u32 len = n * bytespc - inclus;
+        if (len > size - done) len = size - done;
+        if (put_sectors(clus_lba(c) + inclus / 512, buf + done, len) != 0) return -1;
+        done += len; pos += len;
+        c = next;
     }
     if (done < size) return -1;
 
@@ -889,12 +990,19 @@ int fat_mkdir(const char *path)
     u32 dclus; int r16;
     if (!resolve_dir(dir, &dclus, &r16)) return -1;
     u8 raw[11];
-    to_83(fname, raw);
+    int longname = long_needed(fname);
+    if (longname) {
+        if (dir_scan(dclus, r16, 1, fname, 0, 0, 0, 0, 0, raw)) return -1;
+        if (!alias_for(dclus, r16, fname, raw)) return -2;
+    } else to_83(fname, raw);
 
     u32 slot_lba; int slot_off; u32 oldc = 0;
     int found = dir_slot(dclus, r16, raw, &slot_lba, &slot_off, &oldc, 0);
     if (found == 1) return -1;
     if (found == 0) return -2;
+    u32 long_lba = 0, end_lba = 0; int long_off = 0;
+    if (longname && dir_pair(dclus, r16, raw, &slot_lba, &slot_off, &long_lba, &long_off, &end_lba) != 2)
+        return -2;
 
     u32 first = alloc_chain(1);
     if (!first) return -2;
@@ -917,6 +1025,10 @@ int fat_mkdir(const char *path)
     u8 dsec[512];
     memcpy(dsec, secbuf, 512);
     dirent_dir(dsec + slot_off, raw, first, dt);
+    if (longname && put_long(dsec, slot_lba, slot_off, long_lba, long_off, end_lba, raw, fname)) {
+        free_chain(first);
+        return -1;
+    }
 
     if (wr(slot_lba, dsec) != 0) return -1;
     return 0;
@@ -944,19 +1056,40 @@ int fat_rename(const char *path, const char *newname)
     int taken = dir_scan(dclus, r16, 1, newname, 0, 0, 0, 0, 0, newraw);
     if (taken < 0) return -1;
     if (taken && strcasecmp(fname,newname)) return -1;
-    to_83(newname, newraw);
+    int longname = long_needed(newname);
+    if (longname) { if (!alias_for(dclus, r16, newname, newraw)) return -1; }
+    else to_83(newname, newraw);
 
     int same = 1;
     for (int i = 0; i < 11; i++) if (oldraw[i] != newraw[i]) { same = 0; break; }
-    if (same) return 0;
 
     u32 lba; int off; u32 c = 0;
-    if (dir_slot(dclus, r16, newraw, &lba, &off, &c, 0) == 1) return -1;
+    if (!same && dir_slot(dclus, r16, newraw, &lba, &off, &c, 0) == 1) return -1;
     if (dir_slot(dclus, r16, oldraw, &lba, &off, &c, 0) != 1) return -1;
-    if (rd(lba) != 0) return -1;
     u8 dsec[512];
+    if (!longname) {
+        if (rd(lba) != 0) return -1;
+        memcpy(dsec, secbuf, 512);
+        memcpy(dsec + off, newraw, 11);
+        drop_long(dsec, off, oldraw);
+        return wr(lba, dsec) == 0 ? 0 : -1;
+    }
+
+    u32 slot_lba, long_lba, end_lba; int slot_off, long_off;
+    if (dir_pair(dclus, r16, newraw, &slot_lba, &slot_off, &long_lba, &long_off, &end_lba) != 2) return -1;
+    if (rd(lba) != 0) return -1;
+    u8 ent[32];
+    memcpy(ent, secbuf + off, 32);
+    memcpy(ent, newraw, 11);
+    if (rd(slot_lba) != 0) return -1;
     memcpy(dsec, secbuf, 512);
-    memcpy(dsec + off, newraw, 11);
+    memcpy(dsec + slot_off, ent, 32);
+    if (put_long(dsec, slot_lba, slot_off, long_lba, long_off, end_lba, newraw, newname)) return -1;
+    if (wr(slot_lba, dsec) != 0) return -1;
+    if (rd(lba) != 0) return -1;
+    memcpy(dsec, secbuf, 512);
+    dsec[off] = 0xE5;
+    drop_long(dsec, off, oldraw);
     return wr(lba, dsec) == 0 ? 0 : -1;
 }
 
@@ -1045,13 +1178,7 @@ int fat_delete(const char *path)
     u8 dsec[512];
     memcpy(dsec, secbuf, 512);
     dsec[slot_off] = 0xE5;
-
-    u8 want = lfn_checksum(raw);
-    for (int e = slot_off - 32; e >= 0; e -= 32) {
-        u8 *pd = dsec + e;
-        if (pd[11] != 0x0F || pd[13] != want) break;
-        pd[0] = 0xE5;
-    }
+    drop_long(dsec, slot_off, raw);
 
     if (wr(slot_lba, dsec) != 0) return -1;
     if (oldc >= 2) free_chain(oldc);

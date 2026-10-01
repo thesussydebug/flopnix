@@ -211,6 +211,15 @@ int fat_delete(const char *path)
     FATFILE(use_fat(),fops->del(path),1)
 }
 
+int usb_read_locked(u32 lba, u32 count, u8 *buf)
+{
+    mtx_lock(&fat_mx); int r = usb_read(lba, count, buf); mtx_unlock(&fat_mx); return r;
+}
+int usb_write_locked(u32 lba, u32 count, const u8 *buf)
+{
+    mtx_lock(&fat_mx); int r = usb_write(lba, count, buf); mtx_unlock(&fat_mx); return r;
+}
+
 int fat_append(const char *path, const u8 *buf, u32 size)
 {
     FATFILE(use_fat()&&fops->abi==FAT_ABI,fops->append(path,buf,size),1)

@@ -15,6 +15,7 @@ static u8  map[FH_CYLS][FH_HEADS];
 static u32 n_ok, n_slow, n_retry, n_bad;
 static u32 scan_lba;
 static u8  scanning, done_once, aborted;
+static int timer_id = -1;
 static u32 seek_ms[8];
 static char msg[52];
 
@@ -94,7 +95,7 @@ static int fh_win_open(void)
 static void fh_tick(void *ctx)
 {
     (void)ctx;
-    if (!scanning) return;
+    if (!scanning) { api->timer_del(timer_id); timer_id = -1; return; }
 
     if (!fh_win_open()) { scanning = 0; aborted = 1; return; }
 
@@ -245,8 +246,10 @@ static void fh_mouse(int inst, int lx, int ly, int ev, int cw, int ch)
         } else {
             reset_scan();
             api->esc_arm();
-            scanning = 1;
-            msg[0] = 0;
+            if (timer_id < 0) timer_id = api->timer_add(5, fh_tick, 0);
+            scanning = timer_id >= 0;
+            if (scanning) msg[0] = 0;
+            else api->strlcpy(msg, "no free timer; close another app", sizeof msg);
         }
         api->win_redraw(my_type, 0);
     } else if (ui_hit(btn_seek(ch), lx, ly)) {
@@ -285,6 +288,5 @@ int kext_entry(const Kapi *k)
     };
     my_type = k->register_app(&d);
     if (my_type < 0) return 1;
-    k->timer_add(5, fh_tick, 0);
     return 0;
 }

@@ -169,7 +169,7 @@ static void snake_key(int inst, int k)
     case K_DOWN:  case 's': case 'S': turn_to(1); break;
     case K_LEFT:  case 'a': case 'A': turn_to(2); break;
     case K_RIGHT: case 'd': case 'D': turn_to(3); break;
-    case ' ': case 'p': case 'P':
+    case ' ': case 'p': case 'P': case K_PAUSE:
         if (started && !over) { paused = !paused; api->win_redraw(snake_type, 0); }
         break;
     }
@@ -344,6 +344,7 @@ int kext_entry(const Kapi *k)
     gfx = gdi_bind(k, 11);
     static const AppDesc d = {.live_draw=APP_LIVE_DRAW|APP_INDEPENDENT|APP_NO_CARET,
         .title = "Snake", .max_inst = 1, .in_menu = 1,
+        .category = APP_CAT_GAMES,
         .open = snake_open, .close = snake_close, .draw = snake_draw,
         .key = snake_key, .mouse = snake_mouse, .client_size = snake_csize,
     };

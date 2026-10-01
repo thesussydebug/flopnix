@@ -1,4 +1,5 @@
 /out/
+/build.num
 /built/
 /flopnix.img
 /flopnix.ku
@@ -23,3 +24,4 @@ __pycache__/
 /symbols/
 /captures/
 /*reports*.jsonl
+build.sh.bak

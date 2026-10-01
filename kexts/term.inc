@@ -334,6 +334,8 @@ static void t_open(int inst)
     t->rows = tdrows;
     t_print(t, OS_NAME " ");
     t_print(t, OS_VER);
+    t_print(t, " build ");
+    t_print(t, api->os_build_num);
     t_print(t, "\ntype 'help' for commands\n");
     if (api->boot_info(BI_BOOT_DIAG) & TBOOT_HANG) t_print(t, "boot: recovered from a BIOS hang - see 'dmesg'\n");
     t_print(t, "\n");

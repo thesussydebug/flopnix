@@ -118,7 +118,7 @@ static void tetris_key(int inst, int k)
     }
 
     if (paused) {
-        if (k == 'p' || k == 'P') paused = 0;
+        if (k == 'p' || k == 'P' || k == K_PAUSE) paused = 0;
         else if (k == 'r' || k == 'R') reset();
         api->win_redraw(my_type, 0);
         return;
@@ -141,7 +141,7 @@ static void tetris_key(int inst, int k)
         if (!started) { started = 1; break; }
         if (!paused) hard_drop();
         break;
-    case 'p': case 'P':
+    case 'p': case 'P': case K_PAUSE:
         if (started) paused = !paused;
         break;
     case 'r': case 'R':

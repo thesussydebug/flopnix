@@ -1,4 +1,5 @@
 #include "panicnet.h"
+#include "panicdump.inc"
 
 #define PM_PORT 7662
 #define PM_MAGIC 0x324d5046u
@@ -7,7 +8,9 @@ static const PanicCore *pm_core;
 static u32 pm_ip,pm_session,pm_ram_end,pm_hop,pm_extra[8];
 static u16 pm_port=PM_PORT;
 static u8 pm_mac[6];
-static int pm_mac_ready,pm_captured;
+static int pm_mac_ready,pm_captured,pm_screen;
+static u32 pm_half;
+static PdState pm_dump;
 static PanicCpu pm_cpu,pm_original;
 static u8 pm_stack[8192] __attribute__((aligned(16),used));
 static u32 pm_pd[1024] __attribute__((aligned(4096)));
@@ -239,18 +242,41 @@ static void pm_receive(u8 *fr,u16 len)
     PmHeader q;memcpy(&q,udp+8,sizeof q);u32 check=q.crc;q.crc=0;
     if(q.magic!=PM_MAGIC || q.session!=pm_session || q.status || !q.seq || pm_crc(&q,sizeof q)!=check)return;
     memcpy(pm_mac,fr+6,6);pm_mac_ready=1;
-    if(q.op==0 && !q.length && !q.address){pm_info(q.seq);return;}
+    if(q.op==0 && !q.length && !q.address){pd_note(&pm_dump,0,q.seq,0,0,1);pm_info(q.seq);return;}
     if(q.op==1 || q.op==6){
         int ok=q.op==1?pm_read(q.address,pm_reply.data,q.length):
             q.length && q.length<=PM_BYTES && pm_ram(q.address,q.length);
         if(ok && q.op==6)memcpy(pm_reply.data,(const void *)q.address,q.length);
+        pd_note(&pm_dump,q.op,q.seq,q.address,q.length,ok);
         pm_send(q.op,q.seq,q.address,ok?q.length:0,ok?0:1);return;
     }
+    if((q.op==7 || q.op==8) && !q.length){
+        pd_note(&pm_dump,q.op,q.seq,q.address,0,1);
+        pm_send(q.op,q.seq,q.address,0,0);return;
+    }
+    pd_note(&pm_dump,q.op,q.seq,q.address,q.length,1);
     if(q.op==2 && !q.length){pm_fault((FaultRec *)pm_reply.data,q.address);pm_send(q.op,q.seq,q.address,sizeof(FaultRec),0);return;}
     if(q.op==3){pm_blob(&q);return;}
     if(q.op==4 && !q.length){pm_region(&q);return;}
     if(q.op==5 && !q.length){pm_heap(&q);return;}
     pm_send(q.op,q.seq,q.address,0,2);
+}
+
+static u32 pm_tsc(void)
+{
+    u32 lo,hi;__asm__ volatile("rdtsc":"=a"(lo),"=d"(hi));(void)hi;
+    return lo;
+}
+
+static void pm_reset(void)
+{
+    u8 st;u32 n=100000;
+    do __asm__ volatile("inb $0x64,%0":"=a"(st));while((st&2) && --n);
+    __asm__ volatile("outb %%al,$0x64"::"a"(0xfe));
+    for(n=0;n<2000000;n++)__asm__ volatile("outb %%al,$0x80"::"a"(0));
+    static const struct __attribute__((packed)){u16 limit;u32 base;} none={0,0};
+    __asm__ volatile("lidt %0; int3"::"m"(none));
+    for(;;)__asm__ volatile("cli; hlt");
 }
 
 __attribute__((used,noreturn)) static void pm_run(void)
@@ -264,13 +290,20 @@ __attribute__((used,noreturn)) static void pm_run(void)
     pm_active=1;pm_snapshot();
     pm_hop=(pm_ip&net_mask)==(net_ip&net_mask)?pm_ip:net_gw;
     pm_mac_ready=arp_lookup(pm_hop,pm_mac);
-    u32 loops=0;
+    memset(&pm_dump,0,sizeof pm_dump);
+    u32 loops=0,blink=0,last=pm_tsc()-pm_half;
     for(;;){
         if(!(loops++&65535u)){
             if(pm_mac_ready)pm_info(0);
             else if(pm_hop){static const u8 zero[6]={0};arp_send(1,zero,pm_hop);}
         }
         nic_poll();__asm__ volatile("outb %%al,$0x80"::"a"(0));
+        u32 now=pm_tsc();
+        if(!pm_screen || now-last<pm_half)continue;
+        last=now;blink^=1;
+        char l[3][40];pd_lines(l,&pm_dump,pm_ip);
+        pm_core->show(l[0],l[1],l[2],pd_fill(&pm_dump),(u32)pd_lit(&pm_dump,(int)blink));
+        if(pd_restart(&pm_dump))pm_reset();
     }
 }
 
@@ -301,12 +334,13 @@ static void pm_capture(const u32 *frame)
 static void pm_enter(void (*describe)(FaultRec *))
 {
     (void)describe;
-    if(pm_ip && pm_captured && net_ip && net_up() && pm_ram_end)pm_jump();
+    if(pm_ip && pm_captured && net_ip && net_up() && pm_ram_end){pm_screen=1;pm_jump();}
 }
 
 static void pm_emergency(u32 vec,u32 err,u32 eip,u32 cr2,u32 reason,u32 original,u32 ov,u32 oe,u32 oi,u32 oa)
 {
     if(!pm_ip || !net_ip || !net_up() || !pm_ram_end)return;
+    pm_screen=0;
     if(!++pm_session)pm_session=1;
     pm_extra[0]=reason+1;pm_extra[1]=0;pm_extra[6]=original;
     pm_extra[2]=ov;pm_extra[3]=oe;pm_extra[4]=oi;pm_extra[5]=oa;
@@ -340,6 +374,7 @@ static int pm_enable(u32 ip,u16 port)
     if(fb>=0x100000u && fb<pm_ram_end)pm_ram_end=fb;
     for(u32 i=0;i<1024;i++)pm_pd[i]=(i<<22)|0x83u;
     pm_port=port;pm_session=api->rand();if(!pm_session)pm_session=1;
+    u32 mhz=api->cpu_mhz();pm_half=(mhz?mhz:300)*500000u;
     memset(pm_extra,0,sizeof pm_extra);memset(&pm_original,0,sizeof pm_original);pm_captured=0;pm_next_cache=0;
     pm_ip=ip;*pm_core->monitor=&pm_ops;
     fn_ip=ip;fn_port=(u16)(port>1?port-1:FAULTNET_PORT);fn_seen=fn_next=fn_sent=0;fn_left=0;fn_test=1;

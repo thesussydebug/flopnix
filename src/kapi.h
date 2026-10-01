@@ -12,11 +12,12 @@ typedef signed   int   i32;
 #endif
 
 /* New fields are appended to keep existing extension offsets stable. */
-#define KAPI_VERSION 39
+#define KAPI_VERSION 40
 
 #define KEXT_MAGIC 0x5458454B
 enum { KEXT_KIND_KERNEL = 1, KEXT_KIND_APP = 2 };
 #define KEXT_RECLAIMABLE 1
+#define KEXT_ON_DEMAND 2
 
 typedef struct { char name[24]; u32 base, size; int owner; } MemBuffer;
 typedef struct { char type[12]; u32 size, sequence; } ClipInfo;
@@ -42,8 +43,9 @@ enum {
     K_UP = 0x100, K_DOWN, K_LEFT, K_RIGHT,
     K_HOME, K_END, K_DEL, K_PGUP, K_PGDN, K_CLOSE_REQUEST
 };
+#define K_PAUSE 0x202
 
-enum { EV_PRESS, EV_DRAG, EV_RELEASE, EV_RPRESS };
+enum { EV_PRESS, EV_DRAG, EV_RELEASE, EV_RPRESS, EV_WHEELUP, EV_WHEELDN };
 
 #define MAXINST 3
 #define SB_W 13
@@ -429,7 +431,7 @@ typedef struct {
 
     void *(*kmalloc)(u32 n);  /* Allocates memory aligned to 8 bytes, or returns null. */
     void (*kfree)(void *p);
-    u32  (*heap_avail)(void);  /* Returns the number of free heap bytes. */
+    u32  (*heap_avail)(void);  /* Returns how many heap bytes can still be allocated, including room to grow. */
 
     int  (*timer_add)(u32 interval, void (*fn)(void *ctx), void *ctx);  /* Runs a callback in the main loop; returns its ID, or -1. */
     void (*timer_del)(int id);
@@ -640,4 +642,5 @@ typedef struct {
     void (*network_unlock)(void);
     void *(*krealloc)(void *ptr, u32 size);
     void (*fault_symbol)(u32 address, char *out, int cap);
+    const char *os_build_num;
 } Kapi;

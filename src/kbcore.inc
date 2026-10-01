@@ -35,6 +35,7 @@ typedef struct {
     u8 numlock;
 
     u8 alt_l, alt_r;
+    u8 e1;
 } KbSt;
 
 #define KB_NUMLOCK_DEFAULT 1
@@ -43,6 +44,8 @@ static inline int kb_feed(KbSt *st, u8 sc, int *track, int *down)
 {
     *track = 0;
     *down = 0;
+    if (st->e1) { st->e1--; return !st->e1 && sc == 0x45 ? K_PAUSE : 0; }
+    if (sc == 0xE1) { st->e1 = 2; return 0; }
     if (sc == 0xE0) { st->e0 = 1; return 0; }
     int rel = sc & 0x80;
     u8 code = sc & 0x7F;

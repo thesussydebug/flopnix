@@ -116,10 +116,15 @@ static void fl_draw(Win *w, int cx, int cy, int cw, int ch)
 
     const FaultRec *r = selrow >= 0 ? api->fault_get(selrow) : 0;
     if (r) {
-        if (r->vec == FAULT_VEC_HANG)
+        if (r->vec == FAULT_VEC_HANG && !r->eip)
             api->kfmt(b, sizeof b, "stopped responding, ended by user  in %s",
                       r->owner);
-        else {
+        else if (r->vec == FAULT_VEC_HANG) {
+            api->draw_text_clip(cx+8,cy+ch-56,r->location,C_NAVY,cw-16);
+            api->kfmt(b,sizeof b,"Instruction address: %08x",r->eip);
+            api->draw_text_clip(cx+8,cy+ch-36,b,C_NAVY,cw-16);
+            api->kfmt(b,sizeof b,"stopped with Pause in %s",r->owner);
+        } else {
             int chars=(cw-16)/8;
             if(chars<1)chars=1;
             if(chars>95)chars=95;
