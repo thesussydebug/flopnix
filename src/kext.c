@@ -820,6 +820,7 @@ static void drop_load_hooks(int owner)
         if (openers[i].owner == owner) { openers[i] = openers[--nopeners]; }
     for (int i = 0; i < NTIMERS; i++)
         if (timers[i].owner == owner) timers[i].fn = 0;
+    app_work_queued(owner, 1);
 }
 
 extern void fault_show_banner(const char *msg);
@@ -1054,7 +1055,7 @@ static int can_unload(int owner)
     for (int i=0;i<NSHUT;i++) if (shut_fns[i] && shut_owner[i]==owner) return -2;
     for (int i=0;i<NSERV;i++) if (servs[i].ops && servs[i].owner==owner) return -2;
     for (int i=0;i<NLISTEN;i++) if (listeners[i] && lis_owner[i]==owner) return -2;
-    if (owner==kext_owner_now() || thread_kext_busy(owner)) return -3;
+    if (owner==kext_owner_now() || thread_kext_busy(owner) || app_work_queued(owner, 0)) return -3;
     for (int i=0;i<MAXWIN;i++)
         if (wins[i].used && app_type_owner(wins[i].type)==owner) return -3;
     return 0;
@@ -1119,6 +1120,7 @@ static void kapi_outl(u16 p, u32 v) { outl(p, v); }
 static u32  kapi_inl(u16 p)         { return inl(p); }
 
 static void kapi_dirty(void)        { gui_invalidate(); }
+static int kapi_work_post(void (*fn)(void *), void *ctx) { return app_work_post(kext_owner_now(), fn, ctx); }
 static u32  kapi_mem_kb(void)       { return BOOTINFO->mem_kb; }
 
 static u32 kapi_boot_info(int what)
@@ -1495,4 +1497,5 @@ Kapi kapi = {
     .krealloc = krealloc,
     .fault_symbol = fault_symbol,
     .os_build_num = OS_BUILD_NUM,
+    .work_post = kapi_work_post,
 };

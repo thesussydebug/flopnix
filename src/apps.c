@@ -420,7 +420,7 @@ void app_draw(Win *w, int cx, int cy, int cw, int ch)
     cpu_context(cpu_prev);
 }
 
-enum { AE_KEY, AE_MOUSE, AE_WHEEL, AE_CALLBACK, AE_DROP };
+enum { AE_KEY, AE_MOUSE, AE_WHEEL, AE_CALLBACK, AE_DROP, AE_WORK };
 typedef struct {void *fn,*ctx;int value,is_path,present;char path[128];} AppCallback;
 typedef struct {char type[16],data[4096];int x,y;} AppDrop;
 typedef struct { u8 kind, win; int a, b, c, d, e; } AppEv;
@@ -540,13 +540,21 @@ static int aq_post(u8 kind,int win,int a,int b,int c,int d,int e)
     AppEv *q=&aq[aq_n++];q->kind=kind;q->win=win;q->a=a;q->b=b;q->c=c;q->d=d;q->e=e;
     irq_restore(f);return 1;
 }
+static int aq_who(const AppEv *e,int *type,int *owner,int *legacy)
+{
+    *type=-1;*owner=e->c;*legacy=0;
+    if(e->kind==AE_WORK)return 1;
+    Win *w=&wins[e->win];if(!w->used)return 0;
+    *type=w->type;*owner=reg_owner[w->type];*legacy=!(regs[w->type].live_draw&APP_INDEPENDENT);
+    return 1;
+}
 static int aq_find(void)
 {
     for(int i=0;i<aq_n;i++){
-        Win *w=&wins[aq[i].win];if(!w->used)continue;
-        int owner=reg_owner[w->type],legacy=!(regs[w->type].live_draw&APP_INDEPENDENT),blocked=0;
+        int type,owner,legacy,blocked=0;
+        if(!aq_who(&aq[i],&type,&owner,&legacy))continue;
         for(int t=0;t<THR_MAX;t++)if(jobs[t].active&&
-            (jobs[t].type==w->type||(owner>=0&&jobs[t].owner==owner)||(legacy&&jobs[t].legacy)))blocked=1;
+            aq_conflict(type,owner,legacy,jobs[t].type,jobs[t].owner,jobs[t].legacy))blocked=1;
         if(!blocked&&!kext_timer_busy(owner)&&!(legacy&&buffer_mutex.held))return i;
     }
     return -1;
@@ -557,12 +565,28 @@ static int aq_take(AppEv *ev)
     u32 f=irq_save();
     int i=aq_find();
     if(i<0){irq_restore(f);return 0;}
-    Win *w=&wins[aq[i].win];
-    int owner=reg_owner[w->type],legacy=!(regs[w->type].live_draw&APP_INDEPENDENT);
+    int type,owner,legacy;
+    aq_who(&aq[i],&type,&owner,&legacy);
     *ev=aq[i];memmove(aq+i,aq+i+1,(--aq_n-i)*sizeof *aq);
-    int t=thr_self;jobs[t].active=1;jobs[t].win=ev->win;jobs[t].type=w->type;jobs[t].owner=owner;
+    int t=thr_self;jobs[t].active=1;jobs[t].win=type<0?-1:ev->win;jobs[t].type=type;jobs[t].owner=owner;
     jobs[t].legacy=legacy;jobs[t].since=ticks;jobs[t].prog=0;jobs[t].io=0;jobs[t].kill=jobs[t].cancel=0;
     if(legacy)app_buffer_lock();irq_restore(f);return 1;
+}
+
+int app_work_post(int owner,void (*fn)(void *),void *ctx)
+{
+    if(!fn||owner<0)return -1;
+    u32 f=irq_save();
+    for(int i=0;i<aq_n;i++)if(aq[i].kind==AE_WORK&&aq[i].a==(int)fn&&aq[i].b==(int)ctx&&aq[i].c==owner){irq_restore(f);return 0;}
+    if(aq_n>=AQ_SIZE*2){aq_dropped++;irq_restore(f);return -1;}
+    AppEv *q=&aq[aq_n++];q->kind=AE_WORK;q->win=AQ_WORK;q->a=(int)fn;q->b=(int)ctx;q->c=owner;
+    irq_restore(f);return 0;
+}
+int app_work_queued(int owner,int drop)
+{
+    u32 f=irq_save();int n=0;
+    for(int i=0;i<aq_n;)if(aq[i].kind==AE_WORK&&aq[i].c==owner){n++;if(!drop){i++;continue;}memmove(aq+i,aq+i+1,(--aq_n-i)*sizeof *aq);}else i++;
+    irq_restore(f);return n;
 }
 
 int app_owner_busy(int owner)
@@ -626,24 +650,37 @@ static void app_job_now(Win *w,AppEv *ev)
     }
     kfree((void *)ev->a);cpu_context(prev);
 }
+static void app_work_now(AppEv *ev)
+{
+    int prev=cpu_context(app_type_owned(ev->c)),pd=preempt_depth();kext_enter(ev->c);
+    FAULT_GUARD(((void (*)(void *))ev->a)((void *)ev->b),({
+        worker_unwind(pd);
+        char msg[96];const FaultRec *fault=fault_get(0);
+        kfmt(msg,sizeof msg,"P%u %s - work stopped",fault_vec,fault?fault->location:"unknown");
+        klog(msg);
+        if(!fault_fallback[thr_self])fault_show_banner(msg);
+    }));
+    cpu_context(prev);
+}
 void app_worker(void)
 {
     for(;;){
         AppEv ev;
         if(!aq_take(&ev)){thr_yield();continue;}
-        Win *w=&wins[ev.win];
-        if(ev.kind==AE_KEY)app_key_now(w,ev.a);
+        Win *w=ev.kind==AE_WORK?0:&wins[ev.win];
+        if(!w)app_work_now(&ev);
+        else if(ev.kind==AE_KEY)app_key_now(w,ev.a);
         else if(ev.kind==AE_WHEEL)app_wheel_now(w,ev.a);
         else if(ev.kind==AE_MOUSE)app_mouse_now(w,ev.a,ev.b,ev.c,ev.d,ev.e);
         else app_job_now(w,&ev);
-        debug_event(DBG_SLOW,regs[jobs[thr_self].type].title,
+        debug_event(DBG_SLOW,w?regs[jobs[thr_self].type].title:"work",
             ticks-jobs[thr_self].since,ev.kind,ev.win);
         kext_enter(-1);
         app_local_progress(0,0,-1);
         if(jobs[thr_self].legacy)app_buffer_unlock();
         jobs[thr_self].active=0;
         win_close_flush();
-        if(w->used)win_redraw(w->type,w->inst);
+        if(w&&w->used)win_redraw(w->type,w->inst);
     }
 }
 

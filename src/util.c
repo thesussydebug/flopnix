@@ -200,43 +200,39 @@ void *memcpy(void *d, const void *s, u32 n)
     if (mmx_ok && !in_irq && n >= MMX_MIN) {
         while (((u32)dd & 7) && n) { *dd++ = *ss++; n--; }
         u32 quads = n >> 3;
-        if (quads) {
 
-            __asm__ volatile(
-                "movl %%ecx, %%eax\n\t"
-                "shrl $3, %%eax\n\t"
-                "jz 2f\n"
-                "1:\n\t"
-                "movq   (%1), %%mm0\n\t"  "movq  8(%1), %%mm1\n\t"
-                "movq 16(%1), %%mm2\n\t"  "movq 24(%1), %%mm3\n\t"
-                "movq 32(%1), %%mm4\n\t"  "movq 40(%1), %%mm5\n\t"
-                "movq 48(%1), %%mm6\n\t"  "movq 56(%1), %%mm7\n\t"
-                "movq %%mm0,   (%0)\n\t"  "movq %%mm1,  8(%0)\n\t"
-                "movq %%mm2, 16(%0)\n\t"  "movq %%mm3, 24(%0)\n\t"
-                "movq %%mm4, 32(%0)\n\t"  "movq %%mm5, 40(%0)\n\t"
-                "movq %%mm6, 48(%0)\n\t"  "movq %%mm7, 56(%0)\n\t"
-                "addl $64, %1\n\t"
-                "addl $64, %0\n\t"
-                "decl %%eax\n\t"
-                "jnz 1b\n"
-                "2:\n\t"
-                "movl %%ecx, %%eax\n\t"
-                "andl $7, %%eax\n\t"
-                "jz 3f\n"
-                "4:\n\t"
-                "movq (%1), %%mm0\n\t"
-                "movq %%mm0, (%0)\n\t"
-                "addl $8, %1\n\t"
-                "addl $8, %0\n\t"
-                "decl %%eax\n\t"
-                "jnz 4b\n"
-                "3:\n\t"
-                "emms\n\t"
-                : "+r"(dd), "+r"(ss)
-                : "c"(quads)
-                : "eax", "memory");
-            n &= 7;
-        }
+        __asm__ volatile(
+            "subl $8, %2\n\t"
+            "jb 2f\n"
+            "1:\n\t"
+            "movq   (%1), %%mm0\n\t"  "movq  8(%1), %%mm1\n\t"
+            "movq 16(%1), %%mm2\n\t"  "movq 24(%1), %%mm3\n\t"
+            "movq 32(%1), %%mm4\n\t"  "movq 40(%1), %%mm5\n\t"
+            "movq 48(%1), %%mm6\n\t"  "movq 56(%1), %%mm7\n\t"
+            "movq %%mm0,   (%0)\n\t"  "movq %%mm1,  8(%0)\n\t"
+            "movq %%mm2, 16(%0)\n\t"  "movq %%mm3, 24(%0)\n\t"
+            "movq %%mm4, 32(%0)\n\t"  "movq %%mm5, 40(%0)\n\t"
+            "movq %%mm6, 48(%0)\n\t"  "movq %%mm7, 56(%0)\n\t"
+            "addl $64, %1\n\t"
+            "addl $64, %0\n\t"
+            "subl $8, %2\n\t"
+            "jae 1b\n"
+            "2:\n\t"
+            "andl $7, %2\n\t"
+            "jz 3f\n"
+            "4:\n\t"
+            "movq (%1), %%mm0\n\t"
+            "movq %%mm0, (%0)\n\t"
+            "addl $8, %1\n\t"
+            "addl $8, %0\n\t"
+            "decl %2\n\t"
+            "jnz 4b\n"
+            "3:\n\t"
+            "emms\n\t"
+            : "+r"(dd), "+r"(ss), "+r"(quads)
+            :
+            : "memory");
+        n &= 7;
     }
     while (n >= 4) { *(u32 *)dd = *(const u32 *)ss; dd += 4; ss += 4; n -= 4; }
     while (n--) *dd++ = *ss++;
@@ -262,38 +258,34 @@ void *memset(void *d, int c, u32 n)
     if (mmx_ok && !in_irq && n >= MMX_MIN) {
         while (((u32)dd & 7) && n) { *dd++ = (u8)c; n--; }
         u32 quads = n >> 3;
-        if (quads) {
 
-            __asm__ volatile(
-                "movd %2, %%mm0\n\t"
-                "punpckldq %%mm0, %%mm0\n\t"
-                "movl %%ecx, %%eax\n\t"
-                "shrl $3, %%eax\n\t"
-                "jz 2f\n"
-                "1:\n\t"
-                "movq %%mm0,   (%0)\n\t"  "movq %%mm0,  8(%0)\n\t"
-                "movq %%mm0, 16(%0)\n\t"  "movq %%mm0, 24(%0)\n\t"
-                "movq %%mm0, 32(%0)\n\t"  "movq %%mm0, 40(%0)\n\t"
-                "movq %%mm0, 48(%0)\n\t"  "movq %%mm0, 56(%0)\n\t"
-                "addl $64, %0\n\t"
-                "decl %%eax\n\t"
-                "jnz 1b\n"
-                "2:\n\t"
-                "movl %%ecx, %%eax\n\t"
-                "andl $7, %%eax\n\t"
-                "jz 3f\n"
-                "4:\n\t"
-                "movq %%mm0, (%0)\n\t"
-                "addl $8, %0\n\t"
-                "decl %%eax\n\t"
-                "jnz 4b\n"
-                "3:\n\t"
-                "emms\n\t"
-                : "+r"(dd)
-                : "c"(quads), "r"(v)
-                : "eax", "memory");
-            n &= 7;
-        }
+        __asm__ volatile(
+            "movd %2, %%mm0\n\t"
+            "punpckldq %%mm0, %%mm0\n\t"
+            "subl $8, %1\n\t"
+            "jb 2f\n"
+            "1:\n\t"
+            "movq %%mm0,   (%0)\n\t"  "movq %%mm0,  8(%0)\n\t"
+            "movq %%mm0, 16(%0)\n\t"  "movq %%mm0, 24(%0)\n\t"
+            "movq %%mm0, 32(%0)\n\t"  "movq %%mm0, 40(%0)\n\t"
+            "movq %%mm0, 48(%0)\n\t"  "movq %%mm0, 56(%0)\n\t"
+            "addl $64, %0\n\t"
+            "subl $8, %1\n\t"
+            "jae 1b\n"
+            "2:\n\t"
+            "andl $7, %1\n\t"
+            "jz 3f\n"
+            "4:\n\t"
+            "movq %%mm0, (%0)\n\t"
+            "addl $8, %0\n\t"
+            "decl %1\n\t"
+            "jnz 4b\n"
+            "3:\n\t"
+            "emms\n\t"
+            : "+r"(dd), "+r"(quads)
+            : "r"(v)
+            : "memory");
+        n &= 7;
     }
     while (n >= 4) { *(u32 *)dd = v; dd += 4; n -= 4; }
     while (n--) *dd++ = (u8)c;

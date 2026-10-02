@@ -125,10 +125,15 @@ static void nl_load(void)
     }
 }
 
-static int nl_save(void)
+typedef struct {
+    int listn, nfiles;
+    char list[NMAX * 64];
+    struct { char file[NL_NAMEMAX]; int len, slot; char text[NOTECAP]; } f[NMAX];
+} NoteSave;
+
+static int nl_prepare(NoteSave *s)
 {
     if(storage_failed||!note_dir())return 0;
-    char buf[NMAX * 64];
     int o = 0;
     for (int i = 0; i < NMAX; i++) {
         if (!notes[i].used) continue;
@@ -137,18 +142,43 @@ static int nl_save(void)
         r.w = notes[i].w; r.h = notes[i].h;
         r.open = notes[i].open;
         api->strlcpy(r.file, notes[i].file, sizeof r.file);
-        int n = nl_fmt(buf + o, (int)sizeof buf - o - 8, &r);
+        int n = nl_fmt(s->list + o, (int)sizeof s->list - o - 8, &r);
         if (!n) return 0;
         o += n;
-        buf[o++] = '\n';
+        s->list[o++] = '\n';
     }
+    s->nfiles = 0;
     for (int i = 0; i < NMAX; i++)
         if (notes[i].used && notes[i].file[0] && notes[i].changed && !notes[i].read_failed) {
-            if(api->fs_write(notes[i].file, (const u8 *)notes[i].text, notes[i].len)!=0)return 0;
-            notes[i].changed=0;
+            int k = s->nfiles++;
+            api->strlcpy(s->f[k].file, notes[i].file, sizeof s->f[k].file);
+            s->f[k].len = notes[i].len; s->f[k].slot = i;
+            api->memcpy(s->f[k].text, notes[i].text, (u32)notes[i].len);
         }
-    api->memcpy(buf+o,"\n!end\n",6);o+=6;
-    return api->fs_write(NOTES_LST, (const u8 *)buf, o)==0;
+    api->memcpy(s->list+o,"\n!end\n",6);s->listn=o+6;
+    return 1;
+}
+
+static int nl_write(const NoteSave *s)
+{
+    for (int k = 0; k < s->nfiles; k++)
+        if(api->fs_write(s->f[k].file, (const u8 *)s->f[k].text, s->f[k].len)!=0)return 0;
+    return api->fs_write(NOTES_LST, (const u8 *)s->list, s->listn)==0;
+}
+
+static void nl_saved(const NoteSave *s, int changed)
+{
+    for (int k = 0; k < s->nfiles; k++) notes[s->f[k].slot].changed = (u8)changed;
+}
+
+static int nl_save(void)
+{
+    NoteSave *s = api->kmalloc(sizeof *s);
+    if (!s) return 0;
+    int ok = nl_prepare(s) && nl_write(s);
+    if (ok) nl_saved(s, 0);
+    api->kfree(s);
+    return ok;
 }
 
 static void touch(void)
@@ -163,12 +193,32 @@ static void touch_now(void)
     dirty_t = 0;
 }
 
+static u8 saving, save_failed;
+
+static void notes_work(void *ctx)
+{
+    NoteSave *s = ctx;
+    if (!nl_write(s)) save_failed = 1;
+    api->kfree(s);
+    saving = 0;
+}
+
 static void notes_tick(void *ctx)
 {
     (void)ctx;
+    if (saving) return;
+    if (save_failed) {
+        save_failed = 0;
+        for (int i = 0; i < NMAX; i++) notes[i].changed = 1;
+        touch();
+    }
     if (!dirty) return;
     if (dirty_t && (u32)(*api->ticks - dirty_t) < FLUSH_TICKS) return;
-    if(nl_save())dirty=0;else dirty_t=*api->ticks;
+    NoteSave *s = api->kmalloc(sizeof *s);
+    if (!s || !nl_prepare(s)) { if (s) api->kfree(s); dirty_t = *api->ticks; return; }
+    nl_saved(s, 0);
+    dirty = 0; saving = 1;
+    if (api->work_post(notes_work, s) != 0) notes_work(s);
 }
 
 static int is_bound(int s)

@@ -79,6 +79,13 @@ __attribute__((noreturn)) void panic_test(int emergency)
     __builtin_unreachable();
 }
 
+static u32 fault_caller(const u32 *frame, u32 eip)
+{
+    u32 bp = frame[2];
+    if (eip < 0x100000u && bp - 0x8000u < 0x168000u) return ((const u32 *)bp)[1];
+    return eip;
+}
+
 void fault_handle(const u32 *frame)
 {
     u32 vec=frame[8],err=frame[9],eip=frame[10];
@@ -103,7 +110,7 @@ void fault_handle(const u32 *frame)
         fault_eip = eip;
         fault_record(vec, err, eip);
         fault_recoveries++;
-        fault_fallback[ft] = (u8)kext_graphics_fault(vec, eip, fault_cr2);
+        fault_fallback[ft] = (u8)kext_graphics_fault(vec, fault_caller(frame, eip), fault_cr2);
         busy_end();
 
         in_irq = 0;

@@ -43,8 +43,6 @@ static void lst_sync(void) {
     if (dk_commit(&s, name_dir)) pick_stale = 1;
     nnames = s.n;
 }
-static void lst_add(const char *nm) { (void)nm; lst_touch(); }
-static void lst_del(const char *nm) { (void)nm; lst_touch(); }
 
 static void lst_load(void) {
     loaded = 1;
@@ -117,6 +115,9 @@ static void say(const char *s)
     desk_msg_t = *api->ticks;
     api->gui_dirty();
 }
+
+static char work_msg[64];
+static void wsay(const char *s) { api->strlcpy(work_msg, s, sizeof work_msg); }
 
 enum { DQ_OPEN, DQ_TRANSFER, DQ_PASTE, DQ_RENAME, DQ_DELETE, DQ_NEW, DQ_INSTALL };
 #define DQ_MAX 8
@@ -510,16 +511,16 @@ static void icon_open_now(const char *name)
     char nm[FS_NAMELEN];
     api->strlcpy(nm, name, sizeof nm);
     if(desk_isdir(nm)){
-        if(api->kext_load("sys/files.kx")){say("Files could not be loaded");return;}
+        if(api->kext_load("sys/files.kx")){wsay("Files could not be loaded");return;}
         api->broadcast("folder.open",nm);return;
     }
     api->buffer_lock();
     api->busy_set("Opening", nm, -1);
     FileData file;
     int r=fo_load(api,0,nm,0,&file,0);
-    if(r)say(fo_error(r));
+    if(r)wsay(fo_error(r));
     else if (api->open_with(nm, 0, file.data, (int)file.size) != 0)
-        say("no app for this file");
+        wsay("no app for this file");
     fo_release(api,&file);
     api->busy_end();
     api->buffer_unlock();
@@ -532,9 +533,8 @@ static FtBatch transfers;
 static char desk_specs[FT_LIST];
 static void desktop_transfer_now(const char *list,int mode,const char *folder)
 {
-    char dest[FS_NAMELEN],msg[64];api->strlcpy(dest,folder,sizeof dest);
-    ft_batch(api,list,0,dest,mode,&transfers);ft_message(api,&transfers,msg,sizeof msg);
-    say(msg);lst_touch();ft_report(api,&transfers);
+    char dest[FS_NAMELEN];api->strlcpy(dest,folder,sizeof dest);
+    ft_batch(api,list,0,dest,mode,&transfers);ft_message(api,&transfers,work_msg,sizeof work_msg);
 }
 static void desktop_transfer(const char *list,int mode,const char *folder)
 {desk_enqueue(DQ_TRANSFER,folder,0,list,mode,0);}
@@ -713,31 +713,23 @@ static void icon_pick(int idx, void *ctx)
     api->gui_dirty();
 }
 
-static void desk_pick_now(int idx, void *ctx)
+static void desk_new_work(DeskJob *job)
 {
-    (void)ctx;
-    if (idx == 0) {
-        desktop_paste("desktop");
-    } else if (idx == 1) {
-        char nm[FS_NAMELEN];
+    char nm[FS_NAMELEN];
+    if (job->mode == 1) {
         for (int i = 0; i < FS_NFILES; i++) {
             if (i) api->kfmt(nm, sizeof nm, "desktop/new%d.txt", i + 1);
             else   api->strlcpy(nm, "desktop/new.txt", sizeof nm);
-            if (!api->fs_exists(nm)) {
-                if (api->fs_write(nm, (const u8 *)"\n", 1) == 0)
-                    lst_add(nm);
-                break;
-            }
+            if (!api->fs_exists(nm)) { api->fs_write(nm, (const u8 *)"\n", 1); break; }
         }
-    } else if(idx==2){
-        char nm[FS_NAMELEN];for(int n=1;n<=FS_NFILES;n++){
+    } else if(job->mode==2){
+        for(int n=1;n<=FS_NFILES;n++){
             char leaf[16];api->kfmt(leaf,sizeof leaf,fs_new_folder(n),n);api->kfmt(nm,sizeof nm,"desktop/%s",leaf);
             if(!api->fs_exists(nm)&&!api->fs_dir_count(nm)){
-                if(!api->fs_mkdir(nm)){lst_touch();dsel_single(nm);api->strlcpy(sel,nm,sizeof sel);ren_begin(nm);}else say("Could not create folder");break;
+                if(!api->fs_mkdir(nm))api->strlcpy(job->target,nm,sizeof job->target);else wsay("Could not create folder");break;
             }
         }
-    } else if (idx == 3) lst_load();
-    api->gui_dirty();
+    }
 }
 
 static void desk_pick(int idx,void *ctx)
@@ -866,56 +858,100 @@ static void d_drop(int x, int y, const char *type, const char *data)
     desktop_transfer(data,FT_DRAG,folder);
 }
 
-static void desk_rename(const DeskJob *job)
+static void desk_rename_work(DeskJob *job)
 {
     const char *err=0;
     if(api->fs_exists(job->target))err="That name is already used";
     else if(desk_isdir(job->name)?api->fs_rename_dir(job->name,job->target):api->fs_rename(job->name,job->target))
         err="Could not rename: check contents and name length";
-    if(err){
+    if(err)wsay(err);
+    job->mode=err!=0;
+}
+static void desk_rename_done(const DeskJob *job)
+{
+    if(job->mode){
         if(!ren_name[0]&&ren_serial==job->serial){
             ren_begin(job->name);api->strlcpy(ren_buf,desk_leaf(job->target),sizeof ren_buf);
             ren_len=ren_car=api->strlen(ren_buf);ren_all=1;
         }
-        say(err);return;
+        return;
     }
     if(!api->strcmp(sel,job->name))api->strlcpy(sel,job->target,sizeof sel);
     for(int i=0;i<ndsel;i++)if(!api->strcmp(dsel[i],job->name))api->strlcpy(dsel[i],job->target,FS_NAMELEN);
-    pick_stale=1;lst_touch();api->gui_dirty();
+    pick_stale=1;
 }
-static void desk_delete(char *list)
+static void desk_delete_work(char *list)
 {
     for(char *p=list;p&&*p;){
         char *end=p;while(*end&&*end!='\n')end++;char more=*end;*end=0;
         int n=0,dir=api->fs_dir_count(p)>0,r=dir?dt_floppy(p,&n):api->fs_delete(p);
-        if(r==DT_LOADED)say("Folder has loaded extensions; delete them one by one");
-        else if(r)say(dir?"Could not delete the whole folder; try again":"Could not delete file; try again");
-        else{lst_del(p);dsel_remove(p);if(!api->strcmp(sel,p))sel[0]=0;}
+        if(r==DT_LOADED)wsay("Folder has loaded extensions; delete them one by one");
+        else if(r)wsay(dir?"Could not delete the whole folder; try again":"Could not delete file; try again");
+        *end=more;if(!more)break;p=end+1;
+    }
+}
+static void desk_delete_done(char *list)
+{
+    for(char *p=list;p&&*p;){
+        char *end=p;while(*end&&*end!='\n')end++;char more=*end;*end=0;
+        if(!api->fs_exists(p)&&!desk_isdir(p)){dsel_remove(p);if(!api->strcmp(sel,p))sel[0]=0;}
         if(!more)break;p=end+1;
     }
-    lst_touch();api->gui_dirty();
 }
+
+static DeskJob cur;
+static u8 cur_state;
+enum { CUR_NONE, CUR_WORKING, CUR_DONE };
+
+static void desk_work(void *ctx)
+{
+    (void)ctx;
+    switch(cur.kind){
+    case DQ_OPEN:icon_open_now(cur.name);break;
+    case DQ_TRANSFER:case DQ_PASTE:desktop_transfer_now(cur.data,cur.mode,cur.name);break;
+    case DQ_RENAME:desk_rename_work(&cur);break;
+    case DQ_DELETE:desk_delete_work(cur.data);break;
+    case DQ_NEW:desk_new_work(&cur);break;
+    case DQ_INSTALL:{char err[48];if(api->kernel_update(cur.name,err,sizeof err))wsay(err);break;}
+    }
+    cur_state=CUR_DONE;
+}
+
+static void desk_finish(void)
+{
+    switch(cur.kind){
+    case DQ_TRANSFER:case DQ_PASTE:
+        ft_report(api,&transfers);
+        if(cur.kind==DQ_PASTE&&cur.mode==FT_MOVE)ft_clip_finish(api,cur.data,&transfers);
+        break;
+    case DQ_RENAME:desk_rename_done(&cur);break;
+    case DQ_DELETE:desk_delete_done(cur.data);break;
+    case DQ_NEW:
+        if(cur.mode==2&&cur.target[0]){dsel_single(cur.target);api->strlcpy(sel,cur.target,sizeof sel);ren_begin(cur.target);}
+        if(cur.mode==3)lst_load();
+        break;
+    }
+    if(work_msg[0])say(work_msg);
+    if(cur.kind!=DQ_OPEN&&cur.kind!=DQ_INSTALL)lst_touch();
+    api->gui_dirty();
+    api->kfree(cur.data);
+    u32 f=desk_lock();desk_active=0;cur_state=CUR_NONE;desk_unlock(f);
+}
+
 static void desk_poll(void *ctx)
 {
     static u8 blink;
     if(ren_name[0]&&*api->gui_blink!=blink){blink=*api->gui_blink;api->gui_dirty();}
-    (void)ctx;u32 f=desk_lock();
-    if(desk_active||!desk_qcount){desk_unlock(f);return;}
-    DeskJob job;api->memcpy(&job,&desk_queue[desk_qhead],sizeof job);desk_qhead=(desk_qhead+1)%DQ_MAX;desk_qcount--;desk_active=1;
+    (void)ctx;
+    if(cur_state==CUR_WORKING)return;
+    if(cur_state==CUR_DONE)desk_finish();
+    u32 f=desk_lock();
+    if(!desk_qcount){desk_unlock(f);return;}
+    api->memcpy(&cur,&desk_queue[desk_qhead],sizeof cur);desk_qhead=(desk_qhead+1)%DQ_MAX;desk_qcount--;desk_active=1;
     desk_unlock(f);
-    switch(job.kind){
-    case DQ_OPEN:icon_open_now(job.name);break;
-    case DQ_TRANSFER:case DQ_PASTE:
-        desktop_transfer_now(job.data,job.mode,job.name);
-        if(job.kind==DQ_PASTE&&job.mode==FT_MOVE)ft_clip_finish(api,job.data,&transfers);
-        break;
-    case DQ_RENAME:desk_rename(&job);break;
-    case DQ_DELETE:desk_delete(job.data);break;
-    case DQ_NEW:desk_pick_now(job.mode,0);break;
-    case DQ_INSTALL:{char err[48];if(api->kernel_update(job.name,err,sizeof err))say(err);break;}
-    }
-    api->kfree(job.data);f=desk_lock();desk_active=0;
-    desk_unlock(f);
+    work_msg[0]=0;cur_state=CUR_WORKING;
+    
+    if(cur.kind==DQ_INSTALL||api->work_post(desk_work,0)!=0){desk_work(0);desk_finish();}
 }
 
 const KextHeader kext_header = {

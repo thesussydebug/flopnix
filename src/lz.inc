@@ -10,10 +10,10 @@
 
 static inline u16 lz_csum(const u8 *p, u32 n)
 {
-    u16 s = 0;
+    u32 s = 0;
     for (u32 i = 0; i < n; i++)
-        s = (u16)(((s << 1) | (s >> 15)) + p[i]);
-    return s;
+        s = s + s + ((s >> 15) & 1) + p[i];
+    return (u16)s;
 }
 
 static inline void lz_put32(u8 *d, u32 v)

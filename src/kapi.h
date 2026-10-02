@@ -11,8 +11,8 @@ typedef signed   short i16;
 typedef signed   int   i32;
 #endif
 
-/* New fields are appended to keep existing extension offsets stable. */
-#define KAPI_VERSION 40
+
+#define KAPI_VERSION 41
 
 #define KEXT_MAGIC 0x5458454B
 enum { KEXT_KIND_KERNEL = 1, KEXT_KIND_APP = 2 };
@@ -70,7 +70,7 @@ enum {
     DS_OPS, DS_RETRIED, DS_FAILED,
     DS_LAST_MS, DS_WORST_MS, DS_LAST_TRIES, DS_LAST_LBA,
     DS_ST0, DS_ST1, DS_ST2,
-    DS_NAMELEN  /* longest A: path the mounted floppy takes, plus the NUL */
+    DS_NAMELEN
 };
 
 enum {
@@ -643,4 +643,5 @@ typedef struct {
     void *(*krealloc)(void *ptr, u32 size);
     void (*fault_symbol)(u32 address, char *out, int cap);
     const char *os_build_num;
+    int (*work_post)(void (*fn)(void *ctx), void *ctx);  
 } Kapi;

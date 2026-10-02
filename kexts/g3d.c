@@ -13,20 +13,26 @@ static const GdiOps *gdi(void)
     return gd;
 }
 
+#define SET_FAR 32
+#define COPY_FAR 48
+
 void *memcpy(void *d, const void *s, u32 n)
 {
+    if (n >= COPY_FAR && api) return api->memcpy(d, s, n);
     u8 *dd = d; const u8 *ss = s;
     while (n--) *dd++ = *ss++;
     return d;
 }
 void *memset(void *d, int c, u32 n)
 {
+    if (n >= SET_FAR && api) return api->memset(d, c, n);
     u8 *dd = d;
     while (n--) *dd++ = (u8)c;
     return d;
 }
 void *memmove(void *d, const void *s, u32 n)
 {
+    if (n >= COPY_FAR && api) return api->memmove(d, s, n);
     u8 *dd = d; const u8 *ss = s;
     if (dd < ss) while (n--) *dd++ = *ss++;
     else { dd += n; ss += n; while (n--) *--dd = *--ss; }
@@ -82,7 +88,7 @@ static void zbuf_ensure(G3D *c)
     if (c->zbuf) {
         if(api->mem_track)api->mem_track("3D depth buffer",c->zbuf,pixels*2);
         c->zbw = c->vw; c->zbh = c->vh;
-        for (u32 i = 0; i < pixels; i++) c->zbuf[i] = 0xFFFF;
+        memset(c->zbuf, 0xFF, pixels * 2);
     }
 }
 
@@ -131,7 +137,9 @@ static void g3_clearz(G3D *c, fx z)
     zbuf_ensure(c);
     if (!c->zbuf) return;
     u16 d = (u16)g3_zmap16(z);
-    for (int i = 0; i < c->zbw * c->zbh; i++) c->zbuf[i] = d;
+    u32 n = (u32)(c->zbw * c->zbh);
+    if ((d >> 8) == (d & 0xFF)) { memset(c->zbuf, d & 0xFF, n * 2); return; }
+    for (u32 i = 0; i < n; i++) c->zbuf[i] = d;
 }
 
 static void g3_viewport(G3D *c, int x, int y, int w, int h, fx zn, fx zf)

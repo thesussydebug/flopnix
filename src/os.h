@@ -9,7 +9,7 @@ typedef __builtin_va_list va_list;
 #define va_arg(v, t)   __builtin_va_arg(v, t)
 
 #define OS_NAME    "FLOPNIX"
-#define OS_VER     "0.8.9"
+#define OS_VER     "0.8.10"
 #ifndef OS_BUILD_DATE
 #define OS_BUILD_DATE "unknown"
 #endif
@@ -362,6 +362,8 @@ void threads_report(char *out, int cap);
 void app_worker(void);
 int app_callback(int owner,int win,void *fn,void *ctx,int value,const char *path,int is_path);
 int app_owner_busy(int owner);
+int app_work_post(int owner,void (*fn)(void *),void *ctx);
+int app_work_queued(int owner,int drop);
 int app_current_window(void);
 int app_job_info(int win,u32 *elapsed,u32 *prog,u32 *io);
 int app_unresponsive(int win);

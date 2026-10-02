@@ -10,20 +10,26 @@
 
 static const Kapi *api;
 
+#define SET_FAR 32
+#define COPY_FAR 48
+
 void *memcpy(void *d, const void *s, u32 n)
 {
+    if (n >= COPY_FAR && api) return api->memcpy(d, s, n);
     u8 *dd = d; const u8 *ss = s;
     while (n--) *dd++ = *ss++;
     return d;
 }
 void *memset(void *d, int c, u32 n)
 {
+    if (n >= SET_FAR && api) return api->memset(d, c, n);
     u8 *dd = d;
     while (n--) *dd++ = (u8)c;
     return d;
 }
 void *memmove(void *d, const void *s, u32 n)
 {
+    if (n >= COPY_FAR && api) return api->memmove(d, s, n);
     u8 *dd = d; const u8 *ss = s;
     if (dd < ss) while (n--) *dd++ = *ss++;
     else { dd += n; ss += n; while (n--) *--dd = *--ss; }

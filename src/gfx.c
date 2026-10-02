@@ -332,9 +332,13 @@ void panel(int x, int y, int w, int h, int sunken)
     bevel(x, y, w, h, sunken);
 }
 
-void draw_char(int x, int y, char ch, u8 fg)
+static const u32 nib_mask[16] = {
+    0x00000000, 0xFF000000, 0x00FF0000, 0xFFFF0000, 0x0000FF00, 0xFF00FF00, 0x00FFFF00, 0xFFFFFF00,
+    0x000000FF, 0xFF0000FF, 0x00FF00FF, 0xFFFF00FF, 0x0000FFFF, 0xFF00FFFF, 0x00FFFFFF, 0xFFFFFFFF
+};
+
+__attribute__((minsize, noinline)) static void draw_char_clipped(int x, int y, const u8 *g, u8 fg)
 {
-    const u8 *g = FONT8x16 + (u8)ch * 16;
     for (int j = 0; j < 16; j++) {
         int yy = y + j;
         if (yy < 0 || yy >= SH || yy < cly0 || yy >= cly1) continue;
@@ -346,6 +350,26 @@ void draw_char(int x, int y, char ch, u8 fg)
             int xx = x + i;
             if (xx >= 0 && xx < SW && xx >= clx0 && xx < clx1) dst[xx] = fg;
         }
+    }
+}
+
+void draw_char(int x, int y, char ch, u8 fg)
+{
+    const u8 *g = FONT8x16 + (u8)ch * 16;
+    int x0 = clx0 > 0 ? clx0 : 0, y0 = cly0 > 0 ? cly0 : 0;
+    int x1 = clx1 < SW ? clx1 : SW, y1 = cly1 < SH ? cly1 : SH;
+    if (x >= x1 || y >= y1 || x + 8 <= x0 || y + 16 <= y0) return;
+    if (x < x0 || y < y0 || x + 8 > x1 || y + 16 > y1) { draw_char_clipped(x, y, g, fg); return; }
+
+    u32 ink = fg * 0x01010101u;
+    u32 *d = (u32 *)(BACKBUF + y * SW + x);
+    for (int j = 0; j < 16; j++, d = (u32 *)((u8 *)d + SW)) {
+        u32 row = g[j];
+        if (!row) continue;
+        u32 m = nib_mask[row >> 4];
+        d[0] = (d[0] & ~m) | (ink & m);
+        m = nib_mask[row & 15];
+        d[1] = (d[1] & ~m) | (ink & m);
     }
 }
 
@@ -369,7 +393,7 @@ const u8 *font_glyph(char ch) { return FONT8x16 + (u8)ch * 16; }
 
 void draw_text(int x, int y, const char *s, u8 fg)
 {
-    while (*s) {
+    while (*s && x < clx1) {
         draw_char(x, y, *s++, fg);
         x += 8;
     }
