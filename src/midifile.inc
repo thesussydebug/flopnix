@@ -100,6 +100,7 @@ static inline int mf_next(MfTrack *t, u8 *status, u8 *d1, u8 *d2)
 
     int nd = mf_datalen(s);
     if (nd < 1 || t->i + (u32)nd > t->n) return 0;
+    if ((t->p[t->i] | (nd > 1 ? t->p[t->i + 1] : 0)) & 0x80) return 0;
     if (status) *status = s;
     if (d1) *d1 = t->p[t->i];
     if (d2) *d2 = nd > 1 ? t->p[t->i + 1] : 0;
