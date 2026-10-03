@@ -583,8 +583,8 @@ static void capture_frame(const u8 *frame,u32 size)
 static void eth_send(const u8 *dst, u16 type, const u8 *payload, u16 plen)
 {
     u8 fr[1536];
+    if (plen > 1500) return;
     u16 len = 14 + plen;
-    if (len > 1514) return;
     diag_tx++;
     memcpy(fr, dst, 6);
     memcpy(fr + 6, net_mac, 6);

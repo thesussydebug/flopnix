@@ -812,17 +812,6 @@ void timer_del(int id)
     timers[id].fn = 0;
 }
 
-static void drop_load_hooks(int owner)
-{
-    for (int i = ncmds - 1; i >= 0; i--)
-        if (cmds[i].owner == owner) { cmds[i] = cmds[--ncmds]; }
-    for (int i = nopeners - 1; i >= 0; i--)
-        if (openers[i].owner == owner) { openers[i] = openers[--nopeners]; }
-    for (int i = 0; i < NTIMERS; i++)
-        if (timers[i].owner == owner) timers[i].fn = 0;
-    app_work_queued(owner, 1);
-}
-
 extern void fault_show_banner(const char *msg);
 void timers_poll(void)
 {
@@ -1044,6 +1033,25 @@ void broadcast(const char *event, const char *data)
             });
         }
     kext_enter(resident);
+}
+
+static void drop_load_hooks(int owner)
+{
+    for (int i = ncmds - 1; i >= 0; i--)
+        if (cmds[i].owner == owner) { cmds[i] = cmds[--ncmds]; }
+    for (int i = nopeners - 1; i >= 0; i--)
+        if (openers[i].owner == owner) { openers[i] = openers[--nopeners]; }
+    for (int i = 0; i < NTIMERS; i++)
+        if (timers[i].owner == owner) timers[i].fn = 0;
+    for (int i = 0; i < NKHOOKS; i++)
+        if (khook_owner[i] == owner) khooks[i] = 0;
+    for (int i = 0; i < NSHUT; i++)
+        if (shut_owner[i] == owner) shut_fns[i] = 0;
+    for (int i = 0; i < NSERV; i++)
+        if (servs[i].owner == owner) servs[i].ops = 0;
+    for (int i = 0; i < NLISTEN; i++)
+        if (lis_owner[i] == owner) listeners[i] = 0;
+    app_work_queued(owner, 1);
 }
 
 static int can_unload(int owner)

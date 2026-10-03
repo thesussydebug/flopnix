@@ -163,7 +163,7 @@ static int tw_resolve(const char *base,const char *ref,char *out)
     if(!tw_url(base,&u)||!u.http)return 0;
     int auth=7;while(base[auth]&&base[auth]!='/'&&base[auth]!='?'&&base[auth]!='#')auth++;
     if(ref[0]=='/'&&ref[1]=='/'){
-        if(r+5>=TW_URL)return 0;tw_copy(tmp,TW_URL,"http:",5);tw_copy(tmp+5,TW_URL-5,ref,r);
+        if(r+6>=TW_URL)return 0;tw_copy(tmp,TW_URL,"http:",5);tw_copy(tmp+5,TW_URL-5,ref,r);
     }else{
         int cut=auth;
         if(ref[0]!='/'){

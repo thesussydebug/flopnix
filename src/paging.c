@@ -208,7 +208,7 @@ void paging_arena_protect(u32 lo, u32 hi, int writable)
 void paging_set_user(u32 va, u32 npages, int user)
 {
     if (!paging_on) return;
-    if (va + npages * PG_4K > PG_4M) return;
+    if (!pg_user_span(va, npages)) return;
     u32 first = va >> 12;
     for (u32 i = 0; i < npages && first + i < PG_NPTE; i++) {
         if (user) page_tab0[first + i] |=  (u32)(PG_USER | PG_RW);

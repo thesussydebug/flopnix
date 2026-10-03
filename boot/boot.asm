@@ -82,6 +82,13 @@ start:
     int 0x13
     dec di
     jnz .try
+    cmp bp, 1
+    jne .fatal
+    xor ax, ax
+    mov cx, 256
+    rep stosw
+    jmp short .ok
+.fatal:
     mov si, msg_err
     call print
     mov al, [err]

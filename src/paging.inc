@@ -45,6 +45,12 @@ static inline int pg_va_mapped(u32 pde, u32 pte)
     return (pte & PG_PRESENT) != 0;
 }
 
+static inline int pg_user_span(u32 va, u32 npages)
+{
+    if (va & (PG_4K - 1)) return 0;
+    return va < PG_4M && npages <= (PG_4M - va) / PG_4K;
+}
+
 static inline int pg_pte_span(u32 slot, u32 lo, u32 hi, u32 *first, u32 *count)
 {
     if (hi <= lo) return 0;

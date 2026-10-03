@@ -236,7 +236,7 @@ __attribute__((minsize)) static int submenu_at(int px, int py)
     if (open_cat < 0) return -1;
     int sx, sy, sw, sh;
     int rows = submenu_geo(open_cat, &sx, &sy, &sw, &sh), n = cat_count(open_cat);
-    if (px < sx || px >= sx + sw || py < sy + 2 || py >= sy + 2 + rows * sub_rh) return -1;
+    if (!n || px < sx || px >= sx + sw || py < sy + 2 || py >= sy + 2 + rows * sub_rh) return -1;
     int idx = (px - sx) / (sw / ((n + rows - 1) / rows)) * rows + (py - sy - 2) / sub_rh;
     return idx < n ? idx : -1;
 }
@@ -536,6 +536,7 @@ __attribute__((minsize)) int win_open(int type)
     cascade = (cascade + 1) % 6;
     w->x = f.x; w->y = f.y; w->w = f.w; w->h = f.h;
     w->title = type_title(type);
+    w->tbuf_on = 0;
     zord[nz++] = i;
     desktop_focus = 0;
     gui_dirty = 1;
@@ -1227,9 +1228,10 @@ __attribute__((minsize)) static void draw_menu(void)
     draw_text(x0 + 30, ry + 2, "Reboot", rhov ? C_WHITE : C_BLACK);
 
     if (open_cat >= 0) {
-        int n = cat_count(open_cat), cw = sw / ((n + rows - 1) / rows);
+        int n = cat_count(open_cat), cw = n ? sw / ((n + rows - 1) / rows) : sw;
         panel(sx, sy, sw, sh, 0);
         menu_shade(&kapi,sx+2,sy+2,sw-4,sh-4,0);
+        if (!n) draw_text(sx + 8, sy + 2 + (sub_rh - 16) / 2, "(empty)", C_SHAD);
         for (int i = 0; i < n; i++) {
             int ix = sx + i / rows * cw, iy = sy + 2 + i % rows * sub_rh;
             int hov = in(mx, my, ix + 2, iy, cw - 4, sub_rh);

@@ -277,10 +277,12 @@ static void g_rgn_free(GRgn *r) { if (r) { api->kfree(r); rgn_live--; } }
 static int g_rgn_combine(GRgn *dst, const GRgn *a, const GRgn *b, int mode)
 {
     if (!dst || !a || !b) return -1;
-    GRect tmp[RGN_MAXR];
-    int n = rgn_op_raw(tmp, RGN_MAXR, a->r, a->n, b->r, b->n, mode);
+    struct { RgnWork w; GRect r[RGN_MAXR]; } *s = api->kmalloc(sizeof *s);
+    if (!s) return -1;
+    int n = rgn_op_raw(s->r, RGN_MAXR, a->r, a->n, b->r, b->n, mode, &s->w);
+    for (int i = 0; i < n; i++) dst->r[i] = s->r[i];
+    api->kfree(s);
     if (n < 0) return -1;
-    for (int i = 0; i < n; i++) dst->r[i] = tmp[i];
     dst->n = n;
     return n;
 }

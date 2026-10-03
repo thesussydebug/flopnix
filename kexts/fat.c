@@ -664,14 +664,15 @@ static int dir_slot(u32 dir_clus, int is_root16, const u8 raw[11],
     return 0;
 }
 
-static int dir_pair(u32 dir_clus, int is_root16, const u8 raw[11],
-                    u32 *o_lba, int *o_off, u32 *long_lba, int *long_off,u32 *end_lba)
+#define LFN_SLOTS 5
+typedef struct { u32 lba[LFN_SLOTS + 1], end_lba; int off[LFN_SLOTS + 1]; } DirRun;
+
+static int dir_run(u32 dir_clus, int is_root16, int need, DirRun *r)
 {
-    (void)raw;int ended=0;*end_lba=0;
+    int ended=0,run=0;r->end_lba=0;
     u32 clus = dir_clus, sector = is_root16 ? root_lba : 0;
     u32 secs_left = is_root16 ? ((rootents * 32) + 511) / 512 : 0;
     u32 clus_secs = 0;
-    u32 free_lba = 0; int free_off = -1;
     u32 anchor=clus, span=1, walked=0;
 
     for (int guard = 0; guard < 100000; guard++) {
@@ -693,19 +694,16 @@ static int dir_pair(u32 dir_clus, int is_root16, const u8 raw[11],
         for (int e = 0; e < 512; e += 32) {
             u8 *de = dirsec + e;
             if(de[0]==0)ended=1;
-            if(ended||de[0]==0xE5){
-                if(free_off>=0){
-                    if(ended){
-                        if(e<480)*end_lba=lba;
-                        else if(is_root16){if(secs_left)*end_lba=sector;}
-                        else if(clus_secs)*end_lba=sector;
-                        else{u32 next=fat_next(clus);if(valid_cluster(next))*end_lba=clus_lba(next);else if(next!=0x0fffffffu)return 0;}
-                    }
-                    *long_lba=free_lba;*long_off=free_off;*o_lba=lba;*o_off=e;return 2;
-                }
-                free_lba=lba;free_off=e;
-            }else free_off=-1;
-
+            if(!ended&&de[0]!=0xE5){run=0;continue;}
+            r->lba[run]=lba;r->off[run]=e;
+            if(++run<need)continue;
+            if(ended){
+                if(e<480)r->end_lba=lba;
+                else if(is_root16){if(secs_left)r->end_lba=sector;}
+                else if(clus_secs)r->end_lba=sector;
+                else{u32 next=fat_next(clus);if(valid_cluster(next))r->end_lba=clus_lba(next);else if(next!=0x0fffffffu)return 0;}
+            }
+            return 1;
         }
         if (!is_root16 && clus_secs == 0) {
             clus = fat_next(clus);
@@ -727,12 +725,6 @@ static void split_path(const char *path, char *dir, int dcap, const char **fname
     *fname = path + slash + 1;
 }
 
-static int long_needed(const char *f)
-{
-    const char *dot=0;for(const char *p=f;*p;p++)if(*p=='.')dot=p;
-    return strlen(f)<=13&&(dot?dot-f>8||strlen(dot+1)>3:strlen(f)>8);
-}
-
 static char short_char(char c)
 {
     if(c>='a'&&c<='z')return c-32;
@@ -740,48 +732,95 @@ static char short_char(char c)
     return c;
 }
 
+static int lfn_slots(const char *f)
+{
+    const char *dot=0;u32 n=strlen(f);int odd=0;
+    for(const char *p=f;*p;p++){
+        if(*p=='.'){odd|=dot!=0;dot=p;}
+        else odd|=*p==' '||(*p!='_'&&short_char(*p)=='_');
+    }
+    if(n>63)return -1;
+    return (odd||(dot?dot-f>8||strlen(dot+1)>3:n>8))?(int)(n+12)/13:0;
+}
+
 static int alias_for(u32 dclus, int r16, const char *f, u8 raw[11])
 {
-    char b[6];int n=0;const char *dot=0;
-    for(const char *p=f;*p;p++)if(*p=='.')dot=p;
+    char b[6];int n=0;const char *dot=0;u32 h=0;
+    for(const char *p=f;*p;p++){if(*p=='.')dot=p;h=h*31+(u8)short_char(*p);}
     for(const char *p=f;*p&&p!=dot&&n<6;p++)if(*p!=' '&&*p!='.')b[n++]=short_char(*p);
     if(!n)b[n++]='_';
     memset(raw,' ',11);
     if(dot)for(int j=0,k=1;dot[k]&&j<3;k++)if(dot[k]!=' ')raw[8+j++]=short_char(dot[k]);
-    for(int k=1;k<100;k++){
-        int d=k<10?1:2,m=n<7-d?n:7-d;
-        memset(raw,' ',8);memcpy(raw,b,m);raw[m]='~';
-        if(d==2)raw[m+1]='0'+k/10;
-        raw[m+d]='0'+k%10;
+    for(int k=0;k<64;k++,h+=0x9e37){
+        int m=!k?n:n<2?n:2;
+        memset(raw,' ',8);memcpy(raw,b,m);
+        if(k)for(int i=0;i<4;i++)raw[m++]="0123456789ABCDEF"[(h>>(i*4))&15];
+        raw[m]='~';raw[m+1]='1';
         u32 l,c;int o;int r=dir_slot(dclus,r16,raw,&l,&o,&c,0);
         if(r!=1)return r==2;
     }
     return 0;
 }
 
-static int put_long(u8 *dsec,u32 slot_lba,int slot_off,u32 long_lba,int long_off,u32 end_lba,const u8 raw[11],const char *fname)
+static int put_run(const DirRun *r, int slots, const u8 *ent, const char *fname)
 {
-    if(end_lba==slot_lba)dsec[slot_off+32]=0;
-    else if(end_lba){u8 tail[512];if(rd(end_lba))return -1;memcpy(tail,secbuf,512);tail[0]=0;if(wr(end_lba,tail))return -1;}
-    u8 entry[32]={0};static const u8 pos[]={1,3,5,7,9,14,16,18,20,22,24,28,30};
-    entry[0]=0x41;entry[11]=15;entry[13]=lfn_checksum(raw);
-    u32 len=strlen(fname);
-    for(u32 i=0;i<13;i++){u16 ch=i<len?(u8)fname[i]:i==len?0:0xffff;entry[pos[i]]=ch;entry[pos[i]+1]=ch>>8;}
-    if(long_lba==slot_lba)memcpy(dsec+long_off,entry,32);
-    else{
-        u8 lsec[512];if(rd(long_lba))return -1;memcpy(lsec,secbuf,512);memcpy(lsec+long_off,entry,32);
-        if(wr(long_lba,lsec))return -1;
+    static const u8 pos[]={1,3,5,7,9,14,16,18,20,22,24,28,30};
+    u8 sec[512],sum=lfn_checksum(ent);
+    u32 len=strlen(fname),cur=r->lba[slots];
+    if(r->end_lba&&r->end_lba!=cur){
+        if(rd(r->end_lba))return -1;
+        memcpy(sec,secbuf,512);sec[0]=0;
+        if(wr(r->end_lba,sec))return -1;
+    }
+    cur=0;
+    for(int i=0;i<=slots;i++){
+        if(r->lba[i]!=cur){
+            if(cur&&wr(cur,sec))return -1;
+            cur=r->lba[i];
+            if(rd(cur))return -1;
+            memcpy(sec,secbuf,512);
+        }
+        u8 *de=sec+r->off[i];
+        if(i==slots){memcpy(de,ent,32);break;}
+        u32 ord=slots-i;
+        memset(de,0,32);
+        de[0]=ord|(i?0:0x40);de[11]=15;de[13]=sum;
+        for(u32 k=0;k<13;k++){u32 c=(ord-1)*13+k;u16 ch=c<len?(u8)fname[c]:c==len?0:0xffff;de[pos[k]]=ch;de[pos[k]+1]=ch>>8;}
+    }
+    if(r->end_lba==cur)sec[r->off[slots]+32]=0;
+    return wr(cur,sec)?-2:0;
+}
+
+static u32 dir_prev(u32 dclus, int r16, u32 lba)
+{
+    if(r16)return lba>root_lba?lba-1:0;
+    if((lba-data_lba)%spc)return lba-1;
+    u32 want=(lba-data_lba)/spc+2,c=dclus;
+    for(u32 n=0;n<total_clus&&valid_cluster(c);n++){
+        u32 next=fat_next(c);
+        if(next==want)return clus_lba(c)+spc-1;
+        c=next;
     }
     return 0;
 }
 
-static void drop_long(u8 *dsec, int off, const u8 raw[11])
+static int drop_long(u32 dclus, int r16, u8 *dsec, u32 lba, int off, const u8 raw[11])
 {
-    u8 want = lfn_checksum(raw);
-    for (int e = off - 32; e >= 0; e -= 32) {
-        u8 *pd = dsec + e;
-        if (pd[11] != 0x0F || pd[13] != want) break;
-        pd[0] = 0xE5;
+    u8 want=lfn_checksum(raw),prev[512],*s=dsec;
+    for(;;){
+        int more=1,hit=0;
+        for(int e=off-32;e>=0&&more;e-=32){
+            u8 *pd=s+e;
+            if(pd[11]!=0x0F||pd[13]!=want||pd[0]==0xE5){more=0;break;}
+            more=!(pd[0]&0x40);
+            pd[0]=0xE5;hit=1;
+        }
+        if(s!=dsec&&hit&&wr(lba,prev))return -1;
+        if(!more)return 0;
+        lba=dir_prev(dclus,r16,lba);
+        if(!lba)return 0;
+        if(rd(lba))return -1;
+        memcpy(prev,secbuf,512);s=prev;off=512;
     }
 }
 
@@ -801,23 +840,19 @@ int fat_write(const char *path, const u8 *buf, u32 size)
 
     int lookup = dir_scan(dclus, r16, 1, fname, 0, 0, 0, 0, 0, raw);
     if (lookup < 0) return -1;
-    if (!lookup)
-        to_83(fname, raw);
+    int slots = lookup ? 0 : lfn_slots(fname);
+    if (slots < 0) return -1;
 
-    u32 slot_lba; int slot_off; u32 oldc = 0; int wasdir = 0;
-    int found = dir_slot(dclus, r16, raw, &slot_lba, &slot_off, &oldc, &wasdir);
-    if (found == 0) return -2;
-    if (found == 1 && !lookup) return -1;
-
-    if (found == 1 && wasdir) return -3;
-    int longname=0;u32 long_lba=0,end_lba=0;int long_off=0;
-    if(!lookup&&strlen(fname)<=13){
-        const char *dot=0;for(const char *p=fname;*p;p++)if(*p=='.')dot=p;
-        longname=dot?dot-fname>8||strlen(dot+1)>3:strlen(fname)>8;
-        if(longname){
-            if(found==1)return -1;
-            if(dir_pair(dclus,r16,raw,&slot_lba,&slot_off,&long_lba,&long_off,&end_lba)!=2)return -2;
-        }
+    DirRun run; u32 oldc = 0; int wasdir = 0, found = 2;
+    run.end_lba = 0;
+    if (slots) {
+        if (!alias_for(dclus, r16, fname, raw) || !dir_run(dclus, r16, slots + 1, &run)) return -2;
+    } else {
+        if (!lookup) to_83(fname, raw);
+        found = dir_slot(dclus, r16, raw, &run.lba[0], &run.off[0], &oldc, &wasdir);
+        if (found == 0) return -2;
+        if (found == 1 && !lookup) return -1;
+        if (found == 1 && wasdir) return -3;
     }
     fat_dbg_step = 1;
 
@@ -840,11 +875,7 @@ int fat_write(const char *path, const u8 *buf, u32 size)
     }
     fat_dbg_step = 3;
 
-    if (rd(slot_lba) != 0) goto fail;
-    fat_dbg_step = 4;
-    u8 dsec[512];
-    memcpy(dsec, secbuf, 512);
-    u8 *de = dsec + slot_off;
+    u8 de[32];
     memset(de, 0, 32);
     memcpy(de, raw, 11);
     de[11] = 0x20;
@@ -855,8 +886,10 @@ int fat_write(const char *path, const u8 *buf, u32 size)
     de[20] = (first >> 16) & 0xFF; de[21] = (first >> 24) & 0xFF;
     de[28] = size; de[29] = size >> 8; de[30] = size >> 16; de[31] = size >> 24;
 
-    if(longname&&put_long(dsec,slot_lba,slot_off,long_lba,long_off,end_lba,raw,fname))goto fail;
-    if (wr(slot_lba, dsec) != 0) return -1;
+    fat_dbg_step = 4;
+    int put = put_run(&run, slots, de, fname);
+    if (put == -1) goto fail;
+    if (put) return -1;
 
     if (found == 1 && oldc >= 2) free_chain(oldc);
     fat_dbg_step = 5;
@@ -990,19 +1023,19 @@ int fat_mkdir(const char *path)
     u32 dclus; int r16;
     if (!resolve_dir(dir, &dclus, &r16)) return -1;
     u8 raw[11];
-    int longname = long_needed(fname);
-    if (longname) {
+    int slots = lfn_slots(fname);
+    if (slots < 0) return -1;
+    if (slots) {
         if (dir_scan(dclus, r16, 1, fname, 0, 0, 0, 0, 0, raw)) return -1;
         if (!alias_for(dclus, r16, fname, raw)) return -2;
     } else to_83(fname, raw);
 
-    u32 slot_lba; int slot_off; u32 oldc = 0;
-    int found = dir_slot(dclus, r16, raw, &slot_lba, &slot_off, &oldc, 0);
+    DirRun run; u32 oldc = 0;
+    run.end_lba = 0;
+    int found = dir_slot(dclus, r16, raw, &run.lba[0], &run.off[0], &oldc, 0);
     if (found == 1) return -1;
     if (found == 0) return -2;
-    u32 long_lba = 0, end_lba = 0; int long_off = 0;
-    if (longname && dir_pair(dclus, r16, raw, &slot_lba, &slot_off, &long_lba, &long_off, &end_lba) != 2)
-        return -2;
+    if (slots && !dir_run(dclus, r16, slots + 1, &run)) return -2;
 
     u32 first = alloc_chain(1);
     if (!first) return -2;
@@ -1021,17 +1054,11 @@ int fat_mkdir(const char *path)
     dirent_dir(sec + 32, dotdot, parent, dt);
     if (wr(clus_lba(first), sec) != 0) { free_chain(first); return -1; }
 
-    if (rd(slot_lba) != 0) { free_chain(first); return -1; }
-    u8 dsec[512];
-    memcpy(dsec, secbuf, 512);
-    dirent_dir(dsec + slot_off, raw, first, dt);
-    if (longname && put_long(dsec, slot_lba, slot_off, long_lba, long_off, end_lba, raw, fname)) {
-        free_chain(first);
-        return -1;
-    }
-
-    if (wr(slot_lba, dsec) != 0) return -1;
-    return 0;
+    u8 de[32];
+    dirent_dir(de, raw, first, dt);
+    int put = put_run(&run, slots, de, fname);
+    if (put == -1) free_chain(first);
+    return put ? -1 : 0;
 }
 
 int fat_rename(const char *path, const char *newname)
@@ -1056,8 +1083,9 @@ int fat_rename(const char *path, const char *newname)
     int taken = dir_scan(dclus, r16, 1, newname, 0, 0, 0, 0, 0, newraw);
     if (taken < 0) return -1;
     if (taken && strcasecmp(fname,newname)) return -1;
-    int longname = long_needed(newname);
-    if (longname) { if (!alias_for(dclus, r16, newname, newraw)) return -1; }
+    int slots = lfn_slots(newname);
+    if (slots < 0) return -1;
+    if (slots) { if (!alias_for(dclus, r16, newname, newraw)) return -1; }
     else to_83(newname, newraw);
 
     int same = 1;
@@ -1067,44 +1095,39 @@ int fat_rename(const char *path, const char *newname)
     if (!same && dir_slot(dclus, r16, newraw, &lba, &off, &c, 0) == 1) return -1;
     if (dir_slot(dclus, r16, oldraw, &lba, &off, &c, 0) != 1) return -1;
     u8 dsec[512];
-    if (!longname) {
+    if (!slots) {
         if (rd(lba) != 0) return -1;
         memcpy(dsec, secbuf, 512);
         memcpy(dsec + off, newraw, 11);
-        drop_long(dsec, off, oldraw);
+        if (drop_long(dclus, r16, dsec, lba, off, oldraw)) return -1;
         return wr(lba, dsec) == 0 ? 0 : -1;
     }
 
-    u32 slot_lba, long_lba, end_lba; int slot_off, long_off;
-    if (dir_pair(dclus, r16, newraw, &slot_lba, &slot_off, &long_lba, &long_off, &end_lba) != 2) return -1;
+    DirRun run;
+    if (!dir_run(dclus, r16, slots + 1, &run)) return -1;
     if (rd(lba) != 0) return -1;
     u8 ent[32];
     memcpy(ent, secbuf + off, 32);
     memcpy(ent, newraw, 11);
-    if (rd(slot_lba) != 0) return -1;
-    memcpy(dsec, secbuf, 512);
-    memcpy(dsec + slot_off, ent, 32);
-    if (put_long(dsec, slot_lba, slot_off, long_lba, long_off, end_lba, newraw, newname)) return -1;
-    if (wr(slot_lba, dsec) != 0) return -1;
+    if (put_run(&run, slots, ent, newname)) return -1;
     if (rd(lba) != 0) return -1;
     memcpy(dsec, secbuf, 512);
     dsec[off] = 0xE5;
-    drop_long(dsec, off, oldraw);
+    if (drop_long(dclus, r16, dsec, lba, off, oldraw)) return -1;
     return wr(lba, dsec) == 0 ? 0 : -1;
 }
 
 static int entry_info(const char *path, u32 *slot_lba, int *slot_off,
-                      u32 *clus, int *isdir)
+                      u32 *clus, int *isdir, u32 *dclus, int *r16)
 {
     char dir[96]; const char *fname;
     split_path(path, dir, sizeof dir, &fname);
     if (!fname[0]) return -1;
-    u32 dclus; int r16;
-    if (!resolve_dir(dir, &dclus, &r16)) return -1;
+    if (!resolve_dir(dir, dclus, r16)) return -1;
     u8 raw[11];
-    int lookup = dir_scan(dclus, r16, 1, fname, 0, 0, 0, 0, 0, raw);
+    int lookup = dir_scan(*dclus, *r16, 1, fname, 0, 0, 0, 0, 0, raw);
     if (lookup <= 0) return -1;
-    return dir_slot(dclus, r16, raw, slot_lba, slot_off, clus, isdir) == 1
+    return dir_slot(*dclus, *r16, raw, slot_lba, slot_off, clus, isdir) == 1
            ? 0 : -1;
 }
 
@@ -1140,19 +1163,15 @@ int fat_rmdir(const char *path)
 {
     if (!fat_writable()) return -1;
     u32 slot_lba; int slot_off; u32 clus = 0; int isdir = 0;
-    if (entry_info(path, &slot_lba, &slot_off, &clus, &isdir) != 0) return -1;
+    u32 dclus; int r16;
+    if (entry_info(path, &slot_lba, &slot_off, &clus, &isdir, &dclus, &r16) != 0) return -1;
     if (!isdir) return -1;
     if (!fat_dir_empty(clus)) return -3;
     if (rd(slot_lba) != 0) return -1;
     u8 dsec[512];
     memcpy(dsec, secbuf, 512);
-    u8 want = lfn_checksum(dsec + slot_off);
+    if (drop_long(dclus, r16, dsec, slot_lba, slot_off, dsec + slot_off)) return -1;
     dsec[slot_off] = 0xE5;
-    for (int e = slot_off - 32; e >= 0; e -= 32) {
-        u8 *pd = dsec + e;
-        if (pd[11] != 0x0F || pd[13] != want) break;
-        pd[0] = 0xE5;
-    }
     if (wr(slot_lba, dsec) != 0) return -1;
     if (clus >= 2) free_chain(clus);
     return 0;
@@ -1178,7 +1197,7 @@ int fat_delete(const char *path)
     u8 dsec[512];
     memcpy(dsec, secbuf, 512);
     dsec[slot_off] = 0xE5;
-    drop_long(dsec, slot_off, raw);
+    if (drop_long(dclus, r16, dsec, slot_lba, slot_off, raw)) return -1;
 
     if (wr(slot_lba, dsec) != 0) return -1;
     if (oldc >= 2) free_chain(oldc);
@@ -1189,7 +1208,8 @@ int fat_exists(const char *path)
 {
     if (!fat_mount()) return 0;
     u32 lba; int off; u32 clus = 0; int isdir = 0;
-    if (entry_info(path, &lba, &off, &clus, &isdir) != 0) return 0;
+    u32 dclus; int r16;
+    if (entry_info(path, &lba, &off, &clus, &isdir, &dclus, &r16) != 0) return 0;
     return isdir ? 2 : 1;
 }
 

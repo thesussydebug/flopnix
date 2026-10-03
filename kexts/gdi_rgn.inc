@@ -3,7 +3,11 @@
 #define RGN_MAXR   256
 #define RGN_IV1    (2 * RGN_MAXR + 4)
 #define RGN_IV2    (4 * RGN_MAXR + 4)
-#define RGN_MAXY   (2 * RGN_MAXR + 2)
+#define RGN_MAXY   (4 * RGN_MAXR)
+
+typedef struct {
+    i32 ys[RGN_MAXY], aiv[RGN_IV1], biv[RGN_IV1], riv[RGN_IV2], piv[RGN_IV2];
+} RgnWork;
 
 static int rgn_iv_op(i32 *out, const i32 *a, int na, const i32 *b, int nb, int op)
 {
@@ -55,7 +59,7 @@ static int rgn_emit(GRect *out, int *n, int cap, const i32 *iv, int niv, i32 y0,
 }
 
 static int rgn_op_raw(GRect *out, int cap, const GRect *a, int an,
-                      const GRect *b, int bn, int op)
+                      const GRect *b, int bn, int op, RgnWork *w)
 {
     if (an < 0 || bn < 0 || an > RGN_MAXR || bn > RGN_MAXR) return -1;
     if (op == RGN_COPY) {
@@ -64,7 +68,8 @@ static int rgn_op_raw(GRect *out, int cap, const GRect *a, int an,
         return an;
     }
 
-    i32 ys[RGN_MAXY]; int ny = 0;
+    if (!w) return -1;
+    i32 *ys = w->ys; int ny = 0;
     for (int i = 0; i < an; i++) { ys[ny++] = a[i].t; ys[ny++] = a[i].b; }
     for (int i = 0; i < bn; i++) { ys[ny++] = b[i].t; ys[ny++] = b[i].b; }
     for (int i = 1; i < ny; i++) {
@@ -76,7 +81,7 @@ static int rgn_op_raw(GRect *out, int cap, const GRect *a, int an,
     for (int i = 0; i < ny; i++) if (uy == 0 || ys[i] != ys[uy - 1]) ys[uy++] = ys[i];
     ny = uy;
 
-    i32 aiv[RGN_IV1], biv[RGN_IV1], riv[RGN_IV2], piv[RGN_IV2];
+    i32 *aiv = w->aiv, *biv = w->biv, *riv = w->riv, *piv = w->piv;
     int pn = 0, n = 0, have = 0;
     i32 py0 = 0, py1 = 0;
     for (int k = 0; k + 1 < ny; k++) {
