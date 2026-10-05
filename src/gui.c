@@ -10,8 +10,7 @@
 #include "atsw.inc"
 #include "bmpw.inc"
 #include "shotname.inc"
-#include "../kexts/gdi.h"
-#include "../kexts/g3d.h"
+#include "saver.h"
 #include "../kexts/menushade.h"
 
 Win wins[MAXWIN];
@@ -590,61 +589,13 @@ void gui_init(void)
 
 static u32 last_input;
 static int ss_active;
-static int ssx, ssy, ssdx = 3, ssdy = 2;
-static u8  ss_col = C_BGREEN;
-#define SS_W 120
-#define SS_H 140
-
-static const GdiOps *ss_gd;
-static const G3dOps *ss_g3;
-static G3D *ss_ctx;
-static u8 ss_bound;
-static void draw_floppy(int x, int y, u8 col);
-
-static G3Vtx ss_cv[8];
-static const u16 ss_ce[24] = {
-    0,1, 1,2, 2,3, 3,0,  4,5, 5,6, 6,7, 7,4,  0,4, 1,5, 2,6, 3,7
-};
+static u8  ss_plain;
 
 static void ss_draw(void)
 {
     fill_rect(0, 0, SW, SH, C_BLACK);
-    ss_gd = (const GdiOps *)service_get("gdi");
-    ss_g3 = (const G3dOps *)service_get("g3d");
-    if (!ss_bound) {
-        ss_bound = 1;
-        ss_gd = (const GdiOps *)service_get("gdi");
-        ss_g3 = (const G3dOps *)service_get("g3d");
-        if (ss_gd && ss_gd->abi >= 10 && ss_g3 && ss_g3->abi >= 2)
-            ss_ctx = ss_g3->create();
-        for (int i = 0; i < 8; i++) {
-
-            int r = i & 3;
-            ss_cv[i].x = (r == 1 || r == 2) ? FX(1) : -FX(1);
-            ss_cv[i].y = (r >= 2) ? FX(1) : -FX(1);
-            ss_cv[i].z = (i & 4) ? FX(1) : -FX(1);
-        }
-    }
-    if (!ss_ctx || !ss_gd || !ss_g3) {
-        draw_floppy(ssx, ssy, ss_col);
-        draw_text(ssx + 6, ssy + 58, "FLOPNIX", ss_col);
-        return;
-    }
-
-    for (int i = 0; i < 8; i++) ss_cv[i].diffuse = GIDX(ss_col);
-    GMat pm, wm;
-    GVec t = { 0, 0, -FX(4), 0 };
-    GVec r = { (fx)(((ticks * 190u) & 0xFFFFu) * 360u),
-               (fx)(((ticks * 121u) & 0xFFFFu) * 360u), 0, 0 };
-    ss_g3->viewport(ss_ctx, ssx, ssy, SS_W, SS_W, FX(1), FX(16));
-    ss_g3->matrix_mode(ss_ctx, G3M_PROJ);
-    ss_g3->mat_persp(&pm, FX(50), FX_ONE, FX(1), FX(16));
-    ss_g3->load(ss_ctx, &pm);
-    ss_g3->matrix_mode(ss_ctx, G3M_WORLD);
-    ss_g3->mat_trs(&wm, &t, &r, 0);
-    ss_g3->load(ss_ctx, &wm);
-    ss_g3->draw(ss_ctx, G3P_LINES, G3F_XYZ | G3F_DIFFUSE, ss_cv, 8, ss_ce, 24);
-    draw_text(ssx + SS_W / 2 - 28, ssy + SS_W + 4, "FLOPNIX", ss_col);
+    const SaverOps *s = ss_plain ? 0 : service_get("saver");
+    if (s && s->abi == SAVER_ABI) s->draw();
 }
 
 static int input_dismiss(void)
@@ -682,24 +633,12 @@ __attribute__((minsize)) void gui_tick(void)
     }
     if (fault_banner[0] && (i32)(ticks - fault_banner_until) >= 0) { fault_banner[0] = 0; gui_dirty = 1; }
     if (!ss_active && CFG->ss_enable &&
-        (u32)(ticks - last_input) > (u32)CFG->ss_secs * 100) {
+        (u32)(ticks - last_input) > (u32)CFG->ss_secs * 100)
         ss_active = 1;
-        ssx = SW / 3; ssy = SH / 3;
-    }
-    if (ss_active) {
-        if ((u32)(ticks - lasta) >= 3) {
-            lasta = ticks;
-            ssx += ssdx; ssy += ssdy;
-            static const u8 cols[6] = { C_BGREEN, C_CYAN, C_YELLOW, C_MAGENTA, C_RED, C_BBLUE };
-            static int ci;
-            if (ssx <= 0) { ssx = 0; ssdx = -ssdx; ss_col = cols[++ci % 6]; }
-            if (ssx >= SW - SS_W) { ssx = SW - SS_W; ssdx = -ssdx; ss_col = cols[++ci % 6]; }
-            if (ssy <= 0) { ssy = 0; ssdy = -ssdy; ss_col = cols[++ci % 6]; }
-            if (ssy >= SH - SS_H) { ssy = SH - SS_H; ssdy = -ssdy; ss_col = cols[++ci % 6]; }
-            gui_dirty = 1;
-        }
-    } else if (anim_claims) {
-        if ((u32)(ticks - lasta) >= 3) { lasta = ticks; gui_invalidate(); }
+    if ((ss_active || anim_claims) && (u32)(ticks - lasta) >= 3) {
+        lasta = ticks;
+        if (ss_active) gui_dirty = 1;
+        else gui_invalidate();
     }
 }
 
@@ -1242,17 +1181,6 @@ __attribute__((minsize)) static void draw_menu(void)
     }
 }
 
-static void draw_floppy(int x, int y, u8 col)
-{
-    fill_rect(x, y, 60, 54, col);
-    fill_rect(x + 12, y, 30, 20, C_G0 + 2);
-    fill_rect(x + 30, y + 2, 8, 15, col);
-    fill_rect(x + 8, y + 26, 44, 24, C_WHITE);
-    for (int i = 0; i < 3; i++)
-        hline(x + 12, y + 32 + i * 5, 36, C_G0 + 3);
-    bevel(x, y, 60, 54, 0);
-}
-
 __attribute__((minsize)) static void draw_taskbar(void)
 {
     fill_rect(0, SH - TBH, SW, TBH, C_FACE);
@@ -1502,8 +1430,9 @@ __attribute__((minsize)) void gui_compose(void)
     }
     debug_draw(-2);
     if (ss_active) {
-        FAULT_GUARD(ss_draw(), { ss_active = 0; });
-        if (ss_active) {debug_draw(-1);return;}
+        FAULT_GUARD(ss_draw(), { if (!fault_fallback[thr_self]) ss_plain = 1; });
+        debug_draw(-1);
+        return;
     }
     if (stack && !no_mem) {
         WhRect nr[SU_MAX];

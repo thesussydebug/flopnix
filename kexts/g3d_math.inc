@@ -281,9 +281,8 @@ static int tri_scan(const G3SV *v0, const G3SV *v1, const G3SV *v2,
     int m = 0;
     for (int i = 0; i < 3; i++) {
         const G3SV *a = e[i][0], *b = e[i][1];
-        fx ylo = a->y < b->y ? a->y : b->y;
-        fx yhi = a->y < b->y ? b->y : a->y;
-        if (yc < ylo || yc >= yhi) continue;
+        if (a->y > b->y) { const G3SV *t = a; a = b; b = t; }
+        if (yc < a->y || yc >= b->y) continue;
         if (m < 3) hit[m++] = g3_svlerp(a, b, fx_div(yc - a->y, b->y - a->y));
     }
     if (m < 2) return 0;

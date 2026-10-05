@@ -22,7 +22,6 @@
     db 0
     db 0x29
     dd 0x464C5058
-    db "FLOPNIX 0.4"
     db "NONE    "
 
 start:

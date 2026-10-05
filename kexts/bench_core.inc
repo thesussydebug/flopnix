@@ -15,6 +15,11 @@ static inline u32 bm_median(u32 a, u32 b, u32 c)
     if (b > c) { b = c; }
     return a > b ? a : b;
 }
+static inline int bm_median_at(u32 a, u32 b, u32 c)
+{
+    u32 m = bm_median(a, b, c);
+    return a == m ? 0 : b == m ? 1 : 2;
+}
 
 static inline int bm_stalled(u32 now, u32 *last, u32 *spins, u32 limit)
 {
