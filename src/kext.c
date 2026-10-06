@@ -1506,4 +1506,5 @@ Kapi kapi = {
     .fault_symbol = fault_symbol,
     .os_build_num = OS_BUILD_NUM,
     .work_post = kapi_work_post,
+    .disk_write = disk_write, .fs_bad = fs_bad, .fat_append = fat_append,
 };

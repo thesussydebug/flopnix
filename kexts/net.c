@@ -4,6 +4,9 @@
 #include "nettext.h"
 #include "netlisten.h"
 #include "http_core.inc"
+#pragma clang attribute push(__attribute__((minsize)), apply_to = function)
+#include "gunzip.inc"
+#pragma clang attribute pop
 
 static const Kapi *api;
 static __attribute__((noinline)) void *net_copy(void *dst,const void *src,u32 n)
@@ -869,6 +872,17 @@ static void http_diag_read(NetHttpDiag *out){out->stage=http_diag.stage;out->res
 static const NetHttpDiagOps http_diag_ops={NET_HTTP_DIAG_ABI,http_diag_read};
 
 static u8 *hs_queue;
+static Gunzip *hs_gz;
+static u8 hs_gz_fed;
+#define GZ_ROOM 262144u
+__attribute__((noinline, minsize)) static int http_body(const u8 *d,int n,void *ctx)
+{
+    (void)ctx;
+    if(!hs_http.gzip)return !hs_sink||hs_sink(d,n,hs_ctx);
+    hs_gz_fed=1;
+    if(!hs_gz||gz_feed(hs_gz,d,(u32)n,hs_sink,hs_ctx)==GZ_ERR){hs_http.error=-6;return 0;}
+    return hs_gz->state>=0;
+}
 static void http_queue(const u8 *d,int n)
 {
     if(hs_abort)return;
@@ -885,7 +899,7 @@ static void http_drain(void)
         for(u32 i=0;i<n;i++)chunk[i]=hs_queue[(r+i)&(HSQ-1)];
         __asm__ volatile("" ::: "memory");hs_read=r+n;
         if(hs_raw){if(hs_sink&&!hs_sink(chunk,(int)n,hs_ctx))hs_abort=1;}
-        else if(!hr_feed(&hs_http,chunk,(int)n,hs_sink,hs_ctx))hs_abort=1;
+        else if(!hr_feed(&hs_http,chunk,(int)n,http_body,0))hs_abort=1;
         if(hs_info&&!hs_info_sent&&!hs_raw&&hs_http.state){memcpy(hs_info,&hs_http.info,sizeof *hs_info);hs_info_sent=1;}
     }
 
@@ -914,6 +928,9 @@ static int net_transfer_locked(u32 ip, u16 port, const char *host,
     http_diag.stage=NH_PREFLIGHT;http_diag.result=0;
     hs_queue=api->kmalloc(HSQ);if(!hs_queue){http_diag.result=-4;tcp_busy=0;return -4;}
     api->mem_track("HTTP receive queue",hs_queue,HSQ);
+    hs_gz=host&&api->heap_avail()>=GZ_ROOM?api->kmalloc(sizeof *hs_gz):0;
+    if(hs_gz)api->mem_track("HTTP gzip window",hs_gz,sizeof *hs_gz);
+    const char *coding=hs_gz?"gzip":"identity";
     static char req[5120];
     if(strlen(path)>500 || (host&&strlen(host)>127)) {result=-1;goto finish;}
     if(host){
@@ -922,8 +939,8 @@ static int net_transfer_locked(u32 ip, u16 port, const char *host,
         for(const char *p=path;*p;p++)if((u8)*p<=32||*p==127){result=-1;goto finish;}
         for(const char *p=ua;*p;p++)if((u8)*p<32||*p==127){result=-1;goto finish;}
         if(!*ua||strlen(ua)>127||strlen(path)+strlen(host)+strlen(ua)+200+(body?strlen(body):0)>=sizeof req){result=-1;goto finish;}
-        if(body)kfmt(req,sizeof req,"POST %s HTTP/1.1\r\nHost: %s\r\nConnection: close\r\nAccept-Encoding: identity\r\nUser-Agent: %s\r\nContent-Type: application/x-www-form-urlencoded\r\nContent-Length: %u\r\n\r\n%s",path,host,ua,strlen(body),body);
-        else kfmt(req,sizeof req,"GET %s HTTP/1.1\r\nHost: %s\r\nConnection: keep-alive\r\nAccept-Encoding: identity\r\nUser-Agent: %s\r\n\r\n",path,host,ua);
+        if(body)kfmt(req,sizeof req,"POST %s HTTP/1.1\r\nHost: %s\r\nConnection: close\r\nAccept-Encoding: %s\r\nUser-Agent: %s\r\nContent-Type: application/x-www-form-urlencoded\r\nContent-Length: %u\r\n\r\n%s",path,host,coding,ua,strlen(body),body);
+        else kfmt(req,sizeof req,"GET %s HTTP/1.1\r\nHost: %s\r\nConnection: keep-alive\r\nAccept-Encoding: %s\r\nUser-Agent: %s\r\n\r\n",path,host,coding,ua);
     }else strlcpy(req,path,sizeof req);
     net_cancel = 0;
     api->esc_arm();
@@ -949,6 +966,8 @@ static int net_transfer_locked(u32 ip, u16 port, const char *host,
     }
     hs_sink = sink; hs_ctx = ctx;
     hr_init(&hs_http);hs_raw=!host;hs_abort=0;hs_info=info;hs_info_sent=0;
+    if(hs_gz)gz_init(hs_gz);
+    hs_gz_fed=0;
     hs_read=hs_write=0;
     hs_got = 0;
     tcp_deliver = http_deliver;
@@ -999,6 +1018,7 @@ static int net_transfer_locked(u32 ip, u16 port, const char *host,
     }
     keep=host&&!body&&!hs_abort&&!(tcp_event&(TA_CLOSED|TA_ERROR))&&hr_reusable(&hs_http)&&tcb.state==TS_ESTAB;
 
+    if(hs_gz&&hs_gz_fed&&!gz_done(hs_gz)&&!hs_http.error&&hr_finish(&hs_http)){hs_http.error=-6;hs_abort=1;}
     if(info)memcpy(info,&hs_http.info,sizeof *info);
     result=hs_abort||(tcp_event&TA_ERROR)||(!hs_raw&&!hr_finish(&hs_http))?(hs_http.error?hs_http.error:-4):hs_raw?0:hs_http.info.status;
     goto finish;
@@ -1016,7 +1036,7 @@ finish:
     txq = 0;
     hs_sink=0;hs_ctx=0;hs_info=0;
     net_irq_restore(finish_flags);
-    api->kfree(hs_queue);hs_queue=0;tcp_busy=0;
+    api->kfree(hs_queue);hs_queue=0;if(hs_gz){api->kfree(hs_gz);hs_gz=0;}tcp_busy=0;
     return result;
 }
 static int net_transfer(u32 ip,u16 port,const char *host,const char *path,int (*sink)(const u8 *,int,void *),void *ctx,u32 timeout,NetHttpInfo *info){api->network_lock();int result=net_transfer_locked(ip,port,host,path,sink,ctx,timeout,info,0,0);api->network_unlock();return result;}

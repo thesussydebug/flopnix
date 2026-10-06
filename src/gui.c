@@ -8,8 +8,6 @@
 #include "cursorbuf.inc"
 #include "hangwatch.inc"
 #include "atsw.inc"
-#include "bmpw.inc"
-#include "shotname.inc"
 #include "saver.h"
 #include "../kexts/menushade.h"
 
@@ -172,17 +170,23 @@ static int cat_app(int cat, int idx)
     return -1;
 }
 
+static int cat_rows(int upto)
+{
+    int n = 0;
+    while (upto--) n += cat_count(upto) > 0;
+    return n;
+}
+
 static void topmenu_geo(int *x0, int *y0, int *mh)
 {
-    *mh = NCAT * MITEMH + MSEP + MITEMH + 4;
+    *mh = cat_rows(NCAT) * MITEMH + MSEP + MITEMH + 4;
     *x0 = 2;
     *y0 = SH - TBH - *mh;
 }
 
 static int topitem_y(int y0, int i)
 {
-    if (i < NCAT) return y0 + 2 + i * MITEMH;
-    return y0 + 2 + NCAT * MITEMH + MSEP;
+    return y0 + 2 + cat_rows(i) * MITEMH + (i < NCAT ? 0 : MSEP);
 }
 
 static int sub_rh;
@@ -223,7 +227,7 @@ static int topcat_at(int px, int py)
     int x0, y0, mh;
     topmenu_geo(&x0, &y0, &mh);
     if (px < x0 || px >= x0 + MENUW) return -1;
-    for (int i = 0; i <= NCAT; i++) {
+    for (int i = NCAT; i >= 0; i--) {
         int iy = topitem_y(y0, i);
         if (py >= iy && py < iy + MITEMH) return i;
     }
@@ -731,51 +735,16 @@ __attribute__((minsize)) void gui_wheel(int dz)
     if (f >= 0) { app_wheel(&wins[f], dz); win_redraw(wins[f].type,wins[f].inst); }
 }
 
-static int shot_on_usb;
-static int shot_exists(const char *name, void *ctx)
-{
-    (void)ctx;
-    if (shot_on_usb) { char p[16]; p[0] = '/'; strlcpy(p + 1, name, 15);
-                       return fat_exists(p) != 0; }
-    return fs_exists(name);
-}
-static __attribute__((noinline,minsize)) void screenshot(void)
-{
-    static u8 pal[256 * 3];
-    for (int i = 0; i < 256; i++)
-        palette_rgb(i, &pal[i * 3], &pal[i * 3 + 1], &pal[i * 3 + 2]);
-    u32 fsz = bmpw_head(iobuf, SW, SH, pal);
-    if (fsz > IOBUF_SZ) return;
-    for (int y = 0; y < SH; y++)
-        memcpy(bmpw_row(iobuf, SW, SH, y), BACKBUF + y * SW, SW);
-
-    shot_on_usb = fat_mount();
-    char name[16];
-    if (!shot_next(shot_exists, 0, name, sizeof name)) {
-        notify("no free SHOTnn.BMP name");
-        return;
-    }
-    int rc;
-    busy_set("Screenshot", name, -1);
-    if (shot_on_usb) { char p[16]; p[0] = '/'; strlcpy(p + 1, name, 15);
-                       rc = fat_write(p, iobuf, fsz); }
-    else rc = fs_write(name, iobuf, fsz);
-    busy_end();
-    char m[48];
-    if (rc == 0) kfmt(m, sizeof m, "saved %s to %s", name,
-                      shot_on_usb ? "USB" : "A:");
-    else         kfmt(m, sizeof m, "screenshot failed (%s full?)",
-                      shot_on_usb ? "USB" : "A:");
-    notify(m);
-}
-
 __attribute__((minsize)) void gui_key(int k)
 {
     if(busy_update||kupd_critical){if(k==27&&!kupd_critical)esc_latched=1;return;}
     if (input_dismiss()) return;
     if(k==27){esc_latched=1;int f=focused();if(f>=0&&!ov_mouse&&!menu_open)app_cancel_window(f);}
-    if (k == K_PRTSC) { screenshot(); return; }
     if (key_hook_dispatch(k)) { gui_dirty = 1; return; }
+    if (k == K_PRTSC || k == K_SYSRQ) {
+        if (!kext_load("sys/shot.kx") && key_hook_dispatch(k)) gui_dirty = 1;
+        return;
+    }
     if (k == '\t' && (kbd_mods() & 8)) {
         if (nz >= 2) {
             if (at_k < 0 || at_k >= nz) at_k = nz - 1;
@@ -1151,6 +1120,7 @@ __attribute__((minsize)) static void draw_menu(void)
     menu_shade(&kapi,x0+2,y0+2,MENUW-4,mh-4,0);
     fill_rect(x0 + 2, y0 + 2, 22, mh - 4, C_TB0 + 4);
     for (int i = 0; i < NCAT; i++) {
+        if (!cat_count(i)) continue;
         int iy = topitem_y(y0, i);
         int hov = (open_cat == i) || in(mx, my, x0 + 2, iy, MENUW - 4, MITEMH);
         if (hov) menu_shade(&kapi,x0+2,iy,MENUW-4,MITEMH,1);
@@ -1158,10 +1128,9 @@ __attribute__((minsize)) static void draw_menu(void)
         draw_char(x0 + MENUW - 14, iy + 2, (char)0x10,
                   hov ? C_WHITE : C_G0 + 4);
     }
-    int sepy = y0 + 2 + NCAT * MITEMH + MSEP / 2;
+    int ry = topitem_y(y0, NCAT), sepy = ry - MSEP / 2;
     hline(x0 + 6, sepy, MENUW - 12, C_SHAD);
     hline(x0 + 6, sepy + 1, MENUW - 12, C_LIGHT);
-    int ry = topitem_y(y0, NCAT);
     int rhov = in(mx, my, x0 + 2, ry, MENUW - 4, MITEMH);
     if (rhov) menu_shade(&kapi,x0+2,ry,MENUW-4,MITEMH,1);
     draw_text(x0 + 30, ry + 2, "Reboot", rhov ? C_WHITE : C_BLACK);

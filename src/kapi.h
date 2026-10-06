@@ -12,7 +12,7 @@ typedef signed   int   i32;
 #endif
 
 
-#define KAPI_VERSION 41
+#define KAPI_VERSION 43
 
 #define KEXT_MAGIC 0x5458454B
 enum { KEXT_KIND_KERNEL = 1, KEXT_KIND_APP = 2 };
@@ -43,7 +43,9 @@ enum {
     K_UP = 0x100, K_DOWN, K_LEFT, K_RIGHT,
     K_HOME, K_END, K_DEL, K_PGUP, K_PGDN, K_CLOSE_REQUEST
 };
+#define K_PRTSC 0x201
 #define K_PAUSE 0x202
+#define K_SYSRQ 0x203
 
 enum { EV_PRESS, EV_DRAG, EV_RELEASE, EV_RPRESS, EV_WHEELUP, EV_WHEELDN };
 
@@ -104,6 +106,8 @@ typedef struct {
 #define FS_EIO (-2)
 
 #define FS_ATTR_DIR 0x10
+
+enum { FSB_COUNT, FSB_GET, FSB_MARK, FSB_CLEAR };
 
 typedef struct {
     char name[64];
@@ -644,4 +648,7 @@ typedef struct {
     void (*fault_symbol)(u32 address, char *out, int cap);
     const char *os_build_num;
     int (*work_post)(void (*fn)(void *ctx), void *ctx);  
+    int (*disk_write)(u32 lba, const u8 *buf);
+    int (*fs_bad)(int op, u32 lba);
+    int (*fat_append)(const char *path, const u8 *buf, u32 size);
 } Kapi;

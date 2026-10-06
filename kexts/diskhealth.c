@@ -15,6 +15,7 @@ static u8  map[FH_CYLS][FH_HEADS];
 static u32 n_ok, n_slow, n_retry, n_bad;
 static u32 scan_lba;
 static u8  scanning, done_once, aborted;
+static int marked;
 static int timer_id = -1;
 static u32 seek_ms[8];
 static char msg[52];
@@ -48,7 +49,11 @@ static void scan_chunk(void)
 
         int c, h;
         if (fh_cell(lba, &c, &h)) map[c][h] = (u8)fh_worst(map[c][h], cls);
-        if (cls == FH_BAD)        n_bad++;
+        if (cls == FH_BAD) {
+            n_bad++;
+            api->fs_bad(FSB_MARK, lba);
+            marked = api->fs_bad(FSB_COUNT, 0);
+        }
         else if (cls == FH_RETRY) n_retry++;
         else if (cls == FH_SLOW)  n_slow++;
         else                      n_ok++;
@@ -224,7 +229,10 @@ static void fh_draw(Win *w, int cx, int cy, int cw, int ch)
         if (scanning || done_once || aborted)
             ui_progress(cx + 20, cy + l.progress_y, cw - 40, 16,
                         (int)(scan_lba * 100 / FH_TOTAL), 1);
-        else api->draw_text_clip(cx + 20, cy + l.progress_y, "Read-only scan / no sector remapping", C_G0 + 2, cw - 40);
+        else if (marked > 0) {
+            api->kfmt(t, sizeof t, "%d bad sector%s marked", marked, marked == 1 ? "" : "s");
+            api->draw_text_clip(cx + 20, cy + l.progress_y, t, C_G0 + 2, cw - 40);
+        }
     }
     if (scanning) api->kfmt(t, sizeof t, "Reading %u / %d sectors - Esc stops", scan_lba, FH_TOTAL);
     else if (aborted) api->strlcpy(t, "Partial scan - untested areas remain", sizeof t);
@@ -265,7 +273,7 @@ static void fh_mouse(int inst, int lx, int ly, int ev, int cw, int ch)
     }
 }
 
-static void fh_open(int inst) { (void)inst; reset_scan(); msg[0] = 0; }
+static void fh_open(int inst) { (void)inst; reset_scan(); msg[0] = 0; marked = api->fs_bad(FSB_COUNT, 0); }
 static void fh_min(int *w, int *h) { *w = 312; *h = 330; }
 static void fh_csize(int inst, int *w, int *h) { (void)inst; *w = WINW; *h = WINH; }
 

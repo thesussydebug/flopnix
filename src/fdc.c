@@ -223,10 +223,10 @@ static int fdc_rw(u32 lba, u8 *buf, int write, u32 count)
         tries = attempt + 1;
         if (attempt) { recalibrate(); }
         if (!seek(c, h)) { fdc_init(); continue; }
-        if (write) memcpy(DMABUF, buf, count*512);
-        dma_setup(!write, count*512);
+        if (write == 1) memcpy(DMABUF, buf, count*512);
+        dma_setup(write != 1, count*512);
         fdc_irq_fl = 0;
-        fdc_out(write ? 0x45 : 0x46);
+        fdc_out(write == 1 ? 0x45 : 0x46);
         fdc_out((h << 2) | 0);
         fdc_out(c);
         fdc_out(h);
@@ -242,11 +242,13 @@ static int fdc_rw(u32 lba, u8 *buf, int write, u32 count)
         if (!ok) { fdc_init(); continue; }
         fh_st[0] = res[0]; fh_st[1] = res[1]; fh_st[2] = res[2];
         if ((res[0] & 0xC0) == 0) {
+            int rc = 0;
             if (!write) memcpy(buf, DMABUF, count*512);
+            else if (write == 2 && memcmp(DMABUF, buf, count*512)) { rc = -1; fh_st[1] = 0x20; }
             last_use = ticks;
-            fh_record(lba, tries, t0, 0);
+            fh_record(lba, tries, t0, rc);
             app_note_io();
-            return 0;
+            return rc;
         }
     }
     fh_record(lba, tries, t0, -1);
@@ -263,8 +265,8 @@ static int fdc_guarded(u32 lba, u8 *buf, int write, u32 count)
     int rc=0;
     while(count){
         u32 n=FLOPPY_TRACK_SECTORS-lba%FLOPPY_TRACK_SECTORS;if(n>count)n=count;
-        if(write)for(u32 i=0;i<n;i++)fs_cache_invalidate(lba+i);
-        rc=fdc_rw(lba,buf,write,n);debug_disk(0,write,lba,n,rc);if(rc)break;
+        if(write==1)for(u32 i=0;i<n;i++)fs_cache_invalidate(lba+i);
+        rc=fdc_rw(lba,buf,write,n);debug_disk(0,write==1,lba,n,rc);if(rc)break;
         lba+=n;buf+=n*512;count-=n;
     }
     mtx_unlock(&fdc_mutex);
@@ -275,3 +277,4 @@ int fdc_read(u32 lba, u8 *buf)        { return fdc_guarded(lba, buf, 0, 1); }
 int fdc_write(u32 lba, const u8 *buf) { return fdc_guarded(lba, (u8 *)buf, 1, 1); }
 int fdc_read_many(u32 lba,u8 *buf,u32 count){return fdc_guarded(lba,buf,0,count);}
 int fdc_write_many(u32 lba,const u8 *buf,u32 count){return fdc_guarded(lba,(u8 *)buf,1,count);}
+int fdc_verify(u32 lba,const u8 *buf,u32 count){return fdc_guarded(lba,(u8 *)buf,2,count);}

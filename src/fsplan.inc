@@ -1,4 +1,6 @@
 /* Plans file positions for floppy defragmentation. */
+#include "fsbad.inc"
+
 typedef struct {
     u16 start, sects;
     u16 nstart;
@@ -6,7 +8,7 @@ typedef struct {
     u16 idx;
 } FpEnt;
 
-static inline int fs_plan(FpEnt *e, int n, u16 data0)
+static inline int fs_plan(FpEnt *e, int n, u16 data0, const u16 *bad, int nbad)
 {
 
     int m = 0;
@@ -19,10 +21,16 @@ static inline int fs_plan(FpEnt *e, int n, u16 data0)
         m++;
     }
     int moves = 0;
-    u16 next = data0;
+    u32 next = data0;
     for (int i = 0; i < m; i++) {
-        e[i].nstart = next;
-        next = (u16)(next + e[i].sects);
+        u32 at = next;
+        int b;
+        while (at < e[i].start && (b = fb_clash(bad, nbad, at, e[i].sects)) >= 0)
+            at = (u32)b + 1;
+        if (at > e[i].start || fb_clash(bad, nbad, e[i].start, e[i].sects) >= 0)
+            at = e[i].start;
+        e[i].nstart = (u16)at;
+        next = at + e[i].sects;
         if (e[i].nstart != e[i].start) moves++;
     }
 

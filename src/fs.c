@@ -1,6 +1,7 @@
 /* Stores FLOPFS files on the boot floppy. */
 #include "os.h"
 #include "debug.h"
+#include "floppy.h"
 #include "fsplan.inc"
 #include "fsdefrag.inc"
 #include "fspath.inc"
@@ -21,6 +22,8 @@ static u32 fs_data=FS_TABLE+FS_TSECT, fs_tsect=FS_TSECT;
 static int fs_slots=FS_NFILES, fs_namelen=FS_NAMELEN;
 typedef struct { u8 bits[FS_TSECT]; } FsSectors;
 static int mounted;
+static u16 bad[FB_MAX];
+static int nbad;
 static Mutex fs_mutex=MUTEX_INIT;
 #include "fscache.inc"
 
@@ -78,6 +81,7 @@ int fs_ensure(void)
         (*(u32 *)(sec+4)==FS_VER&&*(u32 *)(sec+8)==sizeof(FsEnt)));
     fs_slots=old?128:FS_NFILES;fs_namelen=old?24:FS_NAMELEN;
     fs_tsect=old?10:FS_TSECT;fs_data=FS_TABLE+fs_tsect;
+    nbad=ok?fb_parse(sec,bad,fs_data,FS_END):0;
     memset(table,0,sizeof table);
     if(ok&&fdc_read_many(FS_TABLE,old?(u8 *)legacy:(u8 *)table,fs_tsect))ok=0;
     if(ok&&old)for(int i=0;i<128;i++){
@@ -89,7 +93,7 @@ int fs_ensure(void)
         memcpy(&table[i].size,&legacy[i].size,16);
     }
     if(!ok||!fs_table_valid(table,FS_NFILES,FS_DATA,FS_END)){
-        memset(table,0,sizeof table);mounted=-1;
+        memset(table,0,sizeof table);mounted=-1;nbad=0;
         klog("FLOPFS: metadata unreadable or invalid; disk left unchanged.\n");
         return 0;
     }
@@ -130,9 +134,54 @@ static int alloc(int n)
                 break;
             }
         }
-        if (!clash) return start;
+        int b = clash ? -1 : fb_clash(bad, nbad, start, n);
+        if (b >= 0) start = b + 1;
+        else if (!clash) return start;
     }
     return -1;
+}
+
+static int bad_flush(void)
+{
+    u8 sec[512];
+    if (fdc_read(FS_SUPER, sec) || *(u32 *)sec != FS_MAGIC) return 0;
+    fb_store(sec, bad, nbad);
+    return !fdc_write(FS_SUPER, sec);
+}
+
+static int bad_mark(u32 lba)
+{
+    if (lba < FS_DATA || lba >= FS_END || fb_add(bad, &nbad, lba) <= 0) return 0;
+    if (bad_flush()) return 1;
+    fb_del(bad, &nbad, lba);
+    return 0;
+}
+
+static int fs_probe(u32 start, u32 count, const u8 *buf, u32 full, const u8 *tail)
+{
+    FdcResult r;
+    u8 sec[512];
+    int marked = 0;
+    fdc_result_get(&r);
+    u32 lo = r.lba, hi = lo + FLOPPY_TRACK_SECTORS - lo % FLOPPY_TRACK_SECTORS;
+    if (((r.st[0] & 0xC8) != 0x40 && !(r.st[1] & 0x20)) || (r.st[1] & 2)) return 0;
+    if (lo < start || lo - start >= count) return 0;
+    if (hi > start + count) hi = start + count;
+    for (u32 s = lo; s < hi; s++) {
+        int fail;
+        if (buf) {
+            const u8 *p = s - start < full ? buf + (s - start) * 512 : tail;
+            fail = fdc_write(s, p) || fdc_verify(s, p, 1);
+        } else fail = fdc_read(s, sec);
+        if (fail) marked += bad_mark(s);
+    }
+    return marked;
+}
+
+static int put(u32 lba, const u8 *buf, u32 n)
+{
+    if (fdc_write_many(lba, buf, n)) return -1;
+    return nbad ? fdc_verify(lba, buf, n) : 0;
 }
 
 static int fs_read_locked(const char *name, u8 *buf, u32 max)
@@ -147,11 +196,11 @@ static int fs_read_locked(const char *name, u8 *buf, u32 max)
     u32 got = 0;
     while (size-got >= 512) {
         u32 n=(size-got)/512;
-        if(fdc_read_many(e->start+got/512,buf+got,n))return FS_EIO;
+        if(fdc_read_many(e->start+got/512,buf+got,n))goto failed;
         got+=n*512;
     }
     if (got < size) {
-        if (fdc_read(e->start + got/512, sec) != 0) return FS_EIO;
+        if (fdc_read(e->start + got/512, sec) != 0) goto failed;
         u32 n = size - got < 512 ? size - got : 512;
         memcpy(buf + got, sec, n);
         got += n;
@@ -159,6 +208,9 @@ static int fs_read_locked(const char *name, u8 *buf, u32 max)
     if(epoch!=fc_epoch)return FS_EIO;
     fc_save(e,buf,size,epoch);
     return (int)size;
+failed:
+    fs_probe(e->start, e->nsect, 0, 0, 0);
+    return FS_EIO;
 }
 
 static int fs_write_locked(const char *name, const u8 *buf, u32 size, int fresh)
@@ -170,49 +222,51 @@ static int fs_write_locked(const char *name, const u8 *buf, u32 size, int fresh)
     if (size > (u32)(FS_END - FS_DATA) * 512) return -2;
     int nsect = (size + 511) / 512;
     if (nsect == 0) nsect = 1;
-
-    FsEnt *e = find(name);
-
-    if (e && (e->attr & FS_ATTR_DIR)) return -3;
-
-    FsEnt *grow = 0;
-    FsEnt saved = {0};
-    int existed = (e != 0);
-    if (existed) saved = *e;
-    if (e && (fresh || nsect > e->nsect)) { grow = e; e = 0; }
-    if (!e) {
-        int start = alloc(nsect);
-        if (start < 0) return -2;
-        if (grow) e = grow;
-        else {
-            int i;
-            for (i = 0; i < fs_slots && table[i].used; i++) ;
-            if (i == fs_slots) return -2;
-            e = &table[i];
-            memset(e, 0, sizeof *e);
-            strlcpy(e->name, name, FS_NAMELEN);
-            e->used = 1;
-        }
-        e->start = start;
-        e->nsect = nsect;
-    }
-    e->size = size;
-    e->mtime = rtc_now_dos();
-
     u32 full = size / 512;
-    int failed = full && fdc_write_many(e->start, buf, full);
-    if (!failed && (size % 512 || !size)) {
-        u8 sec[512];
-        memset(sec, 0, sizeof sec);
-        if (size % 512) memcpy(sec, buf + full * 512, size % 512);
-        failed = fdc_write(e->start + full, sec);
-    }
-    if (failed) {
+    u8 tail[512];
+    memset(tail, 0, sizeof tail);
+    memcpy(tail, buf + full * 512, size % 512);
+
+    for (int pass = 0; ; pass++) {
+        FsEnt *e = find(name);
+
+        if (e && (e->attr & FS_ATTR_DIR)) return -3;
+
+        FsEnt *grow = 0;
+        FsEnt saved = {0};
+        int existed = (e != 0);
+        if (existed) saved = *e;
+        if (e && (fresh || nsect > e->nsect ||
+                  fb_clash(bad, nbad, e->start, e->nsect) >= 0)) { grow = e; e = 0; }
+        if (!e) {
+            int start = alloc(nsect);
+            if (start < 0) return -2;
+            if (grow) e = grow;
+            else {
+                int i;
+                for (i = 0; i < fs_slots && table[i].used; i++) ;
+                if (i == fs_slots) return -2;
+                e = &table[i];
+                memset(e, 0, sizeof *e);
+                strlcpy(e->name, name, FS_NAMELEN);
+                e->used = 1;
+            }
+            e->start = start;
+            e->nsect = nsect;
+        }
+        e->size = size;
+        e->mtime = rtc_now_dos();
+
+        int failed = full && put(e->start, buf, full);
+        if (!failed && (int)full < nsect) failed = put(e->start + full, tail, 1);
+        if (!failed) return commit_table(entry_sectors(e)) ? 0 : -1;
+
+        u32 at = e->start;
         if (existed) *e = saved;
         else e->used = 0;
-        return -1;
+        if (!fs_probe(at, nsect, buf, full, tail) || pass == 7) return -1;
+        fresh = 1;
     }
-    return commit_table(entry_sectors(e)) ? 0 : -1;
 }
 
 static int fs_delete_locked(const char *name)
@@ -352,7 +406,7 @@ static int fs_defrag_locked(void (*prog)(int done, int total))
         e[i].sects = table[i].nsect;
         e[i].idx = (u16)i;
     }
-    int moves = fs_plan(e, FS_NFILES, FS_DATA);
+    int moves = fs_plan(e, FS_NFILES, FS_DATA, bad, nbad);
     if (!moves) return 0;
 
     int done = 0;
@@ -394,10 +448,29 @@ static int fs_defrag_locked(void (*prog)(int done, int total))
 u32 fs_free_kb(void)
 {
     if (!fs_ensure()) return 0;
-    u32 used = 0;
+    u32 used = nbad, total = FS_END - FS_DATA;
     for (int i = 0; i < FS_NFILES; i++)
         if (table[i].used) used += table[i].nsect;
-    return (FS_END - FS_DATA - used) / 2;
+    return (total - (used < total ? used : total)) / 2;
+}
+
+static int fs_bad_locked(int op, u32 lba)
+{
+    if (!fs_ensure()) return -1;
+    int n = nbad;
+    switch (op) {
+    case FSB_COUNT: return n;
+    case FSB_GET:   return lba < (u32)n ? bad[lba] : -1;
+    case FSB_MARK:  return fb_clash(bad, n, lba, 1) >= 0 ? 0 : bad_mark(lba) ? 1 : -1;
+    case FSB_CLEAR:
+        if (lba) fb_del(bad, &nbad, lba);
+        else nbad = 0;
+        if (nbad == n) return 0;
+        if (bad_flush()) return n - nbad;
+        if (lba) fb_add(bad, &nbad, lba);
+        else nbad = n;
+    }
+    return -1;
 }
 
 const char *ext_type(const char *name)
@@ -439,5 +512,19 @@ int fs_touch(const char *name){mtx_lock(&fs_mutex);const char *old=debug_path(0,
 int fs_rename(const char *oldname,const char *newname){mtx_lock(&fs_mutex);const char *old=debug_path(0,oldname);int r=fs_rename_locked(oldname,newname);debug_done(2,old,r);mtx_unlock(&fs_mutex);return r;}
 
 int fs_rename_dir(const char *olddir,const char *newdir){mtx_lock(&fs_mutex);const char *old=debug_path(0,olddir);int r=fs_rename_dir_locked(olddir,newdir);debug_done(2,old,r);mtx_unlock(&fs_mutex);return r;}
+
+int fs_bad(int op,u32 lba){mtx_lock(&fs_mutex);int r=fs_bad_locked(op,lba);mtx_unlock(&fs_mutex);return r;}
+
+int disk_write(u32 lba,const u8 *buf)
+{
+    u8 sec[512];
+    if(lba>=FS_END||kupd_critical||!paging_span(buf,512))return -2;
+    memcpy(sec,buf,512);
+    mtx_lock(&fs_mutex);
+    int r=fdc_write(lba,sec);
+    if(lba>=FS_SUPER&&lba<FS_DATA)reload_table();
+    mtx_unlock(&fs_mutex);
+    return r;
+}
 
 int fs_defrag(void (*prog)(int,int)){mtx_lock(&fs_mutex);const char *old=debug_path(0,"defrag");int r=fs_defrag_locked(prog);debug_done(2,old,r);mtx_unlock(&fs_mutex);return r;}

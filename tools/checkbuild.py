@@ -69,8 +69,21 @@ for name in sorted(expected):
     entry = files['sys/'+name]
     offset = entry['start']*512
     assert image[offset:offset+entry['size']] == built, name
-assert {p.name for p in (root/'built').iterdir()} == {'flopnix.img', 'flopnix.ku', 'flopnix-update.json', 'kexts'}
+present = {p.name for p in (root/'built').iterdir()}
+assert present - {'flopnix_minimal.img'} == {'flopnix.img', 'flopnix.ku', 'flopnix-update.json', 'kexts'}
 print(f'PASS: image, kernel update, boot checksum, and all {len(expected)} production extensions match.')
-for name in ('flopnix.img', 'flopnix.ku'):
+if 'flopnix_minimal.img' in present:
+    small = (root/'built/flopnix_minimal.img').read_bytes()
+    ensure_fs(small)
+    skip = {'textweb.kx'} | {n+'.kx' for n in names if 'APP_CAT_GAMES' in (root/'kexts'/(n+'.c')).read_text()}
+    assert len(small) == len(image) and small[:512+len(kernel)] == image[:512+len(kernel)], 'Minimal image kernel differs'
+    listed = {e['name']: e for e in entries(small) if e['used']}
+    assert set(listed) == {'sys/'+n for n in expected - skip}, ('flopnix_minimal.img', set(listed) ^ {'sys/'+n for n in expected - skip})
+    for name in sorted(expected - skip):
+        entry = listed['sys/'+name]
+        assert small[entry['start']*512:entry['start']*512+entry['size']] == (root/'built/kexts'/name).read_bytes(), name
+    print(f'PASS: minimal image matches, {len(listed)} extensions, without {" ".join(sorted(n[:-3] for n in skip))}.')
+for name in ('flopnix.img', 'flopnix.ku', 'flopnix_minimal.img'):
+    if name not in present: continue
     data = (root/'built'/name).read_bytes()
     print(f'{name}: {len(data)} bytes; SHA256 {hashlib.sha256(data).hexdigest()}')

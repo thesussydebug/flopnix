@@ -46,7 +46,7 @@ static inline const char *sh_usage(const char *c)
     if (sc_eq(c, "unpack"))   return "unpack <file> - extract .fpa beside archive (no overwrite); .pz supported";
     if (sc_eq(c, "wget"))     return "wget <url> [f]- fetch http (host or full URL)";
     if (sc_eq(c, "lspci"))    return "lspci         - list PCI devices";
-    if (sc_eq(c, "set"))      return "set [video|mouse|net ...] - config";
+    if (sc_eq(c, "set"))      return "set [video|mouse|net|shot ...] - config";
     if (sc_eq(c, "uname"))    return "uname [-a]    - system name";
     if (sc_eq(c, "df"))       return "df            - disk space (A: + USB)";
     if (sc_eq(c, "cal"))      return "cal           - this month's calendar";
@@ -69,7 +69,7 @@ static inline const char *sh_usage(const char *c)
     if (sc_eq(c, "defrag"))   return "defrag        - pack A:'s files contiguously";
     if (sc_eq(c, "fscan"))    return "fscan         - scan A: for bad sectors";
     if (sc_eq(c, "ring3"))    return "ring3         - run a payload at CPL 3 and report what the CPU did";
-    if (sc_eq(c, "disk"))     return "disk [scan|seek|map] - drive health and surface map";
+    if (sc_eq(c, "disk"))     return "disk [scan|seek|map|backup|bad [lba]|good lba|all] - drive health, map, USB backup, bad sectors";
     if (sc_eq(c, "bootsec"))  return "bootsec       - hex dump of the boot sector";
     if (sc_eq(c, "bios"))     return "bios          - BIOS date/vendor/memory info";
     if (sc_eq(c, "shutdown")) return "shutdown      - power off (or safe-to-turn-off)";

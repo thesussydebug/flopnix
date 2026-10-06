@@ -259,6 +259,7 @@ int  paging_active(void);
 u32  page_fault_addr(void);
 int  paging_mapped(u32 va);
 int  paging_writable(u32 va);
+int  paging_span(const void *p, u32 n);
 int  mem_poke(u32 va, u8 val);
 u32  paging_pages_mapped(void);
 void paging_flush(void);
@@ -417,6 +418,9 @@ int  fdc_read(u32 lba, u8 *buf);
 int  fdc_write(u32 lba, const u8 *buf);
 int  fdc_read_many(u32 lba, u8 *buf, u32 count);
 int  fdc_write_many(u32 lba, const u8 *buf, u32 count);
+int  fdc_verify(u32 lba, const u8 *buf, u32 count);
+int  disk_write(u32 lba, const u8 *buf);
+int  fs_bad(int op, u32 lba);
 void fdc_tick(void);
 
 int   fs_ensure(void);

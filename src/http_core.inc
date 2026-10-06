@@ -5,7 +5,7 @@ typedef struct {
     char header[4096],line[256];
     u32 received,left,trailer;
     int hn,ln,state,error,interim,chunked;
-    u8 http11,close_hdr,keep_hdr;
+    u8 http11,close_hdr,keep_hdr,gzip;
 } HttpReader;
 static int hr_lower(int c){return c>='A'&&c<='Z'?c+32:c;}
 static int hr_length(const char *s){int n=0;while(s[n])n++;return n;}
@@ -88,11 +88,16 @@ static int hr_headers(HttpReader *r)
         if(status==101||++r->interim>4||have_te||have_length)return 0;
         r->hn=0;r->info.status=0;r->info.type[0]=r->info.location[0]=r->info.filename[0]=r->info.encoding[0]=0;return 1;
     }
-    if(r->info.encoding[0]&&!hr_equal(r->info.encoding,hr_length(r->info.encoding),"identity")){r->error=-6;return 0;}
+    int en=hr_length(r->info.encoding);
+    if(en&&!hr_equal(r->info.encoding,en,"identity")){
+        if(!hr_equal(r->info.encoding,en,"gzip")&&!hr_equal(r->info.encoding,en,"x-gzip")){r->error=-6;return 0;}
+        r->gzip=1;r->info.encoding[0]=0;
+    }
     if(status==204||status==304){r->state=7;return 1;}
     if(r->chunked)r->state=3;
     else if(have_length){r->left=r->info.length;r->state=r->left?1:7;}
     else r->state=2;
+    if(r->gzip)r->info.length=r->info.length_known=0;
     return 1;
 }
 static int hr_feed(HttpReader *r,const u8 *s,int n,int (*sink)(const u8 *,int,void *),void *ctx)

@@ -7,6 +7,7 @@ SUPER, TABLE, TSECT, DATA, END = 288, 289, 80, 369, 2880
 MAGIC, VER, ENTSZ = 0x53465046, 3, 80
 NFILES, NAMELEN = 512, 64
 ATTR_DIR = 0x10
+BAD_OFF, BAD_MAGIC, BAD_MAX = 12, 0x31444142, 240
 
 def load(path):
     with open(path, "rb") as source:
@@ -61,9 +62,21 @@ def entries(d):
                         nsect=nsect, used=used, attr=attr, mtime=mtime))
     return out
 
+def bad_list(d):
+    base = SUPER*512 + BAD_OFF
+    magic, count = struct.unpack_from('<IH', d, base)
+    if magic != BAD_MAGIC or count > BAD_MAX:
+        return []
+    bad = list(struct.unpack_from(f'<{count}H', d, base + 6))
+    first = layout(d)[3]
+    if any(not first <= b < END for b in bad) or any(a >= b for a, b in zip(bad, bad[1:])):
+        return []
+    return bad
+
 def free_run(d, need, exclude):
     used = [(e["start"], e["nsect"]) for e in entries(d)
             if e["used"] and e["i"] != exclude]
+    used += [(b, 1) for b in bad_list(d)]
     start = layout(d)[3]
     while start + need <= END:
         clash = None
@@ -82,6 +95,9 @@ def do_list(img):
     for e in entries(d):
         if e["used"]:
             print("  %-24s %7d bytes  LBA %d" % (e["name"], e["size"], e["start"]))
+    bad = bad_list(d)
+    if bad:
+        print("  bad sectors: " + ", ".join(map(str, bad)))
 
 def encode_name(name, namelen=NAMELEN):
     encoded = name.encode('latin1')
@@ -155,9 +171,13 @@ def do_upgrade(img, output):
     result[:SUPER*512] = release[:SUPER*512]
     result[256*512:SUPER*512] = old[256*512:SUPER*512]
     struct.pack_into('<III', result, SUPER*512, MAGIC, VER, ENTSZ)
+    bad = [b for b in bad_list(old) if b >= DATA]
+    struct.pack_into(f'<IH{len(bad)}H', result, SUPER*512 + BAD_OFF, BAD_MAGIC, len(bad), *bad)
     start = DATA
     for i, (e, payload) in enumerate(records.values()):
         name = encode_name(e['name'])
+        while any(start <= b < start + e['nsect'] for b in bad):
+            start = min(b for b in bad if b >= start) + 1
         if start + e['nsect'] > END:
             raise ValueError('Not enough space for the upgraded image; original unchanged.')
         struct.pack_into(f'<{NAMELEN}sIIHHBB2x', result, TABLE*512+i*ENTSZ,

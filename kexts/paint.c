@@ -11,6 +11,9 @@ static const Kapi *api;
 #include "appfield.h"
 #include "fileopen.inc"
 #include "image.h"
+#pragma clang attribute push(__attribute__((minsize)), apply_to = function)
+#include "pngw.inc"
+#pragma clang attribute pop
 static int paint_type = -1;
 
 #define SW              (*api->screen_w)
@@ -60,7 +63,7 @@ static int    pdefw, pdefh;
 #define BMPHDR (54 + 1024)
 enum { PM_NORM, PM_FILE, PM_EDIT, PM_VIEW, PM_SIZE };
 enum { A_NEW, A_OPEN, A_SAVE, A_SAVEAS, A_UNDO, A_CLEAR, A_FLIPH, A_FLIPV,
-       A_ZOOM1, A_ZOOM2, A_ZOOM4, A_SIZE, A_CLOSE, A_OPEN_PATH, A_CUSTOM };
+       A_ZOOM1, A_ZOOM2, A_ZOOM4, A_SIZE, A_CLOSE, A_OPEN_PATH, A_CUSTOM, A_SAVEPNG };
 
 enum { T_PEN, T_LINE, T_RECT, T_BOX, T_OVAL, T_DISC, T_FILL, T_TEXT,
        T_PICK, T_ERASE };
@@ -110,10 +113,11 @@ static const char *const tool_help[NTOOL] = {
     "Click to pick a colour", "Drag to erase"
 };
 static const char *const menus[3][5] = {
-    {"New          Ctrl+N", "Open...      Ctrl+O", "Save         Ctrl+S", "Save as..."},
+    {"New          Ctrl+N", "Open...      Ctrl+O", "Save         Ctrl+S", "Save as...", "Save as PNG..."},
     {"Undo / redo  Ctrl+Z", "Clear picture", "Flip horizontally", "Flip vertically", "Custom"},
     {"Actual size   100%", "Zoom in       200%", "Zoom in       400%", "Canvas size..."}
 };
+static int menu_rows(int mode) { return mode == PM_EDIT || mode == PM_FILE ? 5 : 4; }
 static void view_clamp(Paint *p)
 {
     p->ox = pv_limit(p->cw, p->vw, p->zoom, p->ox);
@@ -429,8 +433,33 @@ static u32 paint_build_bmp(Paint *p, u8 *data)
     return fsz;
 }
 
+static int paint_is_png(const char *path)
+{
+    u32 n = strlen(path);
+    return n > 4 && !strcasecmp(path + n - 4, ".png");
+}
+
+__attribute__((noinline, minsize)) static u32 paint_build_png(Paint *p)
+{
+    u32 raw = (u32)(p->cw + 1) * p->ch;
+    if (raw > IOBUF_SZ - PW_WORK - 768 - 4096) return 0;
+    u8 *pal = iobuf + IOBUF_SZ - 768, *work = pal - PW_WORK, *rows = work - raw;
+    for (int i = 0; i < 256; i++) palette_rgb(i, &pal[i * 3], &pal[i * 3 + 1], &pal[i * 3 + 2]);
+    for (int y = 0; y < p->ch; y++) {
+        u8 *r = rows + (u32)y * (p->cw + 1);
+        r[0] = 0;
+        memcpy(r + 1, p->canvas + y * p->cw, p->cw);
+    }
+    return pngw_encode(iobuf, (u32)(rows - iobuf), rows, p->cw, p->ch, pal, api->crc32, work);
+}
+
 static int paint_write_to_locked(Paint *p, int src, const char *path)
 {
+    if (paint_is_png(path)) {
+        u32 png = paint_build_png(p);
+        if (!png) return -5;
+        return src == 1 ? fat_write(path, iobuf, png) : fs_write(path, iobuf, png);
+    }
     u32 size = BMPHDR + (u32)((p->cw + 3) & ~3) * p->ch;
     u8 *data = size <= IOBUF_SZ ? iobuf : api->kmalloc(size);
     if (!data) return -4;
@@ -454,6 +483,7 @@ static int paint_save_to(Paint *p, int drive, const char *path)
     else if (r == -2) strlcpy(p->msg, "disk full", sizeof p->msg);
     else if (r == -3) strlcpy(p->msg, "that name is a folder", sizeof p->msg);
     else if (r == -4) strlcpy(p->msg, "Not enough memory to save.", sizeof p->msg);
+    else if (r == -5) strlcpy(p->msg, "too large for PNG", sizeof p->msg);
     else strlcpy(p->msg, "save failed", sizeof p->msg);
     return r;
 }
@@ -568,6 +598,14 @@ static int paint_load_image(Paint *p, int drive, const char *path)
     return r;
 }
 
+static int paint_load_other(Paint *p, int drive, const char *path, const char *spec)
+{
+    int r = paint_load_image(p, drive, path);
+    if (r != 1 || !paint_is_png(path)) return r;
+    paint_bind(p, spec);
+    return 0;
+}
+
 static int paint_load_spec_locked(Paint *p, const char *spec)
 {
     int drive;
@@ -576,12 +614,12 @@ static int paint_load_spec_locked(Paint *p, const char *spec)
     u8 head[54];
     int n = drive == 1 ? fat_read(path, head, sizeof head)
                        : api->fs_read(path, head, sizeof head);
-    if (n != sizeof head || head[0] != 'B' || head[1] != 'M') return paint_load_image(p, drive, path);
+    if (n != sizeof head || head[0] != 'B' || head[1] != 'M') return paint_load_other(p, drive, path, spec);
     int w=(int)get32(head+18), h=(int)get32(head+22);
     u32 bpp=get16(head+28), off=get32(head+10);
     if (h == (-2147483647-1)) return -1;
     if (h < 0) h=-h;
-    if(w<1||h<1||w>PCW_MAX||h>PCH_MAX||(bpp!=8&&bpp!=24))return paint_load_image(p, drive, path);
+    if(w<1||h<1||w>PCW_MAX||h>PCH_MAX||(bpp!=8&&bpp!=24))return paint_load_other(p, drive, path, spec);
     u32 bytes=(((u32)w*(bpp/8)+3)&~3u)*(u32)h;
     if(off>0x7FFFFFFFu-bytes)return -1;
     u32 size=off+bytes;
@@ -643,6 +681,17 @@ static void text_commit(Paint *p, int keep)
 
 #include "paintsize.inc"
 
+static void paint_save_as(Paint *p, const char *ext)
+{
+    char name[sizeof p->fpath];
+    u32 n, e = strlen(ext);
+    strlcpy(name, p->has_file ? pbase(p->fpath) : "untitled", sizeof name);
+    n = strlen(name);
+    if (n <= e || name[n - e - 1] != '.' || strcasecmp(name + n - e, ext))
+        for (u32 i = n; i > 1; i--) if (name[i - 1] == '.') { name[i - 1] = 0; break; }
+    api->file_save("Save picture as", ext, name, paint_saved_as, p);
+}
+
 static void paint_perform(Paint *p, int action)
 {
     p->dragging = 0; p->lx = -1; p->mode = PM_NORM; p->msg[0] = 0;
@@ -656,9 +705,8 @@ static void paint_perform(Paint *p, int action)
     case A_SAVE:
         if (p->has_file) { if(!paint_save_to(p,p->fsrc,p->fpath))paint_continue(p);else p->pending=0;break; }
 
-    case A_SAVEAS:
-        api->file_save("Save picture as", "bmp", p->has_file ? pbase(p->fpath) : "untitled",
-                       paint_saved_as, p); break;
+    case A_SAVEAS: paint_save_as(p, "bmp"); break;
+    case A_SAVEPNG: paint_save_as(p, "png"); break;
     case A_UNDO:
         strlcpy(p->msg, undo_swap(p) ? "Undo / redo" : "Nothing to undo", sizeof p->msg); break;
     case A_CLEAR:
@@ -782,7 +830,7 @@ static void paint_mouse(int inst, int lx, int ly, int ev, int cw, int ch)
             int mode = p->mode;
             int x0 = mode == PM_SIZE ? 96 : (mode - PM_FILE) * 48;
             p->mode = PM_NORM;
-            if (lx < x0 || lx >= x0 + 224 || ly < TOP_H + 2 || ly >= TOP_H + 2 + (mode == PM_EDIT ? 5 : 4) * 20) return;
+            if (lx < x0 || lx >= x0 + 224 || ly < TOP_H + 2 || ly >= TOP_H + 2 + menu_rows(mode) * 20) return;
             int row = (ly - TOP_H - 2) / 20;
             if (mode == PM_SIZE) {
                 text_commit(p, 0);
@@ -790,7 +838,7 @@ static void paint_mouse(int inst, int lx, int ly, int ev, int cw, int ch)
                 p->ox = p->oy = 0; view_clamp(p);
                 win_fit_client(WT_PAINT, inst, paint_fit_w(p), paint_fit_h(p));
                 kfmt(p->msg, sizeof p->msg, "Canvas: %d x %d pixels", p->cw, p->ch);
-            } else paint_action(p, mode == PM_EDIT && row == 4 ? A_CUSTOM : (mode - PM_FILE) * 4 + row);
+            } else paint_action(p, row < 4 ? (mode - PM_FILE) * 4 + row : mode == PM_EDIT ? A_CUSTOM : A_SAVEPNG);
             return;
         }
         if (lx >= 4 && lx < 76 && ly >= TOP_H + 4 && ly < TOP_H + 164) {
@@ -1081,7 +1129,7 @@ static void paint_draw(Win *w, int cx, int cy, int cw, int ch)
     if (p->mode != PM_NORM) {
         int x = cx + (p->mode == PM_SIZE ? 96 : (p->mode - PM_FILE) * 48);
         int y = cy + TOP_H;
-        int rows = p->mode == PM_EDIT ? 5 : 4;
+        int rows = menu_rows(p->mode);
         panel(x, y, 224, 4 + rows * 20, 0);
         for (int i = 0; i < rows; i++) {
             int yy = y + 2 + i * 20;

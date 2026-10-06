@@ -17,6 +17,8 @@
 
 static const Kapi *api;
 #include "deltree.inc"
+#include "bakname.inc"
+#include "floppy.h"
 
 #define ticks           (*api->ticks)
 #define timer_alive     (*api->timer_alive)
@@ -190,6 +192,7 @@ static void do_wget(const char *args)
     else if (st == -3) tprint("wget: cannot reach that address\n");
     else if (st == -4) tprint("\nwget: download cut short - not saved\n");
     else if (st == -1) tprint("wget: no response (timed out)\n");
+    else if (st == -6) tprint("\nwget: cannot decode the response - not saved\n");
     else if (have_save) {
         char norm[64];
         resolve(save, norm, sizeof norm);
@@ -583,7 +586,7 @@ static void dk_scan(void)
     dk_reset();
     u8 sec[512];
     int abort = 0;
-    u32 lba = 0;
+    u32 lba = 0, marked = 0, stuck = 0;
     api->esc_arm();
     for (; lba < FH_TOTAL && !abort; lba++) {
         u32 t0 = ticks;
@@ -593,7 +596,11 @@ static void dk_scan(void)
         int c, h;
         if (fh_cell(lba, &c, &h))
             dk_map[h][c] = (unsigned char)fh_worst(dk_map[h][c], cls);
-        if (cls == FH_BAD)        dk_bad++;
+        if (cls == FH_BAD) {
+            dk_bad++;
+            if (api->fs_bad(FSB_MARK, lba) >= 0) marked++;
+            else stuck++;
+        }
         else if (cls == FH_RETRY) dk_retry++;
         else if (cls == FH_SLOW)  dk_slow++;
         else                      dk_ok++;
@@ -612,6 +619,16 @@ static void dk_scan(void)
     tprint(abort ? "aborted - the map shows only what was read\n" : "");
     tprint(t);
     tputc('\n');
+    if (marked) {
+        kfmt(t, sizeof t, "%u bad sector%s marked\n",
+             marked, marked == 1 ? "" : "s");
+        tprint(t);
+    }
+    if (stuck) {
+        kfmt(t, sizeof t, "%u bad sector%s not marked\n",
+             stuck, stuck == 1 ? "" : "s");
+        tprint(t);
+    }
     dk_print_map();
     int v = fh_verdict(dk_bad, dk_retry, dk_slow,
                        dk_ok + dk_slow + dk_retry + dk_bad);
@@ -644,13 +661,120 @@ static void dk_seek(void)
     tputc('\n');
 }
 
+static void dk_bad_list(void)
+{
+    char line[128];
+    int n = api->fs_bad(FSB_COUNT, 0);
+    if (n < 0) { tprint("disk error\n"); return; }
+    for (int i = 0; i < n; i++) {
+        int lba = api->fs_bad(FSB_GET, (u32)i);
+        if (lba < 0) break;
+        const char *in = 0;
+        for (int f = 0; f < FS_NFILES && !in; f++) {
+            FsEnt *e = fs_slot(f);
+            if (e->used && lba >= e->start && lba - e->start < e->nsect) in = e->name;
+        }
+        kfmt(line, sizeof line, "  LBA %4d  cyl %2d head %d sector %2d  %s%s\n", lba,
+             lba / 36, lba / 18 % 2, lba % 18 + 1, in ? "in " : "free", in ? in : "");
+        tprint(line);
+    }
+    kfmt(line, sizeof line, "%d bad sector%s marked\n",
+         n, n == 1 ? "" : "s");
+    tprint(line);
+}
+
+static void dk_bad_edit(const char *arg, int good)
+{
+    while (*arg == ' ') arg++;
+    int all = good && !strcmp(arg, "all");
+    u32 lba = all ? 0 : (u32)api->atoi(arg);
+    if (!all && (*arg < '0' || *arg > '9' || !lba)) {
+        tprint(good ? "usage: disk good lba|all\n" : "usage: disk bad [lba]\n");
+        return;
+    }
+    int r = api->fs_bad(good ? FSB_CLEAR : FSB_MARK, lba);
+    char line[48];
+    if (r < 0) {
+        tprint(good ? "could not update the list\n" : "cannot mark that sector\n");
+        return;
+    }
+    if (good) kfmt(line, sizeof line, "%d sector%s cleared\n", r, r == 1 ? "" : "s");
+    else kfmt(line, sizeof line, "LBA %u %s\n", lba, r ? "marked bad" : "is already marked");
+    tprint(line);
+}
+
+static int dk_bak_taken(const char *path, void *ctx)
+{
+    (void)ctx;
+    return api->fat_exists(path) != 0;
+}
+
+#define DK_CYL (2 * FLOPPY_TRACK_SECTORS)
+
+static void dk_backup(void)
+{
+    char path[24], line[72];
+    const FloppyOps *disk = api->service_get("disk.floppy");
+    u32 lost = 0, lba = 0, cyls = FH_CYLS, held = 0;
+    u8 *buf = 0;
+    int rc = 0;
+    if (!fat_mount() || !fat_writable()) { tprint("no writable USB drive\n"); return; }
+    if (fat_free_kb() < FH_TOTAL / 2) { tprint("not enough room on the USB drive\n"); return; }
+    if (!bak_next(dk_bak_taken, 0, path, sizeof path)) { tprint("no free backup name\n"); return; }
+    do {
+        cyls /= 2;
+        if (cyls == 1 || cyls * DK_CYL * 512 <= api->heap_avail() / 2) buf = api->kmalloc(cyls * DK_CYL * 512);
+    } while (!buf && cyls > 1);
+    if (!buf) { tprint("not enough memory\n"); return; }
+    kfmt(line, sizeof line, "copying A: to U:%s (Esc aborts)...\n", path);
+    tprint(line);
+    api->esc_arm();
+    for (; lba < FH_TOTAL && !rc; lba += DK_CYL) {
+        for (u32 t = 0; t < DK_CYL; t += FLOPPY_TRACK_SECTORS) {
+            u8 *track = buf + (held * DK_CYL + t) * 512;
+            if (disk && disk->abi == FLOPPY_ABI && !disk->read(lba + t, track, FLOPPY_TRACK_SECTORS)) continue;
+            for (u32 i = 0; i < FLOPPY_TRACK_SECTORS; i++)
+                if (fdc_read(lba + t + i, track + i * 512)) {
+                    memset(track + i * 512, 0, 512);
+                    lost++;
+                }
+        }
+        if (++held == cyls || lba + DK_CYL >= FH_TOTAL) {
+            rc = api->fat_append(path, buf, held * DK_CYL * 512);
+            held = 0;
+        }
+        gui_pump();
+        if (!rc && api->esc_pending()) rc = 1;
+        if (!rc && lba / DK_CYL % 8 == 7) {
+            kfmt(line, sizeof line, "  %u%%...\n", (lba + DK_CYL) * 100 / FH_TOTAL);
+            tprint(line);
+        }
+    }
+    api->kfree(buf);
+    if (rc) {
+        fat_delete(path);
+        tprint(rc == 1 ? "aborted\n" : rc == -2 ? "USB drive is full\n" : "USB write failed\n");
+        return;
+    }
+    kfmt(line, sizeof line, "saved %s to USB\n", path + 1);
+    tprint(line);
+    if (lost) {
+        kfmt(line, sizeof line, "%u sector%s unreadable\n", lost, lost == 1 ? "" : "s");
+        tprint(line);
+    }
+}
+
 static void do_disk(const char *arg)
 {
     while (*arg == ' ') arg++;
     if (!strcmp(arg, "scan")) { dk_scan(); return; }
     if (!strcmp(arg, "seek")) { dk_seek(); return; }
+    if (!strcmp(arg, "backup")) { dk_backup(); return; }
+    if (!strcmp(arg, "bad")) { dk_bad_list(); return; }
+    if (!strncmp(arg, "bad ", 4)) { dk_bad_edit(arg + 4, 0); return; }
+    if (!strncmp(arg, "good ", 5)) { dk_bad_edit(arg + 5, 1); return; }
     if (arg[0] && strcmp(arg, "map")) {
-        tprint("usage: disk [scan|seek|map]\n");
+        tprint("usage: disk [scan|seek|map|backup|bad [lba]|good lba|all]\n");
         return;
     }
     if (!strcmp(arg, "map")) {
@@ -675,7 +799,9 @@ static void do_disk(const char *arg)
          api->disk_stat(DS_LAST_LBA));
     tprint(line);
 
-    tprint("spare        n/a - FLOPFS has no sector remapping\n");
+    int nb = api->fs_bad(FSB_COUNT, 0);
+    kfmt(line, sizeof line, "bad sectors  %d marked\n", nb < 0 ? 0 : nb);
+    tprint(line);
     if (dk_scanned) {
         char t[80];
         dm_tally(dk_ok, dk_slow, dk_retry, dk_bad, t, sizeof t);
@@ -849,9 +975,13 @@ static void sh_exec(char *cmd)
             tprint(buf);
             kfmt(buf, sizeof buf, "net:   %s\n", CFG->net_mode ? "static" : "dhcp");
             tprint(buf);
+            u32 bmp = 0;
+            api->config_get("shot.bmp", &bmp);
+            tprint(bmp == 1 ? "shot:  bmp\n" : "shot:  png\n");
             tprint("usage: set video 640|800|1024|vga\n");
             tprint("       set mouse 1-4\n");
             tprint("       set net dhcp | set net static <ip> [gw]\n");
+            tprint("       set shot png|bmp\n");
         } else if (!strncmp(a, "video ", 6)) {
             const char *v = a + 6;
             u8 nv = 0;
@@ -867,6 +997,10 @@ static void sh_exec(char *cmd)
             if (sp < 1 || sp > 4) { tprint("usage: set mouse 1-4\n"); return; }
             CFG->mouse_speed = sp;
             tprint(config_save() ? "saved\n" : "disk error saving config\n");
+        } else if (!strncmp(a, "shot ", 5)) {
+            int bmp = !strcmp(a + 5, "bmp");
+            if (!bmp && strcmp(a + 5, "png")) { tprint("usage: set shot png|bmp\n"); return; }
+            tprint(api->config_set("shot.bmp", (u32)bmp) ? "saved\n" : "disk error saving config\n");
         } else if (!strcmp(a, "net dhcp")) {
             CFG->net_mode = 0;
             if (!config_save()) { tprint("disk error saving config\n"); return; }

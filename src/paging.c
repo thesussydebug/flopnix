@@ -246,6 +246,12 @@ int paging_mapped(u32 va)
     return pg_va_mapped(pde, pte);
 }
 
+int paging_span(const void *p, u32 n)
+{
+    u32 a = (u32)p, z = a + n - 1;
+    return a && z >= a && paging_mapped(a) && paging_mapped(z);
+}
+
 int paging_writable(u32 va)
 {
     if (!paging_on) return 1;

@@ -28,6 +28,9 @@ static const u16 kb_kp_nav[13] = {
 #ifndef K_PRTSC
 #define K_PRTSC 0x201
 #endif
+#ifndef K_SYSRQ
+#define K_SYSRQ 0x203
+#endif
 
 typedef struct {
     u8 e0;
@@ -95,6 +98,7 @@ static inline int kb_feed(KbSt *st, u8 sc, int *track, int *down)
         return rel ? 0 : kv;
     }
 
+    if (code == 0x54) { *track = K_SYSRQ; *down = !rel; return rel ? 0 : K_SYSRQ; }
     if (code >= 64) return 0;
     *track = kb_map[code];
     *down = !rel;

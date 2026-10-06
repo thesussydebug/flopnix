@@ -103,7 +103,7 @@ done
 drain
 
 echo "== compiling kexts..."
-rm -f built/kexts/*.kx
+rm -f built/kexts/*.kx built/flopnix_minimal.img
 
 # Extensions must have no unresolved symbols.
 if command -v llvm-nm >/dev/null 2>&1; then
@@ -136,7 +136,7 @@ cc_kext() {
     fi
     echo "   $n.kx: $(stat -c%s built/kexts/$n.kx) bytes ${SZ:--O2}"
 }
-for n in debug fat net remote dialogs sysinfo notes diskhealth opl2 midi gdi g3d saver image imgview desktop edit files settings paint calc clock calendar memmap memedit minesweeper reversi snake pong tetris shell crashsim taskmgr serialmon faultlog kextview clipview bench charmap game2048 baseconv archive textweb breakout update; do
+for n in debug fat net remote dialogs sysinfo notes diskhealth opl2 midi gdi g3d saver shot image imgview desktop edit files settings paint calc clock calendar memmap memedit minesweeper reversi snake pong tetris shell crashsim taskmgr serialmon faultlog kextview clipview bench charmap game2048 baseconv archive textweb breakout update; do
     spawn cc_kext $n
 done
 drain
