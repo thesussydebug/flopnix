@@ -18,6 +18,11 @@
 static const Kapi *api;
 #include "deltree.inc"
 #include "bakname.inc"
+#include "gzname.inc"
+#include "kextpack.h"
+#include "disktools.h"
+#include "netstream.h"
+#include "telnetc.inc"
 #include "floppy.h"
 
 #define ticks           (*api->ticks)
@@ -28,6 +33,16 @@ static const Kapi *api;
 
 static void tputc(char c) { char s[2] = { c, 0 }; api->shell_print(s); }
 static void tprint(const char *s) { api->shell_print(s); }
+
+static const DiskToolsOps *disk_tools(int load)
+{
+    const DiskToolsOps *t = api->service_get("disk.tools");
+    if (!t && load) {
+        (api->kext_load)("sys/disks.kx");
+        t = api->service_get("disk.tools");
+    }
+    return t && t->abi == DISK_TOOLS_ABI ? t : 0;
+}
 
 #define kfmt            api->kfmt
 #define strcmp          api->strcmp
@@ -245,6 +260,7 @@ static void do_fetch(void)
 }
 
 #include "shcmd.inc"
+#include "dmesg.inc"
 
 static const char *calc_err;
 static i32 calc_expr(const char **pp);
@@ -732,7 +748,7 @@ static void dk_backup(void)
     for (; lba < FH_TOTAL && !rc; lba += DK_CYL) {
         for (u32 t = 0; t < DK_CYL; t += FLOPPY_TRACK_SECTORS) {
             u8 *track = buf + (held * DK_CYL + t) * 512;
-            if (disk && disk->abi == FLOPPY_ABI && !disk->read(lba + t, track, FLOPPY_TRACK_SECTORS)) continue;
+            if (disk && disk->abi >= FLOPPY_ABI && !disk->read(lba + t, track, FLOPPY_TRACK_SECTORS)) continue;
             for (u32 i = 0; i < FLOPPY_TRACK_SECTORS; i++)
                 if (fdc_read(lba + t + i, track + i * 512)) {
                     memset(track + i * 512, 0, 512);
@@ -785,7 +801,17 @@ static void do_disk(const char *arg)
     }
 
     char line[96];
+    int media = api->disk_media();
     tprint("drive A: 1.44M, 80 cylinders x 2 heads x 18 sectors\n");
+    kfmt(line, sizeof line, "media        %s\n",
+         media == 3 ? "FLOPNIX disk" : media ? "not a FLOPNIX disk" : "no disk");
+    tprint(line);
+    const DiskToolsOps *tools = disk_tools(0);
+    int held = 0, kept = tools ? tools->state(&held, 0, 0) : 0;
+    if (kept & DT_ON) {
+        kfmt(line, sizeof line, "system       %d files in memory, disk %s\n", held, kept & DT_HOME ? "in the drive" : "out");
+        tprint(line);
+    }
     kfmt(line, sizeof line, "operations   %u total, %u retried, %u failed\n",
          api->disk_stat(DS_OPS), api->disk_stat(DS_RETRIED),
          api->disk_stat(DS_FAILED));
@@ -899,6 +925,60 @@ done:
 
 #include "term.inc"
 
+#include "telnetcmd.inc"
+
+static void sh_disk_tool(int copy, const char *args)
+{
+    const DiskToolsOps *t = disk_tools(1);
+    if (!t) tprint("sys/disks.kx could not be loaded\n");
+    else if (copy) t->diskcopy(args, tprint);
+    else t->sysmem(args, tprint);
+}
+
+static void sh_gunzip(const char *args)
+{
+    char raw[128], src[96], dst[96], line[160];
+    int sd = 0, dd = 0, named;
+    u32 size;
+    int dir;
+    if (sp_token(&args, raw, sizeof raw) <= 0 || !sp_resolve(api->shell_cwd(), raw, &sd, src, sizeof src)) {
+        tprint("usage: gunzip <file.gz> [output]\n");
+        return;
+    }
+    named = sp_token(&args, raw, sizeof raw) > 0;
+    dd = sd;
+    if (named ? *args || !sp_resolve(api->shell_cwd(), raw, &dd, dst, sizeof dst) : !gz_out_name(src, dst, sizeof dst)) {
+        tprint(named ? "bad output path\n" : "gunzip: name does not end in .gz - give an output name\n");
+        return;
+    }
+    if (!path_info(sd, src, &size, &dir) || dir) { tprint("no such file\n"); return; }
+    if (path_info(dd, dst, &size, &dir)) { tprint("Destination already exists. Choose another name.\n"); return; }
+    if (!dd && strlen(dst) >= api->disk_stat(DS_NAMELEN)) { tprint("Destination path is too long.\n"); return; }
+    path_info(sd, src, &size, &dir);
+    const KextPackOps *pack = api->service_get("kext.pack");
+    if (!pack || pack->abi != KEXT_PACK_ABI) { tprint("gunzip: sys/unpack.kx is not loaded\n"); return; }
+    u8 *data = api->kmalloc(size + 1), *out = 0;
+    if (!data) { tprint("not enough memory\n"); return; }
+    int n = path_read(sd, src, data, (int)size + 1);
+    if (n < 0 || (u32)n != size) n = -1;
+    else {
+        gui_pump();
+        n = pack->gunzip(data, size, &out);
+    }
+    api->kfree(data);
+    if (n < 0) {
+        tprint(n == -42 ? "not enough memory\n" : n == -40 ? "gunzip: not a gzip file (or corrupt)\n" : "could not read the complete file\n");
+        return;
+    }
+    gui_pump();
+    int r = dd ? fat_write(dst, out, (u32)n) : fs_write(dst, out, (u32)n);
+    api->kfree(out);
+    if (r) { tprint("write error (disk full?)\n"); return; }
+    kfmt(line, sizeof line, "%s%s -> %s%s  %u -> %u bytes\n", sd ? "u:" : "", src, dd ? "u:" : "", dst, size, (u32)n);
+    tprint(line);
+    api->broadcast("fs.changed", "");
+}
+
 static void sh_exec(char *cmd)
 {
     while (*cmd == ' ') cmd++;
@@ -909,6 +989,7 @@ static void sh_exec(char *cmd)
     }
     if (!*cmd) return;
     char buf[96];
+    api->disk_media();
 
     if (api->ktrace) {
         char tl[80];
@@ -1439,8 +1520,16 @@ static void sh_exec(char *cmd)
         else               { kfmt(buf, sizeof buf, "reply: time=%dms\n", ms); tprint(buf); }
     } else if (!strcmp(cmd, "fetch")) {
         do_fetch();
+    } else if (!strcmp(cmd, "sysmem") || !strncmp(cmd, "sysmem ", 7)) {
+        sh_disk_tool(0, cmd + 6);
+    } else if (!strcmp(cmd, "diskcopy") || !strncmp(cmd, "diskcopy ", 9)) {
+        sh_disk_tool(1, cmd + 8);
+    } else if (!strcmp(cmd, "gunzip") || !strncmp(cmd, "gunzip ", 7)) {
+        sh_gunzip(cmd[6] ? cmd + 7 : "");
+    } else if (!strcmp(cmd, "telnet") || !strncmp(cmd, "telnet ", 7)) {
+        sh_telnet(cmd[6] ? cmd + 7 : "");
     } else if (!strcmp(cmd, "dmesg")) {
-        api->dmesg();
+        do_dmesg();
     } else if (!strcmp(cmd, "threads")) {
         api->threads();
     } else if (!strcmp(cmd, "kupdate") || !strncmp(cmd, "kupdate ", 8)) {
@@ -1640,6 +1729,7 @@ static void sh_exec(char *cmd)
             char st[12];
             if(k->status==47)strlcpy(st,"on demand",sizeof st);
             else if(k->status==46)strlcpy(st,"inactive",sizeof st);
+            else if(k->status==49)strlcpy(st,"not needed",sizeof st);
             else if (k->status) kfmt(st, sizeof st, "E%d", k->status);
             else strlcpy(st, "ok", sizeof st);
             kfmt(buf, sizeof buf, "%s", k->name);

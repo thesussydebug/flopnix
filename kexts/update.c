@@ -136,7 +136,7 @@ static int installed_checksum(u32 *checksum,u32 *size,int cancellable)
 {
     u8 sector[512];u32 crc=0,sect=1;
     const FloppyOps *disk=api->service_get("disk.floppy");
-    u8 *batch=disk&&disk->abi==FLOPPY_ABI?api->kmalloc(FLOPPY_TRACK_SECTORS*512):0;
+    u8 *batch=disk&&disk->abi>=FLOPPY_ABI?api->kmalloc(FLOPPY_TRACK_SECTORS*512):0;
     u8 *buf=batch?batch:sector;u32 count=batch?FLOPPY_TRACK_SECTORS:1;int result=0;
     if(batch)api->mem_track("Kernel comparison",batch,FLOPPY_TRACK_SECTORS*512);
     for(u32 i=0;i<sect;){

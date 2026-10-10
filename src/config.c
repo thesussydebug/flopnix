@@ -26,7 +26,8 @@ void config_load(void)
 int config_save(void)
 {
     CFG->magic = CFG_MAGIC;
-    return fdc_write(CFG_LBA, (u8 *)CFG) == 0;
+    int h = fs_hooked(FSH_CONFIG, 0, 0, 0);
+    return h != FSH_PASS ? h : fs_ensure() && fdc_write(CFG_LBA, (u8 *)CFG) == 0;
 }
 
 int config_get(const char *key,u32 *value)

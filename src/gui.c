@@ -655,6 +655,7 @@ static PumpBtn pump_btn;
 static volatile u8  pump_inside;
 static volatile int pump_thr = -1;
 int gui_pumping(void) { return pump_thr == thr_self; }
+void (*pump_hook)(void);
 
 void worker_unwind(int preempt_snap)
 {
@@ -695,6 +696,7 @@ __attribute__((minsize)) int gui_pump(void)
     if (mc == 1) mouse_release();
 
     gui_tick();
+    if (pump_hook) pump_hook();
 
     static u32 pump_last;
     if (gui_frame_due() && flip_due(ticks, &pump_last, timer_alive) && present_try()) {

@@ -15,6 +15,8 @@ volatile u8 fdc_irq_fl;
 static u8  motor_on_fl;
 static u32 last_use;
 static int cur_cyl = -1;
+u8 fdc_changed;
+static u8 fdc_live, dcl_off, dcl_stuck, dcl_seen;
 
 static void io_delay(void) { for (int i = 0; i < 4; i++) inb(0x80); }
 
@@ -83,8 +85,8 @@ static void motor(int on)
     if (on) {
         last_use = ticks;
         if (motor_on_fl) return;
-        outb(DOR, 0x1C);
         motor_on_fl = 1;
+        outb(DOR, 0x1C);
         sleep_ticks(30);
     } else {
         outb(DOR, 0x0C);
@@ -94,6 +96,7 @@ static void motor(int on)
 
 void fdc_tick(void)
 {
+    if (fdc_changed) fs_media();
     if (!motor_on_fl) return;
 
     if (!timer_alive || (u32)(ticks - last_use) > MOTOR_OFF_TICKS)
@@ -124,6 +127,38 @@ static int seek(int cyl, int head)
     cur_cyl = cyl;
     sleep_ticks(2);
     return 1;
+}
+
+static int media_lost(void)
+{
+    if (!dcl_off) {
+        if (inb(CCR) & 0x80) {
+            u8 was = fdc_live;
+            fdc_live = 0;
+            cur_cyl = -1;
+            seek(1, 0);
+            recalibrate();
+            if (was) fdc_changed = 1;
+            if (inb(CCR) & 0x80) {
+                if (dcl_seen) return 1;
+                dcl_stuck = 1;
+            }
+        } else dcl_seen = 1;
+    }
+    return fdc_changed;
+}
+
+int fdc_peek(void)
+{
+    u32 f = irq_save();
+    int on = motor_on_fl, r = 0;
+    if (!dcl_off) {
+        if (!on) { outb(DOR, 0x1C); io_delay(); io_delay(); }
+        r = inb(CCR) >> 7;
+        if (!on) outb(DOR, 0x0C);
+    }
+    irq_restore(f);
+    return r;
 }
 
 static void dma_setup(int to_mem, u32 len)
@@ -194,6 +229,8 @@ u32 fdc_stat(int what)
     case DS_ST1:        return fh_st[1];
     case DS_ST2:        return fh_st[2];
     case DS_NAMELEN:    return fs_name_cap();
+    case DS_MOUNTS:     return fs_mounts;
+    case DS_CHANGED:    return fdc_changed | fdc_peek();
     }
     return 0;
 }
@@ -219,6 +256,7 @@ static int fdc_rw(u32 lba, u8 *buf, int write, u32 count)
     int tries = 0;
 
     motor(1);
+    if (media_lost()) return -1;
     for (int attempt = 0; attempt < 4; attempt++) {
         tries = attempt + 1;
         if (attempt) { recalibrate(); }
@@ -246,6 +284,8 @@ static int fdc_rw(u32 lba, u8 *buf, int write, u32 count)
             if (!write) memcpy(buf, DMABUF, count*512);
             else if (write == 2 && memcmp(DMABUF, buf, count*512)) { rc = -1; fh_st[1] = 0x20; }
             last_use = ticks;
+            fdc_live = 1;
+            dcl_off |= dcl_stuck;
             fh_record(lba, tries, t0, rc);
             app_note_io();
             return rc;

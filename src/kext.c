@@ -8,6 +8,7 @@
 #include "kexterror.inc"
 #include "shellstream.h"
 #include "kextfile.h"
+#include "kextpack.h"
 extern const ShellStreamOps shell_stream_ops;
 extern int fs_replace(const char *,const u8 *,u32);
 extern const DebugCore debug_core;
@@ -390,6 +391,11 @@ extern void fault_show_banner(const char *msg);
 
 static int kext_load_locked(const char *name);
 static void drop_load_hooks(int owner);
+static const KextPackOps *packer(void)
+{
+    const KextPackOps *p = service_get("kext.pack");
+    return p && p->abi == KEXT_PACK_ABI ? p : 0;
+}
 static Mutex load_mutex;
 extern u8 gui_up;
 static void kext_report(const char *name,int status)
@@ -434,9 +440,12 @@ static int kext_load_locked(const char *name)
     if (slot >= FS_NFILES) return 42;
     int resident = cur_kext, pd_save = paging_space_current();
 
-    u8 *image = iobuf;
+    u8 *image = gui_up ? 0 : iobuf;
     u32 cap = IOBUF_SZ;
-    if (gui_up) {
+    const KextPackOps *pack = packer();
+    int n = pack ? pack->load(name, &image) : 0;
+    if (n < 0) return -n;
+    if (!n && gui_up) {
         cap = 0;
         for (int i = 0; i < FS_NFILES; i++) {
             FsEnt *e = fs_slot(i);
@@ -447,7 +456,7 @@ static int kext_load_locked(const char *name)
         if(!image){preempt_disable();while(!image&&reclaim_one(0))image=kmalloc(cap);preempt_enable();}
         if (!image) return 42;
     }
-    int n = fs_read(name, image, cap);
+    if (!n) n = fs_read(name, image, cap);
     KextHeader hdr;
     int r = n < (int)sizeof(Ehdr) ? 40 : peek_header(image, (u32)n, &hdr);
     kext_api[slot]=!r||r==43?hdr.api_version:0;
@@ -498,8 +507,13 @@ static int kext_load_locked(const char *name)
         FAULT_GUARD(rc = entry(&kapi), klog("extension entry faulted\n"));
         loading_kext = -1; lazy_register_type = -1;
         r = rc ? 44 : 0; k->status = r;
-
-        if (r) drop_load_hooks(slot);
+        if (rc == KEXT_IDLE && hdr.kind == KEXT_KIND_KERNEL) {
+            r = 0; k->status = 49; k->base = k->size = 0;
+            arena = arena_save; arena_rw = rw_save;
+            kfree(kext_symbols[slot]); kext_symbols[slot] = 0;
+            rc = 1;
+        }
+        if (rc) drop_load_hooks(slot);
         if (li >= 0) lazy_state[li] = r ? 0 : 2;
     }
     paging_space_switch(pd_save); cur_kext = resident;
@@ -516,7 +530,10 @@ static int ends_kx(const char *s)
 
 static int file_kind(const char *name)
 {
-    int n = fs_read(name, iobuf, IOBUF_SZ);
+    const KextPackOps *pack = packer();
+    int n = pack ? pack->kind(name) : -1;
+    if (n >= 0) return n;
+    n = fs_read(name, iobuf, IOBUF_SZ);
     if (n < (int)sizeof(Ehdr)) return -1;
     KextHeader hdr;
     if (peek_header(iobuf, (u32)n, &hdr) != 0) return -1;
@@ -567,6 +584,7 @@ void kext_boot(void)
     }
     if (skip) { boot_print("extensions SKIPPED (K held)\n"); return; }
 
+    if (lazy_present("sys/unpack.kx")) kext_load("sys/unpack.kx");
     boot_pass(KEXT_KIND_KERNEL, "kernel");
     lazy_catalog();
     if (lazy_present("sys/config/notes.lst") || lazy_present("sys/tmp/notes.lst") || lazy_present("notes.lst")) { int nt = app_find("Notes"); if (nt >= 0) app_ensure_loaded(nt); }
@@ -703,7 +721,7 @@ int shell_fallback(const char *line)
     return 1;
 }
 
-#define MAX_OPENERS 12
+#define MAX_OPENERS 24
 static struct {
     const char *ext;
     int (*fn)(const char *name, const char *fullpath, const u8 *data, int n);
@@ -912,7 +930,7 @@ void shutdown_run(void)
     }
 }
 
-#define NSERV 16
+#define NSERV 24
 static struct { char name[16]; const void *ops; int owner; } servs[NSERV];
 static unsigned gfx_disabled;
 
@@ -976,7 +994,7 @@ const void *service_get(const char *name)
     static const KextFileOps files={KEXT_FILE_ABI,peek_header,fs_replace};
     if(!strcmp(name,"kext.files"))return &files;
     if(!strcmp(name,"shell.stream"))return &shell_stream_ops;
-    static const FloppyOps floppy={FLOPPY_ABI,fdc_read_many};
+    static const FloppyOps floppy={FLOPPY_ABI_WRITE,fdc_read_many,fdc_write_many,fdc_verify};
     if(!strcmp(name,"disk.floppy"))return &floppy;
     if(!strcmp(name,"debug.core"))return &debug_core;
     extern const PanicMonitor *panic_monitor;
@@ -1118,8 +1136,12 @@ int kext_unload(int owner)
 
 static FsEnt *kapi_fs_slot(int i)
 {
-    return fs_ensure() ? fs_slot(i) : 0;
+    FsEnt *e = fs_ensure() ? fs_slot(i) : 0;
+    fs_hooked(FSH_SLOT, 0, &e, (u32)i);
+    return e;
 }
+static void kapi_none(void) {}
+extern u8 cfg_was_blank;
 static void kapi_outb(u16 p, u8 v)  { outb(p, v); }
 static u8   kapi_inb(u16 p)         { return inb(p); }
 static void kapi_outw(u16 p, u16 v) { outw(p, v); }
@@ -1458,7 +1480,7 @@ Kapi kapi = {
     .register_shell = register_shell,
     .mem_used_kb    = used_kb,
     .cmd_usage      = cmd_usage,
-    .dmesg          = dmesg_print,
+    .dmesg          = kapi_none,
     .cpu_usage      = cpu_usage,
     .app_count      = app_count,
     .app_desc       = app_desc,
@@ -1507,4 +1529,8 @@ Kapi kapi = {
     .os_build_num = OS_BUILD_NUM,
     .work_post = kapi_work_post,
     .disk_write = disk_write, .fs_bad = fs_bad, .fat_append = fat_append,
+    .irq_counts = (const u32 *)irq_counts, .boot_errs = boot_errs, .cfg_blank = &cfg_was_blank,
+    .thread_overflowed = thread_overflowed, .loop_prof = loop_prof_fmt,
+    .loop_prof_reset = loop_prof_reset, .disk_media = fs_media,
+    .fs_hook = &fs_hook, .pump_hook = &pump_hook,
 };

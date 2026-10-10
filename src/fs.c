@@ -22,10 +22,17 @@ static u32 fs_data=FS_TABLE+FS_TSECT, fs_tsect=FS_TSECT;
 static int fs_slots=FS_NFILES, fs_namelen=FS_NAMELEN;
 typedef struct { u8 bits[FS_TSECT]; } FsSectors;
 static int mounted;
+u32 fs_mounts;
 static u16 bad[FB_MAX];
 static int nbad;
 static Mutex fs_mutex=MUTEX_INIT;
+FsHook fs_hook;
 #include "fscache.inc"
+
+int fs_hooked(int op,const char *a,const void *b,u32 n)
+{
+    return fs_hook?fs_hook(op,a,(void *)b,n):FSH_PASS;
+}
 
 static void mark_entry(FsSectors *s,const FsEnt *e)
 {
@@ -73,7 +80,9 @@ static int commit_table(FsSectors sectors)
 
 int fs_ensure(void)
 {
+    if (fdc_changed) return 0;
     if (mounted) return mounted > 0;
+    fs_mounts++;
     u8 sec[512];
     if (fdc_read(FS_SUPER, sec) != 0) { mounted = -1; return 0; }
     int old=*(u32 *)(sec+4)==2&&*(u32 *)(sec+8)==sizeof(FsLegacy);
@@ -101,6 +110,29 @@ int fs_ensure(void)
     return 1;
 }
 
+static int fs_fresh(void)
+{
+    if (fdc_changed) { fdc_changed = 0; fs_cache_clear(); mounted = 0; }
+    return fs_ensure();
+}
+
+static int fs_media_locked(void)
+{
+    u8 sec[512];
+    if (mounted && !fdc_changed && !fdc_peek()) return mounted > 0 ? 3 : 2;
+    fdc_read(0, sec);
+    if (mounted < 0) mounted = 0;
+    return fs_fresh() ? 3 : !fdc_read(0, sec) << 1;
+}
+
+int fs_media(void)
+{
+    mtx_lock(&fs_mutex);
+    int r = fs_media_locked();
+    mtx_unlock(&fs_mutex);
+    return r;
+}
+
 FsEnt *fs_slot(int i)
 {
     return (i >= 0 && i < FS_NFILES) ? &table[i] : 0;
@@ -118,7 +150,8 @@ u32 fs_name_cap(void) { return (u32)fs_namelen; }
 
 int fs_exists(const char *name)
 {
-    return fs_ensure() && find(name) != 0;
+    int h = fs_hooked(FSH_EXISTS, name, 0, 0);
+    return h != FSH_PASS ? h : fs_ensure() && find(name) != 0;
 }
 
 static int alloc(int n)
@@ -301,6 +334,8 @@ static int fs_mkdir_locked(const char *name)
 
 int fs_is_dir(const char *name)
 {
+    int h = fs_hooked(FSH_ISDIR, name, 0, 0);
+    if (h != FSH_PASS) return h;
     if (!fs_ensure()) return 0;
     FsEnt *e = find(name);
     return e && (e->attr & FS_ATTR_DIR);
@@ -372,6 +407,8 @@ static int fs_rename_dir_locked(const char *olddir, const char *newdir)
 
 int fs_dir_count(const char *dir)
 {
+    int h = fs_hooked(FSH_COUNT, dir, 0, 0);
+    if (h != FSH_PASS) return h;
     if (!fs_ensure()) return 0;
     int n = 0;
     for (int i = 0; i < FS_NFILES; i++)
@@ -480,7 +517,8 @@ const char *ext_type(const char *name)
         if (*p == '.') dot = p;
     if (!dot || !dot[1]) return "File";
     const char *e = dot + 1;
-    if (!strcasecmp(e,"fpa") || !strcasecmp(e,"pz")) return "Archive";
+    if (!strcasecmp(e,"fpa") || !strcasecmp(e,"pz") || !strcasecmp(e,"gz") ||
+        !strcasecmp(e,"zip") || !strcasecmp(e,"tar") || !strcasecmp(e,"tgz")) return "Archive";
     if (!strcasecmp(e, "txt") || !strcasecmp(e, "md") ||
         !strcasecmp(e, "log") || !strcasecmp(e, "cfg") ||
         !strcasecmp(e, "ini")) return "Text";
@@ -497,21 +535,40 @@ const char *ext_type(const char *name)
     return "File";
 }
 
-int fs_read(const char *name,u8 *buf,u32 max){mtx_lock(&fs_mutex);const char *old=debug_path(0,name);int r=fs_read_locked(name,buf,max);debug_done(0,old,r);mtx_unlock(&fs_mutex);return r;}
+static int fs_op(int op,const char *a,const void *b,u32 n)
+{
+    mtx_lock(&fs_mutex);
+    const char *old=debug_path(0,a);
+    int r=fs_hooked(op,a,b,n);
+    if(r==FSH_PASS){
+        fs_media_locked();
+        r=fs_hooked(op|FSH_LIVE,a,b,n);
+    }
+    if(r==FSH_PASS){
+        switch(op){
+        case FSH_READ:r=fs_read_locked(a,(u8 *)b,n);break;
+        case FSH_WRITE:case FSH_REPLACE:r=fs_write_locked(a,b,n,op==FSH_REPLACE);break;
+        case FSH_DELETE:r=fs_delete_locked(a);break;
+        case FSH_MKDIR:r=fs_mkdir_locked(a);break;
+        case FSH_TOUCH:r=fs_touch_locked(a);break;
+        case FSH_RENAME:r=fs_rename_locked(a,b);break;
+        default:r=fs_rename_dir_locked(a,b);
+        }
+        fs_hooked(op|FSH_DONE,a,b,(u32)r);
+    }
+    debug_done(op?2:0,old,r);
+    mtx_unlock(&fs_mutex);
+    return r;
+}
 
-int fs_write(const char *name,const u8 *buf,u32 size){mtx_lock(&fs_mutex);const char *old=debug_path(0,name);int r=fs_write_locked(name,buf,size,0);debug_done(2,old,r);mtx_unlock(&fs_mutex);return r;}
-
-int fs_replace(const char *name,const u8 *buf,u32 size){mtx_lock(&fs_mutex);const char *old=debug_path(0,name);int r=fs_write_locked(name,buf,size,1);debug_done(2,old,r);mtx_unlock(&fs_mutex);return r;}
-
-int fs_delete(const char *name){mtx_lock(&fs_mutex);const char *old=debug_path(0,name);int r=fs_delete_locked(name);debug_done(2,old,r);mtx_unlock(&fs_mutex);return r;}
-
-int fs_mkdir(const char *name){mtx_lock(&fs_mutex);const char *old=debug_path(0,name);int r=fs_mkdir_locked(name);debug_done(2,old,r);mtx_unlock(&fs_mutex);return r;}
-
-int fs_touch(const char *name){mtx_lock(&fs_mutex);const char *old=debug_path(0,name);int r=fs_touch_locked(name);debug_done(2,old,r);mtx_unlock(&fs_mutex);return r;}
-
-int fs_rename(const char *oldname,const char *newname){mtx_lock(&fs_mutex);const char *old=debug_path(0,oldname);int r=fs_rename_locked(oldname,newname);debug_done(2,old,r);mtx_unlock(&fs_mutex);return r;}
-
-int fs_rename_dir(const char *olddir,const char *newdir){mtx_lock(&fs_mutex);const char *old=debug_path(0,olddir);int r=fs_rename_dir_locked(olddir,newdir);debug_done(2,old,r);mtx_unlock(&fs_mutex);return r;}
+int fs_read(const char *name,u8 *buf,u32 max){return fs_op(FSH_READ,name,buf,max);}
+int fs_write(const char *name,const u8 *buf,u32 size){return fs_op(FSH_WRITE,name,buf,size);}
+int fs_replace(const char *name,const u8 *buf,u32 size){return fs_op(FSH_REPLACE,name,buf,size);}
+int fs_delete(const char *name){return fs_op(FSH_DELETE,name,0,0);}
+int fs_mkdir(const char *name){return fs_op(FSH_MKDIR,name,0,0);}
+int fs_touch(const char *name){return fs_op(FSH_TOUCH,name,0,0);}
+int fs_rename(const char *oldname,const char *newname){return fs_op(FSH_RENAME,oldname,newname,0);}
+int fs_rename_dir(const char *olddir,const char *newdir){return fs_op(FSH_RENAME_DIR,olddir,newdir,0);}
 
 int fs_bad(int op,u32 lba){mtx_lock(&fs_mutex);int r=fs_bad_locked(op,lba);mtx_unlock(&fs_mutex);return r;}
 
@@ -527,4 +584,4 @@ int disk_write(u32 lba,const u8 *buf)
     return r;
 }
 
-int fs_defrag(void (*prog)(int,int)){mtx_lock(&fs_mutex);const char *old=debug_path(0,"defrag");int r=fs_defrag_locked(prog);debug_done(2,old,r);mtx_unlock(&fs_mutex);return r;}
+int fs_defrag(void (*prog)(int,int)){mtx_lock(&fs_mutex);fs_media_locked();const char *old=debug_path(0,"defrag");int r=fs_defrag_locked(prog);debug_done(2,old,r);mtx_unlock(&fs_mutex);return r;}

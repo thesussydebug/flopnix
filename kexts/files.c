@@ -131,7 +131,7 @@ typedef struct {
     char fm_msg[64];
     int  press_lx, press_ly;
     u8   press_row, drag_sent;
-    u32  seen_gen;
+    u32  seen_gen, seen_mounts;
     u8   band;
     int  band_x0, band_cx;
     int  band_y0, band_cur;
@@ -551,12 +551,36 @@ static void fileman_open(int inst)
     if (F->colw[0] < 120) F->colw[0] = 120;
     F->need_refresh = 1;
     F->seen_gen = api->usb_gen();
+    F->seen_mounts = api->disk_stat(DS_MOUNTS);
     nav_seed();
+}
+
+static u8 media_job, media_empty;
+static void media_work(void *ctx)
+{
+    (void)ctx;
+    media_empty = !api->disk_media();
+    media_job = 0;
+    for (int i = 0; i < MAXINST; i++) api->win_redraw(files_type, i);
 }
 
 static void fm_check_usb(void)
 {
-    u32 g = api->usb_gen();
+    u32 g = api->usb_gen(), m = api->disk_stat(DS_MOUNTS), changed = api->disk_stat(DS_CHANGED);
+    if (!changed) media_empty = 0;
+    if (F->cur_drive == 0 && !media_job && !media_empty && fs_slot(0) && changed) {
+        media_job = 1;
+        if (api->work_post(media_work, 0) < 0) media_job = 0;
+    }
+    if (m != F->seen_mounts) {
+        F->seen_mounts = m;
+        if (F->cur_drive == 0) {
+            F->nsel = 0;
+            F->scroll = 0;
+            F->a_dir[0] = 0;
+            F->need_refresh = 1;
+        }
+    }
     if (g == F->seen_gen) return;
     F->seen_gen = g;
     if (F->cur_drive == 1) {
@@ -1022,7 +1046,9 @@ static void do_action(int a)
     case MA_INSTALL: act_install(); break;
     case MA_NEW:     act_new(); break;
     case MA_NEWDIR:  act_newdir(); break;
-    case MA_REFRESH: F->need_refresh = 1; strlcpy(F->fm_msg, "refreshed", sizeof F->fm_msg); break;
+    case MA_REFRESH:
+        if (F->cur_drive == 0) api->disk_media();
+        F->need_refresh = 1; strlcpy(F->fm_msg, "refreshed", sizeof F->fm_msg); break;
     case MA_CLOSE:   win_close_self(files_type, (int)(F - fms)); break;
     case MA_BACK:    nav_back(); break;
     case MA_FWD:     nav_fwd(); break;

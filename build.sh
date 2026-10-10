@@ -134,9 +134,10 @@ cc_kext() {
         echo "$undef" | sed 's/^/       /' >&2
         return 1
     fi
+    case $n in unpack|net|remote|shell) ;; *) python tools/kxpack.py "built/kexts/$n.kx" || return 1;; esac
     echo "   $n.kx: $(stat -c%s built/kexts/$n.kx) bytes ${SZ:--O2}"
 }
-for n in debug fat net remote dialogs sysinfo notes diskhealth opl2 midi gdi g3d saver shot image imgview desktop edit files settings paint calc clock calendar memmap memedit minesweeper reversi snake pong tetris shell crashsim taskmgr serialmon faultlog kextview clipview bench charmap game2048 baseconv archive textweb breakout update; do
+for n in debug fat unpack disks net remote dialogs sysinfo notes diskhealth opl2 midi gdi g3d saver shot image imgview desktop edit files settings paint calc clock calendar memmap memedit minesweeper reversi snake pong tetris shell crashsim taskmgr serialmon faultlog kextview clipview bench charmap game2048 baseconv archive textweb breakout update; do
     spawn cc_kext $n
 done
 drain

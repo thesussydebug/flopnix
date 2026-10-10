@@ -2,6 +2,9 @@
 #include "kapi.h"
 #include "gdi.h"
 #include "archive_core.inc"
+#include "gzname.inc"
+#include "arimport.inc"
+#include "kextpack.h"
 #include "filepaths.inc"
 #include "shpath.h"
 #include "savepath.inc"
@@ -81,6 +84,71 @@ static int path_size(const char *p,u32 *size)
     for(int i=0;i<FS_NFILES;i++){FsEnt *e=api->fs_slot(i);if(e&&e->used&&!(e->attr&FS_ATTR_DIR)&&!api->strcmp(e->name,p)){*size=e->size;return 1;}}
     return 0;
 }
+static u8 *made;
+static u32 made_cap,made_len;
+static int made_count,made_seen;
+static ArEntry made_names[AR_FILES];
+static int made_add(const char *path,int plen,const u8 *raw,u32 size)
+{
+    char name[24];made_seen++;
+    if(made_count>=AR_FILES||!ari_fit(path,plen,name)||!ari_unique(name,made_names,made_count)||!ar_name(name))return 0;
+    u32 need=made_len+28+LZ_HDR+size;
+    if(need<size||need>AR_CAP)return 0;
+    if(need>made_cap){
+        u8 *next=api->krealloc(made,need+need/4+1);
+        if(!next)return -1;
+        made=next;made_cap=need+need/4;
+    }
+    u32 packed=lz_pack(raw,size,made+made_len+28,made_cap-made_len-28);
+    if(!packed)return -1;
+    api->memset(made+made_len,0,24);api->strlcpy((char *)made+made_len,name,24);lz_put32(made+made_len+24,packed);
+    api->strlcpy(made_names[made_count].name,name,24);
+    made_len+=28+packed;made[4]=(u8)++made_count;
+    api->gui_pump();return 1;
+}
+static int import_zip(const u8 *d,u32 n,const KextPackOps *pack)
+{
+    u32 at,total;ZipEnt e;
+    if(!zip_open(d,n,&at,&total))return 0;
+    for(u32 i=0;i<total;i++){
+        if(zip_next(d,n,&at,&e)!=1)return 0;
+        if(!e.nlen||e.name[e.nlen-1]=='/')continue;
+        int r=0;
+        if((e.flags&1)||(e.method&&e.method!=8)||(!e.method&&e.packed!=e.raw))made_seen++;
+        else if(!e.method)r=made_add((const char *)e.name,(int)e.nlen,d+e.at,e.raw);
+        else{
+            u8 *wrapped=api->kmalloc(e.packed+18),*raw=0;
+            if(!wrapped)return -1;
+            int size=pack?pack->gunzip(wrapped,zip_gzip(&e,d,wrapped),&raw):-40;
+            api->kfree(wrapped);
+            if(size==-42)return -1;
+            if(size<0)made_seen++;
+            else r=made_add((const char *)e.name,(int)e.nlen,raw,(u32)size);
+            if(raw)api->kfree(raw);
+        }
+        if(r<0)return -1;
+    }
+    return 1;
+}
+static int import_tar(const u8 *d,u32 n)
+{
+    static TarEnt e;u32 at=0;
+    for(;;){
+        int r=tar_next(d,n,&at,&e);
+        if(r<=0)return r==0;
+        if(e.file&&made_add(e.name,(int)api->strlen(e.name),d+e.at,e.size)<0)return -1;
+    }
+}
+static int import(int tar,const u8 *d,u32 n,const KextPackOps *pack)
+{
+    made_cap=n<4096?4096:n;made_len=8;made_count=made_seen=0;
+    made=api->kmalloc(made_cap+1);
+    if(!made)return -1;
+    ar_empty(made);
+    int r=tar?import_tar(d,n):import_zip(d,n,pack);
+    if(r==1)return 1;
+    api->kfree(made);made=0;return r;
+}
 static void load_file(const char *p)
 {
     if(!alive||!p||!reserve())return;
@@ -94,8 +162,40 @@ static void load_file(const char *p)
     data=next;allocated=needed;
     if(api->mem_track)api->mem_track("Archive buffer",data,allocated+1);
     api->busy_set("Archive Manager","Reading and checking archive...",-1);
-    int n=read_path(p,data,expected+1),ok=0;
+    int n=read_path(p,data,expected+1),ok=0,foreign=0;
     if(n!=(int)expected)n=-1;
+    const KextPackOps *pack=api->service_get("kext.pack");
+    if(pack&&pack->abi!=KEXT_PACK_ABI)pack=0;
+    u8 *plain=0;int zipped=n>0&&gz_is(data,(u32)n),inner=zipped&&pack?pack->gunzip(data,(u32)n,&plain):-40;
+    int tarred=inner>0&&tar_is(plain,(u32)inner);
+    if(tarred||(n>0&&!zipped&&(zip_is(data,(u32)n)||tar_is(data,(u32)n)))){
+        int r=tarred?import(1,plain,(u32)inner,pack):import(!zip_is(data,(u32)n),data,(u32)n,pack);
+        if(plain)api->kfree(plain);
+        n=-1;
+        if(r==1){
+            api->kfree(data);data=made;made=0;allocated=made_cap;n=(int)made_len;foreign=1;
+            if(api->mem_track)api->mem_track("Archive buffer",data,allocated+1);
+        }else if(r<0)ok=-1;
+    }else if(zipped){
+        u8 *raw=plain,*single=0;char name[24];
+        int size=inner;
+        if(!gz_member(data,(u32)n,name,sizeof name)||!ar_name(name)){
+            char whole[64];
+            if(!gz_out_name(leaf(p),whole,sizeof whole)||!ar_name(whole))api->strlcpy(whole,"unpacked",sizeof whole);
+            api->strlcpy(name,whole,sizeof name);
+        }
+        n=-1;
+        if(size>=0)single=api->kmalloc((u32)size+36+LZ_HDR+1);
+        if(single){
+            u32 packed=lz_pack(raw,(u32)size,single+36,(u32)size+LZ_HDR);
+            if(packed){
+                ar_empty(single);single[4]=1;api->memset(single+8,0,24);api->strlcpy((char *)single+8,name,24);lz_put32(single+32,packed);
+                api->kfree(data);data=single;allocated=(u32)size+36+LZ_HDR;n=(int)packed+36;
+                if(api->mem_track)api->mem_track("Archive buffer",data,allocated+1);
+            }else api->kfree(single);
+        }
+        if(raw)api->kfree(raw);
+    }
     if(n>=LZ_HDR&&data[0]=='P'&&data[1]=='Z'&&data[2]=='1'&&!data[3]){
 
         const char *b=leaf(p);int len=(int)api->strlen(b);
@@ -117,7 +217,8 @@ static void load_file(const char *p)
     const char *local=p;if(!usb&&(p[0]=='a'||p[0]=='A')&&p[1]==':')local+=2;
     int len=(int)api->strlen(local);
     if(len<(int)sizeof filename&&len>4&&!api->strcasecmp(local+len-4,".fpa")){af_set(&field,filename,sizeof filename,local);if(usb)filename[0]='u';}
-    say("Archive checked. Select a file or extract them all.");
+    if(foreign&&made_seen>count){api->kfmt(message,sizeof message,"%d of %d files opened.",count,made_seen);api->gui_dirty();}
+    else say("Archive checked. Select a file or extract them all.");
 }
 static void load_path(const char *p)
 {
@@ -288,7 +389,7 @@ static void run_pending(void)
 {
     int next=pending;pending=0;
     if(next==1)clear();
-    else if(next==2)api->file_picker("Open archive (.fpa or .pz)",0,0,picked_open,0);
+    else if(next==2)api->file_picker("Open archive (.fpa, .zip, .tar, .gz or .pz)",0,0,picked_open,0);
     else if(next==3){dirty=0;api->win_close_self(type,0);}
     else if(next==4)load_path(pending_path);
 }
@@ -374,5 +475,6 @@ int kext_entry(const Kapi *k)
     api=k;ui_init(k,0);static const AppDesc d={.live_draw=APP_INDEPENDENT|APP_CLOSE_REQUEST|APP_POINTER_FREE,.title="Archive Manager",.max_inst=1,.in_menu=1,.resizable=1,.category=APP_CAT_PROGRAMS,
         .open=opened,.close=closed,.draw=draw,.key=key,.mouse=mouse,.wheel=wheel,.drop=dropped,.client_size=initial,.min_client=size};
     type=k->register_app(&d);if(type<0)return 1;
-    k->register_opener("fpa",open_file);k->register_opener("pz",open_file);return 0;
+    k->register_opener("fpa",open_file);k->register_opener("pz",open_file);k->register_opener("gz",open_file);
+    k->register_opener("zip",open_file);k->register_opener("tar",open_file);k->register_opener("tgz",open_file);return 0;
 }

@@ -12,7 +12,7 @@
 typedef struct {
     char (*sb)[TCMAX];
     int  head, nlines, cx, view, cols, rows;
-    u8   rainbow, fx, running, esc, tab_on;
+    u8   rainbow, fx, running, esc, tab_on, band;
     char line[192];
     char pending[192];
     int  len, inpx;
@@ -166,7 +166,7 @@ static void t_run(Term *t)
     int r = command[0] && term_sso ? term_sso->run(&t->st, command) : 0;
     if (r == -2) t_print(t, "Another command is running (terminal or remote); try again.\n");
     else if (r == -3) t_print(t, "The command faulted and was stopped.\n");
-    t->running = 0;
+    t->running = t->band = 0;
     if (!t->fx) t_prompt(t);
 }
 
@@ -284,7 +284,7 @@ static void t_draw(Win *w, int cx, int cy, int cw, int ch)
     Term *t = &terms[w->inst];
     fill_rect(cx, cy, cw, ch, C_TERMBG);
     if (!t->sb) { api->draw_text_clip(cx + 4, cy + 4, "Not enough memory. Close and reopen Terminal.", C_RED, cw - 8); return; }
-    int cols = (cw - 8) / 8, rows = (ch - 8) / 16;
+    int cols = (cw - 8) / 8, rows = (ch - (t->band ? 30 : 8)) / 16;
     if (cols > TCMAX) cols = TCMAX;
     if (cols < 8) cols = 8;
     if (rows > 44) rows = 44;

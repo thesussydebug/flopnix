@@ -22,7 +22,11 @@ static const Kapi *api;
 
 #define DESK_LST "desktop.lst"
 #define DMAX FS_NFILES
-static char names[DMAX][FS_NAMELEN];
+#define DSMALL 16
+static char names_small[DSMALL][FS_NAMELEN], dsel_small[DSMALL][FS_NAMELEN];
+static char (*names)[FS_NAMELEN] = names_small, (*dsel)[FS_NAMELEN] = dsel_small;
+static int dcap = DSMALL;
+static u8 dfull;
 static u8 name_dir[DMAX], scan_dir[DMAX], picked[DMAX], pick_stale = 1;
 static short dir_idx[DMAX];
 static int nnames, vis[DMAX], nvis, desk_page, pick_page = -1;
@@ -33,8 +37,8 @@ static void lst_touch(void) { sync_forced = 1;api->broadcast("file.changed","");
 static void lst_sync(void) {
     if (!loaded || (!sync_forced && (u32)(*api->ticks - sync_t) < 25)) return;
     sync_forced = 0; sync_t = *api->ticks; nvis = 0;
-    DeskScan s = { names, scan_dir, dir_idx, 0, 0, DMAX, nnames, 0 };
-    for (int i = 0; i < FS_NFILES && s.n < DMAX; i++) {
+    DeskScan s = { names, scan_dir, dir_idx, 0, 0, dcap, nnames, 0 };
+    for (int i = 0; i < FS_NFILES && s.n < dcap; i++) {
         FsEnt *e = api->fs_slot(i);
         if (!e || !e->used) continue;
         int k = dk_add(&s, e->name, (e->attr & FS_ATTR_DIR) != 0);
@@ -42,6 +46,29 @@ static void lst_sync(void) {
     }
     if (dk_commit(&s, name_dir)) pick_stale = 1;
     nnames = s.n;
+    dfull = nnames >= dcap;
+}
+
+static void lst_room(void)
+{
+    char child[FS_NAMELEN];
+    int want = 0;
+    dfull = 0;
+    for (int i = 0; i < FS_NFILES; i++) {
+        FsEnt *e = api->fs_slot(i);
+        if (e && e->used && fs_child(e->name, "desktop", child, sizeof child)) want++;
+    }
+    if (want < dcap || dcap == DMAX) return;
+    want = (want + DSMALL) & ~(DSMALL - 1);
+    if (want > DMAX) want = DMAX;
+    char (*grown)[FS_NAMELEN] = api->kmalloc((u32)want * FS_NAMELEN * 2);
+    if (!grown) return;
+    api->memcpy(grown, names, (u32)dcap * FS_NAMELEN);
+    api->memcpy(grown + want, dsel, (u32)dcap * FS_NAMELEN);
+    if (names != names_small) api->kfree(names);
+    names = grown; dsel = grown + want; dcap = want;
+    sync_forced = 1;
+    api->gui_dirty();
 }
 
 static void lst_load(void) {
@@ -156,7 +183,6 @@ static int  ren_all;
 
 static char sel[FS_NAMELEN];
 
-static char dsel[DMAX][FS_NAMELEN];
 static int  ndsel;
 static u8   band;
 static int  band_x0, band_y0, band_cx, band_cy;
@@ -170,7 +196,7 @@ static int dsel_has(const char *n)
 static void dsel_clear(void) { ndsel = 0; pick_stale = 1; }
 static void dsel_add(const char *n)
 {
-    if (!n || !n[0] || ndsel >= DMAX || dsel_has(n)) return;
+    if (!n || !n[0] || ndsel >= dcap || dsel_has(n)) return;
     api->strlcpy(dsel[ndsel++], n, FS_NAMELEN);
     pick_stale = 1;
 }
@@ -633,7 +659,7 @@ static int d_key(int k)
         }
         if (ctrl && c == 'a') {
             dsel_clear();
-            for (int i = 0; i < nvis && ndsel < DMAX; i++)
+            for (int i = 0; i < nvis && ndsel < dcap; i++)
                 api->strlcpy(dsel[ndsel++], names[vis[i]], FS_NAMELEN);
             pick_stale = 1;
             if (nvis) api->strlcpy(sel, names[vis[nvis - 1]], sizeof sel);
@@ -943,6 +969,7 @@ static void desk_poll(void *ctx)
     static u8 blink;
     if(ren_name[0]&&*api->gui_blink!=blink){blink=*api->gui_blink;api->gui_dirty();}
     (void)ctx;
+    if(dfull)lst_room();
     if(cur_state==CUR_WORKING)return;
     if(cur_state==CUR_DONE)desk_finish();
     u32 f=desk_lock();
@@ -975,6 +1002,7 @@ int kext_entry(const Kapi *k)
     k->register_desktop(&ops);
 
     lst_load();
+    lst_room();
     lst_sync();
 
     wp_booting = 1;

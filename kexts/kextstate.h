@@ -10,7 +10,8 @@ static inline const char *kx_state(int status)
     case 45:return "Fault disabled";
     case 46:return "Inactive";
     case 47:return "On demand";
+    case 49:return "Not needed";
     default:return "Load failed";
     }
 }
-static inline int kx_failed(int status){return status&&status!=46&&status!=47;}
+static inline int kx_failed(int status){return status&&status!=46&&status!=47&&status!=49;}

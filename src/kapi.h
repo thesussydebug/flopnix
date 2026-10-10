@@ -12,12 +12,13 @@ typedef signed   int   i32;
 #endif
 
 
-#define KAPI_VERSION 43
+#define KAPI_VERSION 46
 
 #define KEXT_MAGIC 0x5458454B
 enum { KEXT_KIND_KERNEL = 1, KEXT_KIND_APP = 2 };
 #define KEXT_RECLAIMABLE 1
 #define KEXT_ON_DEMAND 2
+#define KEXT_IDLE 2
 
 typedef struct { char name[24]; u32 base, size; int owner; } MemBuffer;
 typedef struct { char type[12]; u32 size, sequence; } ClipInfo;
@@ -72,8 +73,17 @@ enum {
     DS_OPS, DS_RETRIED, DS_FAILED,
     DS_LAST_MS, DS_WORST_MS, DS_LAST_TRIES, DS_LAST_LBA,
     DS_ST0, DS_ST1, DS_ST2,
-    DS_NAMELEN
+    DS_NAMELEN, DS_MOUNTS, DS_CHANGED
 };
+
+#define BD_CFG_OK    0x01
+#define BD_CFG_HUNG  0x02
+#define BD_FONT_HUNG 0x04
+#define BD_MEM_HUNG  0x08
+#define BD_VGA_HUNG  0x10
+#define BD_VBE_HUNG  0x20
+#define BD_A20_HUNG  0x40
+#define BD_ANY_HANG  0x80
 
 enum {
     MI_TOTAL_KB,
@@ -104,6 +114,13 @@ typedef struct {
 } FsEnt;
 
 #define FS_EIO (-2)
+
+#define FSH_PASS (-100)
+#define FSH_LIVE 0x40
+#define FSH_DONE 0x80
+enum { FSH_READ, FSH_WRITE, FSH_REPLACE, FSH_DELETE, FSH_MKDIR, FSH_TOUCH, FSH_RENAME,
+       FSH_RENAME_DIR, FSH_EXISTS, FSH_CONFIG, FSH_KERNEL, FSH_SLOT, FSH_ISDIR, FSH_COUNT };
+typedef int (*FsHook)(int op, const char *name, void *buf, u32 n);
 
 #define FS_ATTR_DIR 0x10
 
@@ -651,4 +668,13 @@ typedef struct {
     int (*disk_write)(u32 lba, const u8 *buf);
     int (*fs_bad)(int op, u32 lba);
     int (*fat_append)(const char *path, const u8 *buf, u32 size);
+    const u32 *irq_counts;
+    const char *boot_errs;
+    const u8 *cfg_blank;
+    int (*thread_overflowed)(void);
+    void (*loop_prof)(char *out, int cap);
+    void (*loop_prof_reset)(void);
+    int (*disk_media)(void);
+    FsHook *fs_hook;
+    void (**pump_hook)(void);
 } Kapi;

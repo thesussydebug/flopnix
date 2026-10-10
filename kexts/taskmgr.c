@@ -361,7 +361,7 @@ static void draw_modules(int cx,int cy,int cw,int ch)
         else api->fill_rect(cx+6,ry,cw-12-SB_W,ROWH,(r&1) ? C_G0+7 : C_WHITE);
         u8 col=selected ? C_WHITE : C_BLACK;
         api->draw_text_clip(cx+10,ry,k->hname,col,state_x-cx-16);
-        const char *state=k->status==47 ? "On demand" : k->status==46 ? "Unloaded" : k->status==45 ? "Disabled" :
+        const char *state=k->status==47 ? "On demand" : k->status==46 ? "Unloaded" : k->status==45 ? "Disabled" : k->status==49 ? "Not needed" :
             k->status ? "Failed" : k->kind==KEXT_KIND_KERNEL ? "System" : "Loaded";
         api->draw_text_clip(state_x,ry,state,col,88);
         api->human_size(k->size,sz,sizeof sz);

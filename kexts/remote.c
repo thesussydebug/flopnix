@@ -2,6 +2,7 @@
 #include "netlisten.h"
 #include "shellstream.h"
 #include "kextfile.h"
+#include "kextpack.h"
 #include "telnet.inc"
 
 static const Kapi *api;
@@ -14,7 +15,8 @@ static char line[1100],target[256];
 static u32 session,activity,upload_size,upload_crc,upload_got;
 static u8 *upload;
 static u8 output[128];
-static int enabled,machine,used,overflow,output_n,io_failed,servicing,stop_requested;
+static int enabled,machine,used,overflow,output_n,io_failed,servicing,stop_requested,running,sending;
+static u32 quiet;
 static u16 port=23;
 static int upload_managed;
 static void managed_commit(void);
@@ -35,13 +37,21 @@ static u32 remote_crc(const u8 *data,u32 length)
 }
 static void raw(const u8 *data,int length)
 {
-    u32 stamp=ticks;
+    u32 stamp=ticks;sending=1;
     while(length&&!io_failed){
         int n=net->write(session,data,length);
         if(n<0||(u32)(ticks-stamp)>1000u){io_failed=1;break;}
         data+=n;length-=n;if(n)stamp=ticks;
         if(length){net->poll();api->gui_pump();}
     }
+    quiet=ticks;sending=0;
+}
+static void alive(void)
+{
+    u8 b='\n';
+    if(!running||sending||(u32)(ticks-quiet)<1500u)return;
+    quiet=ticks;
+    if(net->write(session,&b,1)==1)net->poll();
 }
 static void text(const char *s){raw((const u8 *)s,(int)api->strlen(s));}
 static void upload_clear(void)
@@ -56,7 +66,7 @@ static void reset(void)
 }
 static void stop(void)
 {
-    net->stop();reset();
+    net->stop();reset();*api->pump_hook=0;
     session=0;enabled=0;stop_requested=0;api->klog("remote: disabled\n");
 }
 static void hexline(const char *prefix,const u8 *data,int n)
@@ -75,7 +85,7 @@ static void binary(const u8 *data,int n)
 }
 static void flush(void)
 {
-    if(output_n){hexline("@out ",output,output_n);output_n=0;}
+    if(output_n){hexline("@out ",output,output_n);output_n=0;net->poll();}
 }
 static void emit(char c,void *ctx)
 {
@@ -87,6 +97,7 @@ static void emit(char c,void *ctx)
         else if(c=='\r'){b[1]=0;n=2;}
         else if((u8)c==255){b[1]=255;n=2;}
         raw(b,n);
+        if(c=='\n')net->poll();
     }
 }
 static void done(int result)
@@ -151,6 +162,16 @@ static void data(const char *s)
     }
     done(0);
 }
+static int kext_check(const u8 *data,u32 size,KextHeader *header)
+{
+    const KextPackOps *pack=api->service_get("kext.pack");u8 *raw=0;
+    if(!pack&&kp_size(data,size)){api->kext_load("sys/unpack.kx");pack=api->service_get("kext.pack");}
+    int n=pack&&pack->abi==KEXT_PACK_ABI?pack->open(data,size,&raw):0;
+    if(n<0)return 40;
+    int r=files->check(n?raw:data,n?(u32)n:size,header);
+    if(raw)api->kfree(raw);
+    return r;
+}
 static void commit(void)
 {
     if(upload_managed){managed_commit();return;}
@@ -158,7 +179,7 @@ static void commit(void)
     if(!upload||upload_got!=upload_size||remote_crc(upload,upload_size)!=upload_crc){
         upload_clear();error("Incomplete upload or checksum mismatch; file unchanged");return;
     }
-    int r=files->check(upload,upload_size,&header);
+    int r=kext_check(upload,upload_size,&header);
     if(r){upload_clear();error(r==43?"Kext needs a newer kernel API; file unchanged":"Invalid kext image; file unchanged");return;}
     u8 *check=api->kmalloc(upload_size);
     if(!check){upload_clear();error("Not enough memory for readback; file unchanged");return;}
@@ -196,6 +217,7 @@ static void command(void)
     else if(!api->strcmp(line,"@manager 1")){machine=1;text("\r\nFXR1 READY\r\n");}
     else if(!api->strcmp(line,"exit")||!api->strcmp(line,"logout")){text("\r\nGoodbye.\r\n");net->close(session);}
     else if(machine){
+        running=1;quiet=ticks;
         if(!api->strncmp(line,"@exec ",6)){
             if(upload)error("Upload active; commit or abort first");
             else{int r=shell->run(&stream,line+6);if(r==-2)text("@error Shell is busy; retry\r\n");done(r);}
@@ -206,6 +228,7 @@ static void command(void)
         else if(!api->strcmp(line,"@abort")){upload_clear();done(0);}
         else if(!api->strncmp(line,"@get ",5))get(line+5);
         else error("Unknown manager request");
+        running=0;
     }else{
         text("\r\n");
         if(used){int r=shell->run(&stream,line);if(r)text(r==-2?"Shell is busy; retry.\r\n":"Command failed.\r\n");}
@@ -278,7 +301,7 @@ static void control(const char *args)
     if(net->listen((u16)selected)){
         api->shell_print("Remote: networking is unavailable or the port is in use.\n");return;
     }
-    reset();session=0;port=(u16)selected;enabled=1;
+    reset();session=0;port=(u16)selected;enabled=1;*api->pump_hook=alive;
     api->klog("remote: enabled locally\n");control("status");
     api->shell_print("No password: enable only on a trusted network.\nUse remote off to stop; Debug > Automatic Remote controls startup.\n");
 }
@@ -287,6 +310,7 @@ int kext_entry(const Kapi *k)
 {
     api=k;if(k->version<KAPI_VERSION)return 1;
     net=api->service_get("net.listen");shell=api->service_get("shell.stream");files=api->service_get("kext.files");
+    if(!net)return KEXT_IDLE;
     if(!net||net->abi!=NET_LISTEN_ABI||!shell||shell->abi!=SHELL_STREAM_ABI||!files||files->abi!=KEXT_FILE_ABI)return 1;
     if(api->timer_add(1,poll,0)<0)return 1;
     api->register_shutdown(stop);

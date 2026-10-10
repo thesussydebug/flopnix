@@ -7,48 +7,51 @@ enum { GZS_HEAD, GZS_XLEN, GZS_SKIP, GZS_SKIPZ, GZS_BLOCK, GZS_STORED, GZS_RAW, 
 
 typedef struct { u16 count[16], sym[288]; } GzHuff;
 typedef struct {
-    u32 bb, crc, total, left, wpos, wout, ct[16];
+    u32 bb, crc, total, left, wpos, wout, omask, room, ct[16];
     int nb, state, last, sym, len, idx, nlen, ndist, ncode, flags;
+    u8 *o;
     GzHuff lit, dst;
     u8 lens[320];
-    u8 win[GZ_WIN];
 } Gunzip;
 
-static void gz_init(Gunzip *g)
+static void gz_init(Gunzip *g, u8 *win)
 {
     u8 *p = (u8 *)g;
-    for (u32 i = 0; i < sizeof *g - GZ_WIN; i++) p[i] = 0;
+    for (u32 i = 0; i < sizeof *g; i++) p[i] = 0;
     for (u32 i = 0; i < 16; i++) {
         u32 c = i;
         for (int k = 0; k < 4; k++) c = (c >> 1) ^ (0xEDB88320u & (0u - (c & 1)));
         g->ct[i] = c;
     }
+    g->o = win;
+    g->omask = GZ_WIN - 1;
 }
 
-static int gz_done(const Gunzip *g) { return g->state == GZS_END; }
+static inline int gz_done(const Gunzip *g) { return g->state == GZS_END; }
 
 static int gz_flush(Gunzip *g, int (*sink)(const u8 *, int, void *), void *ctx)
 {
     while (g->wout != g->wpos) {
-        u32 at = g->wout & (GZ_WIN - 1), n = g->wpos - g->wout, c = ~g->crc;
-        if (n > GZ_WIN - at) n = GZ_WIN - at;
+        u32 at = g->wout & g->omask, n = g->wpos - g->wout, c = ~g->crc;
+        if (n - 1 > g->omask - at) n = g->omask - at + 1;
         for (u32 i = 0; i < n; i++) {
-            c ^= g->win[at + i];
+            c ^= g->o[at + i];
             c = (c >> 4) ^ g->ct[c & 15];
             c = (c >> 4) ^ g->ct[c & 15];
         }
         g->crc = ~c;
         g->wout += n;
-        if (sink && !sink(g->win + at, (int)n, ctx)) return 0;
+        if (sink && !sink(g->o + at, (int)n, ctx)) return 0;
     }
     return 1;
 }
 
 static int gz_put(Gunzip *g, u8 v, int (*sink)(const u8 *, int, void *), void *ctx)
 {
-    g->win[g->wpos++ & (GZ_WIN - 1)] = v;
+    if (g->room && g->wpos >= g->room) return 0;
+    g->o[g->wpos++ & g->omask] = v;
     g->total++;
-    return g->wpos - g->wout < GZ_WIN || gz_flush(g, sink, ctx);
+    return g->room || g->wpos - g->wout < GZ_WIN || gz_flush(g, sink, ctx);
 }
 
 static int gz_bits(Gunzip *g, const u8 **in, const u8 *end, int n)
@@ -279,7 +282,7 @@ static int gz_feed(Gunzip *g, const u8 *in, u32 n, int (*sink)(const u8 *, int, 
             v = dbase[g->sym] + gz_take(g, dext[g->sym]);
             if (v > g->total || v > GZ_WIN) goto bad;
             while (g->len--)
-                if (!gz_put(g, g->win[(g->wpos - v) & (GZ_WIN - 1)], sink, ctx)) goto stop;
+                if (!gz_put(g, g->o[(g->wpos - v) & g->omask], sink, ctx)) goto stop;
             g->state = GZS_SYM;
             break;
         case GZS_CRC:
@@ -308,4 +311,12 @@ stop:
     return g->state = GZ_STOP;
 bad:
     return g->state = GZ_ERR;
+}
+static inline int gz_unpack(Gunzip *g, const u8 *src, u32 n, u8 *dst, u32 cap)
+{
+    gz_init(g, dst);
+    g->omask = 0xFFFFFFFFu;
+    g->room = cap;
+    if (!cap || gz_feed(g, src, n, 0, 0) != GZ_DONE) return -1;
+    return (int)g->wpos;
 }

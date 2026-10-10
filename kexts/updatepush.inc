@@ -6,7 +6,7 @@ static struct { u32 crc, sect, i; u8 *buf; } boot_sum = {0, 1, 0, 0};
 static int boot_sum_step(void)
 {
     const FloppyOps *disk=api->service_get("disk.floppy");
-    int batch=disk&&disk->abi==FLOPPY_ABI;u32 count=batch?FLOPPY_TRACK_SECTORS:1;
+    int batch=disk&&disk->abi>=FLOPPY_ABI;u32 count=batch?FLOPPY_TRACK_SECTORS:1;
     if(!boot_sum.buf){
         if(!(boot_sum.buf=api->kmalloc(FLOPPY_TRACK_SECTORS*512)))return -1;
         api->mem_track("Kernel comparison",boot_sum.buf,FLOPPY_TRACK_SECTORS*512);

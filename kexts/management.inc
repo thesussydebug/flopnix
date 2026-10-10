@@ -199,7 +199,7 @@ static void managed_commit(void)
     }
     u32 len=api->strlen(target);
     if(len>=3&&!api->strcasecmp(target+len-3,".kx")){
-        KextHeader header;int r=files->check(upload,upload_size,&header);
+        KextHeader header;int r=kext_check(upload,upload_size,&header);
         if(r){upload_clear();error(r==43?"Kext needs a newer kernel API; file unchanged":"Invalid kext image; file unchanged");return;}
     }
     if((target[0]=='u'&&api->usb_gen()!=managed_usb_gen)||

@@ -44,6 +44,10 @@ static inline const char *sh_usage(const char *c)
     if (sc_eq(c, "ntp"))      return "ntp [+/-H:MM] - set the clock from the net";
     if (sc_eq(c, "pack"))     return "pack <file>   - create <file>.fpa archive";
     if (sc_eq(c, "unpack"))   return "unpack <file> - extract .fpa beside archive (no overwrite); .pz supported";
+    if (sc_eq(c, "telnet"))   return "telnet <host> [port] - talk to a text service (Terminal only)";
+    if (sc_eq(c, "sysmem"))   return "sysmem [on|off] - keep the system files in memory so the floppy can come out";
+    if (sc_eq(c, "diskcopy")) return "diskcopy [write [over]|drop] - read the disk in the drive into memory, then write it to another";
+    if (sc_eq(c, "gunzip"))   return "gunzip <file.gz> [output] - decompress a gzip file (no overwrite)";
     if (sc_eq(c, "wget"))     return "wget <url> [f]- fetch http (host or full URL)";
     if (sc_eq(c, "lspci"))    return "lspci         - list PCI devices";
     if (sc_eq(c, "set"))      return "set [video|mouse|net|shot ...] - config";
@@ -92,14 +96,14 @@ static inline const char *sh_usage(const char *c)
 
 static const char *const sh_names[] = {"uniq","strings","crc32","cmp",
     "about", "beep", "bios", "bootsec", "cal", "calc", "cat", "cd", "clear",
-    "cls", "cp", "date", "defrag", "disk", "dmesg", "dns", "du", "echo",
-    "edit", "fetch", "find", "free", "fscan", "grep", "head", "help",
+    "cls", "cp", "date", "defrag", "disk", "diskcopy", "dmesg", "dns", "du", "echo",
+    "edit", "fetch", "find", "free", "fscan", "grep", "gunzip", "head", "help",
     "hexdump", "history", "ifconfig", "kext", "kill", "kupdate", "open", "confsec",
     "lspci",
     "ls", "map", "matrix", "mkdir", "mv", "ntp", "pack", "panic", "ping", "ps", "pwd",
     "rainbow",
-    "reboot", "ring3", "rm", "rmdir", "set", "settings", "shutdown", "sort", "stat",
-    "tail", "testram", "threads", "touch", "tree", "ucat", "ucp", "uls", "unpack",
+    "reboot", "ring3", "rm", "rmdir", "set", "settings", "shutdown", "sort", "stat", "sysmem",
+    "tail", "telnet", "testram", "threads", "touch", "tree", "ucat", "ucp", "uls", "unpack",
     "uname", "uptime", "urm", "usb", "ver", "wc", "wget", "whoami"
 };
 #define SH_NNAMES ((int)(sizeof sh_names / sizeof sh_names[0]))

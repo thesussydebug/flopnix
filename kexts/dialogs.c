@@ -189,7 +189,8 @@ static char pk_name[64], pk_error[40];
 static char pk_sel[80];
 static void (*pk_cb)(const char *, void *);
 static void *pk_ctx;
-static char pk_names[PK_MAX][64];
+static char (*pk_names)[64];
+static int  pk_cap;
 static u8   pk_isdir[PK_MAX];
 static FatEnt fe_scratch[80];
 
@@ -202,6 +203,11 @@ static int pk_match(const char *nm)
 static void pk_add(const char *nm, int isdir)
 {
     if (pk_n >= PK_MAX) return;
+    if (pk_n >= pk_cap) {
+        char (*grown)[64] = api->krealloc(pk_names, (u32)(pk_cap + 32) * 64);
+        if (!grown) return;
+        pk_names = grown; pk_cap += 32;
+    }
     api->strlcpy(pk_names[pk_n], nm, 64);
     pk_isdir[pk_n++] = (u8)isdir;
 }
@@ -253,6 +259,8 @@ static void pk_choose(const char *spec)
 {
     void (*cb)(const char *, void *) = pk_cb; void *cx = pk_ctx;
     api->set_overlay(0, 0);
+    pk_n = pk_cap = 0;
+    api->kfree(pk_names); pk_names = 0;
     if (cb) cb(spec, cx);
 }
 

@@ -1,14 +1,14 @@
 /* Checks a folder tree before copying its files. */
 #include "filepaths.inc"
-static int folder_copy_a(const Kapi *k,const char *src,const char *dst)
+static int folder_copy_b(const Kapi *k,const char *src,const char *dst,char (*names)[FS_NAMELEN],int cap)
 {
-    static char names[FS_NFILES][FS_NAMELEN],targets[FS_NFILES][FS_NAMELEN];
-    static u32 sizes[FS_NFILES];static u8 dirs[FS_NFILES];
-    if(!fs_dirname_ok(dst)||!k->strcmp(src,dst)||fs_under(dst,src)||k->fs_exists(dst)||k->fs_dir_count(dst))return -1;
+    char (*targets)[FS_NAMELEN]=names+cap;
+    u32 *sizes=(u32 *)(targets+cap);u8 *dirs=(u8 *)(sizes+cap);
     int n=0,free=0;u32 sectors=0;
     for(int i=0;i<FS_NFILES;i++){
         FsEnt *e=k->fs_slot(i);if(!e||!e->used){free++;continue;}
         if(!fs_under(e->name,src))continue;
+        if(n>=cap)return -1;
         if(!fs_rejoin(e->name,src,dst,targets[n],ft_namecap(k))||k->fs_exists(targets[n]))return -1;
         k->strlcpy(names[n],e->name,FS_NAMELEN);sizes[n]=e->size;dirs[n]=!!(e->attr&FS_ATTR_DIR);
         if(dirs[n]&&!fs_dirname_ok(targets[n]))return -1;
@@ -27,4 +27,15 @@ static int folder_copy_a(const Kapi *k,const char *src,const char *dst)
         if(failed)return -3;
     }
     return 0;
+}
+static int folder_copy_a(const Kapi *k,const char *src,const char *dst)
+{
+    if(!fs_dirname_ok(dst)||!k->strcmp(src,dst)||fs_under(dst,src)||k->fs_exists(dst)||k->fs_dir_count(dst))return -1;
+    int cap=1;
+    for(int i=0;i<FS_NFILES;i++){FsEnt *e=k->fs_slot(i);if(e&&e->used&&fs_under(e->name,src))cap++;}
+    char (*names)[FS_NAMELEN]=k->kmalloc((u32)cap*(2*FS_NAMELEN+5));
+    if(!names)return -2;
+    int r=folder_copy_b(k,src,dst,names,cap);
+    k->kfree(names);
+    return r;
 }

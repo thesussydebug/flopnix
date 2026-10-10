@@ -32,7 +32,6 @@ static void tprint(const char *s)
     const ShellTermOps *o = tops();
     if (o) o->print(s);
 }
-static void tputc(char c) { char s[2] = { c, 0 }; tprint(s); }
 
 const char *shell_cwd_get(void) { return STREAM ? STREAM->cwd : ""; }
 
@@ -63,78 +62,6 @@ int shell_win_close(int i)
     if (i < 0 || i >= MAXWIN || !wins[i].used) return 0;
     win_close(i);
     return 1;
-}
-
-__attribute__((minsize)) void dmesg_print(void)
-{
-    char buf[96];
-    u8 d = BOOTINFO->diag;
-    kfmt(buf, sizeof buf, "boot stage %d/8, diag %02x\n", BOOTINFO->stage, d);
-    tprint(buf);
-    tprint("loader:  kernel loaded (single-sector reads)\n");
-    {
-        extern u8 cfg_was_blank;
-        if (d & BD_CFG_HUNG)       tprint("config:  READ HUNG - watchdog skipped it\n");
-        else if (!(d & BD_CFG_OK)) tprint("config:  read failed - using defaults\n");
-        else if (cfg_was_blank)    tprint("config:  blank - using defaults\n");
-        else                       tprint("config:  loaded from disk\n");
-    }
-    kfmt(buf, sizeof buf, "font:    %s\n",
-         (d & BD_FONT_HUNG) ? "GRAB HUNG (E01) - text may be blank" : "bios 8x16 ok");
-    tprint(buf);
-    kfmt(buf, sizeof buf, "memory:  %u MB%s\n", BOOTINFO->mem_kb / 1024,
-         (d & BD_MEM_HUNG) ? " (DETECT HUNG, E02 - assumed 4 MB)" : "");
-    tprint(buf);
-    kfmt(buf, sizeof buf, "video:   %dx%dx8 %s%s%s\n", SW, SH,
-         BOOTINFO->vbe == 2 ? "VESA banked" :
-         BOOTINFO->vbe     ? "VESA LFB" : "VGA",
-         (d & BD_VBE_HUNG) ? " (VESA HUNG, E03 - fell back)" : "",
-         (d & BD_VGA_HUNG) ? " (VGA SET HUNG, E04)" : "");
-    tprint(buf);
-    kfmt(buf, sizeof buf, "a20:     %s\n",
-         (d & BD_A20_HUNG) ? "BIOS CALL HUNG (E05) - used controller" : "ok");
-    tprint(buf);
-    tprint((d & BD_ANY_HANG) ? "watchdog recovered from hung BIOS call(s)\n"
-                             : "no BIOS hangs caught\n");
-    kfmt(buf, sizeof buf, "timer:   %s\n",
-         timer_alive ? "tick alive" : "TICK DEAD (E10) - delays estimated");
-    tprint(buf);
-    tprint("irqs:   ");
-    for (int i = 0; i < 16; i++) {
-        if (!irq_counts[i]) continue;
-        kfmt(buf, sizeof buf, " %d:%u", i, irq_counts[i]);
-        tprint(buf);
-    }
-    tputc('\n');
-    if (boot_errs[0]) {
-        kfmt(buf, sizeof buf, "self-check FAILED:%s (see README)\n", boot_errs);
-        tprint(buf);
-    } else tprint("self-check: all ok\n");
-    {
-        static char kl[2048];
-        if (klog_read(kl, sizeof kl) > 0) {
-            tprint("--- kernel log ---\n");
-            tprint(kl);
-            if (kl[strlen(kl) - 1] != '\n') tputc('\n');
-        }
-    }
-    {
-        int ov = thread_overflowed();
-        if (ov >= 0) {
-            char tb[56];
-            kfmt(tb, sizeof tb, "thread %d blew its stack (killed)\n", ov);
-            tprint(tb);
-        }
-    }
-    {
-
-        char lp[160];
-        loop_prof_fmt(lp, sizeof lp);
-        tprint("--- loop (ms) ---\n");
-        tprint(lp);
-        tputc('\n');
-        loop_prof_reset();
-    }
 }
 
 void threads_report(char *out, int cap)

@@ -18,6 +18,7 @@ __pycache__/
 !/tools/appcatalog.py
 !/tools/checkbuild.py
 !/tools/fscp.py
+!/tools/kxpack.py
 !/tools/mkkext.sh
 !/tools/update_meta.py
 /manager/

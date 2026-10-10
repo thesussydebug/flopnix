@@ -17,7 +17,8 @@ static u32 pm_pd[1024] __attribute__((aligned(4096)));
 typedef struct {u32 magic,session,op,seq,address,length,status,crc;} PmHeader;
 static struct {PmHeader header;u8 data[PM_BYTES];} pm_reply;
 typedef struct {char name[24];u32 base,size,id,private_base,private_size;int status;u32 kind;} PmModule;
-static PmModule pm_modules[FS_NFILES];
+#define PM_MODS 96
+static PmModule pm_modules[PM_MODS];
 static u32 pm_system[24];
 static char pm_log[2048],pm_trace[4096],pm_debug[2048];
 static FaultRec pm_faults[12];
@@ -96,6 +97,7 @@ static void pm_snapshot(void)
     pm_system[20]=net_gw;pm_system[21]=diag_rx;pm_system[22]=diag_tx;
     int count=*pm_core->module_count;
     if(count<0 || count>FS_NFILES){count=0;pm_extra[7]|=1;}
+    if(count>PM_MODS)count=PM_MODS;
     pm_system[23]=(u32)count;
     for(int i=0;i<count;i++){
         const KextInfo *k=&pm_core->modules[i];PmModule *d=&pm_modules[i];

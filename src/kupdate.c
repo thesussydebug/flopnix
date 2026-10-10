@@ -42,7 +42,8 @@ int kernel_update_data(const u8 *img, u32 size, char *err, int errcap)
     }
     if (sum != want_sum) FAILU("update file is corrupt - re-copy it");
     u8 boot[512];
-    if(fdc_read(0,boot))FAILU("cannot read boot sector - kernel unchanged");
+    if(fs_hooked(FSH_KERNEL,0,0,0)!=FSH_PASS)FAILU("the system disk is not in the drive");
+    if(!fs_ensure()||fdc_read(0,boot))FAILU("cannot read boot sector - kernel unchanged");
     batch=kmalloc(FLOPPY_TRACK_SECTORS*512);
     if(batch)mem_track("Kernel readback",batch,FLOPPY_TRACK_SECTORS*512);
     u8 *verify=batch?batch:sbuf;

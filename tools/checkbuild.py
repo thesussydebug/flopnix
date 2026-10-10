@@ -9,6 +9,7 @@ import subprocess
 import tempfile
 import zlib
 from fscp import entries, ensure_fs, layout
+from kxpack import SIZE, boot_kind, packed, unpack
 
 root = Path(__file__).resolve().parents[1]
 names = re.search(r'for n in ([\w ]+); do', (root/'build.sh').read_text()).group(1).split()
@@ -60,7 +61,10 @@ with tempfile.TemporaryDirectory(prefix='flopnix-check-') as tmp:
         subprocess.run([objcopy, '--strip-debug',
                         str(root/'out'/Path(name).with_suffix('.kxo')),
                         str(output)], check=True)
-        assert output.read_bytes() == (root/'built/kexts'/name).read_bytes(), name
+        shipped = (root/'built/kexts'/name).read_bytes()
+        assert output.read_bytes() == unpack(shipped), name
+        assert packed(shipped) == (name not in ('unpack.kx', 'net.kx', 'remote.kx', 'shell.kx')), name
+        assert not packed(shipped) or shipped[SIZE-4] == boot_kind(unpack(shipped)), name
 
 files = {e['name']: e for e in entries(image) if e['used']}
 assert {n for n in files if n.endswith('.kx')} == {'sys/'+n for n in expected}
@@ -71,7 +75,8 @@ for name in sorted(expected):
     assert image[offset:offset+entry['size']] == built, name
 present = {p.name for p in (root/'built').iterdir()}
 assert present - {'flopnix_minimal.img'} == {'flopnix.img', 'flopnix.ku', 'flopnix-update.json', 'kexts'}
-print(f'PASS: image, kernel update, boot checksum, and all {len(expected)} production extensions match.')
+stored = sum(packed((root/'built/kexts'/name).read_bytes()) for name in expected)
+print(f'PASS: image, kernel update, boot checksum, and all {len(expected)} production extensions match ({stored} packed).')
 if 'flopnix_minimal.img' in present:
     small = (root/'built/flopnix_minimal.img').read_bytes()
     ensure_fs(small)

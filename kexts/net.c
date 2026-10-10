@@ -3,6 +3,7 @@
 #include "debug.h"
 #include "nettext.h"
 #include "netlisten.h"
+#include "netstream.h"
 #include "http_core.inc"
 #pragma clang attribute push(__attribute__((minsize)), apply_to = function)
 #include "gunzip.inc"
@@ -529,10 +530,6 @@ void net_init(void)
     np_load(CFG, &prefs);
     dns_cache_init(&dnsc);
     rx_mss = tcp_mss_for_mtu(prefs.mtu);
-    if (!rxq.buf) {
-        u8 *store = api->kmalloc(RXQ_N * RXQ_FRAME);
-        if (store) { api->mem_track("NIC receive queue", store, RXQ_N * RXQ_FRAME); rxq_init(&rxq, store); }
-    }
     nic_kind = NIC_NONE; io = rio = tul_io = pc_io = 0;
     io = (!prefs.adapter || prefs.adapter == 1) ? find_ne2k_pci() : 0;
     ne_is_pci = io != 0;
@@ -561,6 +558,10 @@ void net_init(void)
     else if (nic_kind == NIC_RTL8139) rtl_init();
     else if (nic_kind == NIC_TULIP) tul_init();
     else if (nic_kind != NIC_PCNET) return;
+    if (!rxq.buf) {
+        u8 *store = api->kmalloc(RXQ_N * RXQ_FRAME);
+        if (store) { api->mem_track("NIC receive queue", store, RXQ_N * RXQ_FRAME); rxq_init(&rxq, store); }
+    }
     rx_irq_start();
 
     if (CFG->net_mode == 1) {
@@ -928,8 +929,8 @@ static int net_transfer_locked(u32 ip, u16 port, const char *host,
     http_diag.stage=NH_PREFLIGHT;http_diag.result=0;
     hs_queue=api->kmalloc(HSQ);if(!hs_queue){http_diag.result=-4;tcp_busy=0;return -4;}
     api->mem_track("HTTP receive queue",hs_queue,HSQ);
-    hs_gz=host&&api->heap_avail()>=GZ_ROOM?api->kmalloc(sizeof *hs_gz):0;
-    if(hs_gz)api->mem_track("HTTP gzip window",hs_gz,sizeof *hs_gz);
+    hs_gz=host&&api->heap_avail()>=GZ_ROOM?api->kmalloc(sizeof *hs_gz+GZ_WIN):0;
+    if(hs_gz)api->mem_track("HTTP gzip window",hs_gz,sizeof *hs_gz+GZ_WIN);
     const char *coding=hs_gz?"gzip":"identity";
     static char req[5120];
     if(strlen(path)>500 || (host&&strlen(host)>127)) {result=-1;goto finish;}
@@ -966,7 +967,7 @@ static int net_transfer_locked(u32 ip, u16 port, const char *host,
     }
     hs_sink = sink; hs_ctx = ctx;
     hr_init(&hs_http);hs_raw=!host;hs_abort=0;hs_info=info;hs_info_sent=0;
-    if(hs_gz)gz_init(hs_gz);
+    if(hs_gz)gz_init(hs_gz,(u8 *)(hs_gz+1));
     hs_gz_fed=0;
     hs_read=hs_write=0;
     hs_got = 0;
@@ -1736,9 +1737,11 @@ int kext_entry(const Kapi *k)
     if (k->version < KAPI_VERSION) return 1;
     api = k;
     net_init();
+    if (nic_kind == NIC_NONE) return KEXT_IDLE;
     api->register_net(&net_ops);
     api->register_service("net.text",&text_ops);
     api->register_service("net.listen",&listen_ops);
+    api->register_service("net.stream",&stream_ops);
     api->register_service("net.http",&http_ops);
     api->register_service("net.http.form",&http_form_ops);
     api->register_service("net.http.agent",&http_agent_ops);

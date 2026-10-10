@@ -28,15 +28,6 @@ typedef struct __attribute__((packed)) {
     u8  stage;
     u16 vbe_mode;
 } BootInfo;
-#define BD_CFG_OK    0x01
-#define BD_CFG_HUNG  0x02
-#define BD_FONT_HUNG 0x04
-#define BD_MEM_HUNG  0x08
-#define BD_VGA_HUNG  0x10
-#define BD_VBE_HUNG  0x20
-#define BD_A20_HUNG  0x40
-#define BD_ANY_HANG  0x80
-
 #define BOOTINFO ((BootInfo *)0x7000)
 #define FONT8x16 ((u8 *)0x5000)
 
@@ -422,6 +413,13 @@ int  fdc_verify(u32 lba, const u8 *buf, u32 count);
 int  disk_write(u32 lba, const u8 *buf);
 int  fs_bad(int op, u32 lba);
 void fdc_tick(void);
+extern u8 fdc_changed;
+int  fdc_peek(void);
+extern u32 fs_mounts;
+int  fs_media(void);
+extern FsHook fs_hook;
+int  fs_hooked(int op, const char *a, const void *b, u32 n);
+extern void (*pump_hook)(void);
 
 int   fs_ensure(void);
 FsEnt *fs_slot(int i);
@@ -620,7 +618,6 @@ void app_key(Win *w, int k);
 void app_wheel(Win *w, int dz);
 void shell_print(const char *s);
 u32  used_kb(void);
-void dmesg_print(void);
 void term_clear(void);
 int  term_fx(int mode);
 const char *term_hist(int i);
