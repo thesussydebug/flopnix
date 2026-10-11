@@ -103,7 +103,7 @@ void fault_handle(const u32 *frame)
 
     if (ring3_fault(vec, err)) return;
     int ft = thr_self;
-    if (fault_armed[ft]) {
+    if (fault_armed[ft] && (!in_irq || irq_guard)) {
         fault_armed[ft] = 0;
         fault_vec = vec;
         fault_err = err;

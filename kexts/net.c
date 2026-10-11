@@ -1021,7 +1021,8 @@ static int net_transfer_locked(u32 ip, u16 port, const char *host,
 
     if(hs_gz&&hs_gz_fed&&!gz_done(hs_gz)&&!hs_http.error&&hr_finish(&hs_http)){hs_http.error=-6;hs_abort=1;}
     if(info)memcpy(info,&hs_http.info,sizeof *info);
-    result=hs_abort||(tcp_event&TA_ERROR)||(!hs_raw&&!hr_finish(&hs_http))?(hs_http.error?hs_http.error:-4):hs_raw?0:hs_http.info.status;
+    int framed=!hs_raw&&!hs_http.error&&hs_http.state==7;
+    result=hs_abort||((tcp_event&TA_ERROR)&&!framed)||(!hs_raw&&!hr_finish(&hs_http))?(hs_http.error?hs_http.error:-4):hs_raw?0:hs_http.info.status;
     goto finish;
 fail3:
     result=-3;

@@ -103,24 +103,36 @@ __attribute__((minsize)) int thread_create(void (*fn)(void), const char *name)
     return s;
 }
 
+static void thr_reap(int t)
+{
+    int me = thr_self;
+    thr_self = t;
+    mtx_unwind(0);
+    worker_unwind(nopreempt);
+    thr_self = me;
+    worker_dead(t);
+}
+
 static void reschedule(void)
 {
     if (!thr_on) return;
 
-    if (!stack_ok(thr_self)) {
-        thr_overflow = thr_self;
-        panic_threads[thr_self].state = THR_DEAD;
-        if (!thr_testing) {
-            char m[56];
-            kfmt(m, sizeof m, "thread %d (%s) BLEW ITS STACK - killed",
-                 thr_self, panic_threads[thr_self].name);
-            klog(m); klog("\n");
-            ktrace(m);
-        }
-    }
     unsigned char st[THR_MAX];
-    for (int i = 0; i < THR_MAX; i++)
-        st[i] = stack_ok(i) ? panic_threads[i].state : THR_DEAD;
+    for (int i = 0; i < THR_MAX; i++) {
+        if (!stack_ok(i) && panic_threads[i].state != THR_FREE && panic_threads[i].state != THR_DEAD) {
+            thr_overflow = i;
+            panic_threads[i].state = THR_DEAD;
+            if (!thr_testing) {
+                char m[56];
+                kfmt(m, sizeof m, "thread %d (%s) BLEW ITS STACK - killed",
+                     i, panic_threads[i].name);
+                klog(m); klog("\n");
+                ktrace(m);
+            }
+            thr_reap(i);
+        }
+        st[i] = panic_threads[i].state;
+    }
     int nxt = sched_next(st, THR_MAX, thr_self);
     if (nxt < 0 || nxt == thr_self) return;
 
@@ -282,6 +294,9 @@ void mtx_lock(Mutex *m)
     if (!thr_on) return;
     for (;;) {
         u32 f = irq_save();
+        if (m->held && m->owner >= 0 && panic_threads[m->owner].state == THR_DEAD) {
+            m->held = 0; m->owner = -1; m->depth = 0;
+        }
         if (!m->held || m->owner == thr_self) {
             if (!m->held) { m->held = 1; m->owner = thr_self; m->depth = 0; }
             m->depth++;
@@ -336,6 +351,9 @@ void mtx_unwind(int snap)
         klog("fault recovery released a leaked lock\n");
     }
 }
+
+int guard_snap(void) { return mtx_held_count() | nopreempt << 16; }
+void guard_unwind(int snap) { preempt_restore(snap >> 16); mtx_unwind(snap & 0xffff); }
 
 int thread_kext_busy(int owner)
 {

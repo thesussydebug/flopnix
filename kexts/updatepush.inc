@@ -30,6 +30,20 @@ static int push_data(const u8 *data,int n,void *ctx)
     }
     return 1;
 }
+static u8 push_key[16];
+static int push_paired(void)
+{
+    if(!push_key_state){
+        UpdatePrefs p;push_key_state=2;
+        if(api->fs_read("sys/update.cfg",(u8 *)&p,sizeof p)==(int)sizeof p&&
+           (p.magic==0x31505546||p.magic==0x32505546)&&p.crc==api->crc32(&p,sizeof p-4)&&
+           !p.code[32]&&ku_pair_key(p.code,push_key)){
+            u8 any=0;for(int i=0;i<16;i++)any|=push_key[i];
+            if(any)push_key_state=1;
+        }
+    }
+    return push_key_state==1;
+}
 static void push_tick(void *ctx)
 {
     (void)ctx;if(busy)return;
@@ -42,6 +56,10 @@ static void push_tick(void *ctx)
         push_transport->listen(r?0:boot_sum.crc);push_listening=1;
     }
     KuOffer offer;if(!push_transport->take(&offer))return;
+    if(!push_paired()||!ku_offer_auth(&offer,push_key)){
+        const char *m=push_key_state==1?"Push rejected: pairing key mismatch.":"Push rejected: not paired. Enter the pairing code in Kernel Update.";
+        push_transport->status(KU_FAILED,0,m);say(m);return;
+    }
     busy=1;closing=0;ready=0;release=offer.release;push_progress=~0u;
     Download d={0};d.limit=release.size;
     const char *error=0;u32 outcome=KU_FAILED;char err[100];int shared=0;
@@ -68,7 +86,7 @@ static void push_tick(void *ctx)
     }
     api->busy_set("Kernel update","Verifying the download...",256);
     push_transport->status(KU_VERIFYING,256,"Verifying the download");
-    if(!ku_image(d.buf.data,d.len,&release)){error="Kernel verification failed. Nothing was installed.";goto done;}
+    if(!ku_offer_image(&offer,d.buf.data,d.len)||!ku_image(d.buf.data,d.len,&release)){error="Kernel verification failed. Nothing was installed.";goto done;}
     if(api->esc_pending()){error="Update cancelled. Kernel unchanged.";goto done;}
     push_transport->status(KU_INSTALLING,0,"Installing - keep power on and the floppy inserted");
     api->buffer_lock();result=api->kernel_update_data(d.buf.data,d.len,err,sizeof err);api->buffer_unlock();

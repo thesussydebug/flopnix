@@ -49,6 +49,9 @@ static inline int tcp_input(Tcb *t, int flags, u32 seq, u32 ack, int paylen,
     *del_len = 0;
     if (t->state == TS_CLOSED) return 0;
     if (flags & TCP_RST) {
+        int fits = t->state == TS_SYN_SENT ? (flags & TCP_ACK) && ack == t->snd_nxt
+                                           : tcp_seq_le(t->rcv_nxt, seq) && seq - t->rcv_nxt < 32768;
+        if (!fits) return 0;
         t->state = TS_CLOSED;
         return TA_ERROR | TA_CLOSED;
     }

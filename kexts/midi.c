@@ -149,16 +149,17 @@ static int parse_midi(const u8 *p, int n)
         u32 len = ((u32)p[off + 4] << 24) | ((u32)p[off + 5] << 16) |
                   ((u32)p[off + 6] << 8) | p[off + 7];
         u32 body = off + 8;
-        if (body + len > (u32)n) len = (u32)n - body;
+        if (len > (u32)n - body) len = (u32)n - body;
 
         MfTrack tr = { p + body, len, 0, 0, 0, 0 };
         u8 s, a, b;
         while (mf_next(&tr, &s, &a, &b)) {
             if (s == MF_META) {
 
-                if (a == 0x51 && tr.i >= 3 && body + tr.i <= (u32)n) {
+                if (a == 0x51 && b == 3 && tr.i >= 3 && tr.i <= len) {
                     const u8 *q = p + body + tr.i - 3;
-                    us_per_qn = ((u32)q[0] << 16) | ((u32)q[1] << 8) | q[2];
+                    u32 tempo = ((u32)q[0] << 16) | ((u32)q[1] << 8) | q[2];
+                    if (tempo) us_per_qn = tempo;
                 }
                 continue;
             }

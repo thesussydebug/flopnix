@@ -275,6 +275,19 @@ const u8 *net_mac_get(void)
     return use_net() ? nops->mac() : zero;
 }
 
+static struct {const FatOps *f;const NetOps *n;const DesktopOps *d;const DialogOps *g;int fo,no,dko,go;} svc_mark;
+void services_mark(void)
+{
+    svc_mark.f=fops;svc_mark.fo=fat_owner;svc_mark.n=nops;svc_mark.no=net_owner;
+    svc_mark.d=dops;svc_mark.dko=desk_owner;svc_mark.g=dlg;svc_mark.go=dlg_owner;
+}
+void services_rollback(int owner)
+{
+    if(fops&&fat_owner==owner){fops=svc_mark.f;fat_owner=svc_mark.fo;}
+    if(nops&&net_owner==owner){nops=svc_mark.n;net_owner=svc_mark.no;}
+    if(dops&&desk_owner==owner){dops=svc_mark.d;desk_owner=svc_mark.dko;}
+    if(dlg&&dlg_owner==owner){dlg=svc_mark.g;dlg_owner=svc_mark.go;}
+}
 int services_kext_busy(int owner)
 {
     return (fops && fat_owner==owner) || (nops && net_owner==owner) ||

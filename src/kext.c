@@ -396,6 +396,9 @@ static const KextPackOps *packer(void)
     const KextPackOps *p = service_get("kext.pack");
     return p && p->abi == KEXT_PACK_ABI ? p : 0;
 }
+static void hooks_mark(void);
+static void hooks_rollback(int owner);
+static void table_full(const char *what);
 static Mutex load_mutex;
 extern u8 gui_up;
 static void kext_report(const char *name,int status)
@@ -430,6 +433,13 @@ int kext_load(const char *name)
     kext_report(path,r);
     mtx_unlock(&load_mutex);
     return r;
+}
+
+static void load_restore(int resident, int pd_save)
+{
+    paging_space_switch(pd_save); cur_kext = resident;
+    if (resident >= 0 && resident < nkexts && kext_priv_len[resident] && space_of(resident) < 0)
+        paging_map_kext(kext_priv_phys[resident], kext_priv_len[resident]);
 }
 
 static int kext_load_locked(const char *name)
@@ -475,7 +485,7 @@ static int kext_load_locked(const char *name)
         arena=arena_save;arena_rw=rw_save;kext_pool_used=pool_save;next_space=ns_save;
         if(space>=0)paging_space_drop(space);
         if(priv_alloc){kfree(priv_alloc);priv_alloc=0;}
-        paging_space_switch(pd_save);cur_kext=resident;
+        load_restore(resident,pd_save);
         if(r!=42||!reclaim_one(0))break;
         space=-1;
     }
@@ -504,6 +514,7 @@ static int kext_load_locked(const char *name)
             lazy_register_type = lazy_types[li] - 1; lazy_state[li] = 1;
         }
         volatile int rc = 1;
+        hooks_mark();
         FAULT_GUARD(rc = entry(&kapi), klog("extension entry faulted\n"));
         loading_kext = -1; lazy_register_type = -1;
         r = rc ? 44 : 0; k->status = r;
@@ -513,10 +524,10 @@ static int kext_load_locked(const char *name)
             kfree(kext_symbols[slot]); kext_symbols[slot] = 0;
             rc = 1;
         }
-        if (rc) drop_load_hooks(slot);
+        if (rc) { drop_load_hooks(slot); hooks_rollback(slot); }
         if (li >= 0) lazy_state[li] = r ? 0 : 2;
     }
-    paging_space_switch(pd_save); cur_kext = resident;
+    load_restore(resident, pd_save);
     paging_arena_protect(ARENA_BASE, arena & ~0xFFFu, 0);
     preempt_enable();
     return r;
@@ -678,6 +689,7 @@ static int ncmds;
 
 int register_cmd(const char *name, const char *usage, void (*fn)(const char *))
 {
+    if (ncmds >= MAX_CMDS && name && fn) table_full("command");
     if (ncmds >= MAX_CMDS || !name || !fn) return -1;
     cmds[ncmds].name = name;
     cmds[ncmds].usage = usage;
@@ -713,6 +725,8 @@ int cmd_dispatch(const char *name, const char *args)
 
 static void (*shell_fn)(const char *line);
 static int shell_owner=-1;
+static void (*shell_mark)(const char *line);
+static int shell_owner_mark=-1;
 void register_shell(void (*fn)(const char *line)) { shell_fn = fn; shell_owner=kext_owner_now(); }
 int shell_fallback(const char *line)
 {
@@ -732,6 +746,7 @@ static int nopeners;
 int register_opener(const char *ext,
                     int (*fn)(const char *, const char *, const u8 *, int))
 {
+    if (nopeners >= MAX_OPENERS && ext && fn) table_full("opener");
     if (nopeners >= MAX_OPENERS || !ext || !fn) return -1;
     openers[nopeners].ext = ext;
     openers[nopeners].fn = fn;
@@ -819,6 +834,7 @@ int timer_add(u32 interval, void (*fn)(void *), void *ctx)
             timers[i].fn = fn;
             return i;
         }
+    table_full("timer");
     return -1;
 }
 
@@ -857,6 +873,7 @@ void timers_poll(void)
                 if (!fault_fallback[thr_self]) fault_show_banner(msg);
             }
             timers[i].fn = 0;
+            speaker_off();
         }));
         u32 took = cpu_now() - t0;
         if (took > timer_slow_cyc) { timer_slow_cyc = took; timer_slow = owner; }
@@ -878,6 +895,7 @@ int register_key_hook(int (*fn)(int k))
             khook_owner[i] = kext_owner_now();
             return 0;
         }
+    table_full("key hook");
     return -1;
 }
 
@@ -917,6 +935,7 @@ void register_shutdown(void (*fn)(void))
             shut_owner[i] = kext_owner_now();
             return;
         }
+    table_full("shutdown hook");
 }
 
 void shutdown_run(void)
@@ -930,8 +949,9 @@ void shutdown_run(void)
     }
 }
 
-#define NSERV 24
-static struct { char name[16]; const void *ops; int owner; } servs[NSERV];
+#define NSERV 32
+typedef struct { char name[16]; const void *ops; int owner; } Serv;
+static Serv servs[NSERV];
 static unsigned gfx_disabled;
 
 static unsigned graphics_bit(const char *name)
@@ -974,6 +994,7 @@ int register_service(const char *name, const void *ops)
             servs[i].owner = kext_owner_now();
             return 0;
         }
+    table_full("service");
     return -1;
 }
 
@@ -1023,6 +1044,7 @@ int on_event(void (*fn)(const char *, const char *))
     if (!fn) return -1;
     for (int i = 0; i < NLISTEN; i++)
         if (!listeners[i]) { listeners[i] = fn; lis_owner[i] = ks_owner(loading_kext, cur_kext); return 0; }
+    table_full("event listener");
     return -1;
 }
 void off_event(void (*fn)(const char *, const char *))
@@ -1070,6 +1092,32 @@ static void drop_load_hooks(int owner)
     for (int i = 0; i < NLISTEN; i++)
         if (lis_owner[i] == owner) listeners[i] = 0;
     app_work_queued(owner, 1);
+}
+
+static Serv servs_mark[NSERV];
+
+static void hooks_mark(void)
+{
+    for (int i = 0; i < NSERV; i++) servs_mark[i] = servs[i];
+    shell_mark = shell_fn; shell_owner_mark = shell_owner;
+    services_mark();
+}
+
+static void hooks_rollback(int owner)
+{
+    for (int i = 0; i < NSERV; i++)
+        if (servs[i].owner == owner) servs[i] = servs_mark[i];
+    if (shell_owner == owner) { shell_fn = shell_mark; shell_owner = shell_owner_mark; }
+    services_rollback(owner);
+    irq_drop_owner(owner);
+}
+
+static void table_full(const char *what)
+{
+    int o = ks_owner(loading_kext, cur_kext);
+    char m[80];
+    kfmt(m, sizeof m, "%s table full - refused for %s", what, o >= 0 ? kexts[o].name : "kernel");
+    klog(m); klog("\n");
 }
 
 static int can_unload(int owner)

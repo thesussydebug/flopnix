@@ -84,6 +84,7 @@ static volatile u32 mq[32];
 static volatile u32 mq_time[32];
 static volatile u32 mq_h, mq_t;
 static volatile u32 kq_mute, mq_mute;
+static volatile u8 kq_lost;
 
 void input_mute(void) { kq_mute = kq_t; mq_mute = mq_t; }
 
@@ -94,6 +95,15 @@ int kbd_pop(u8 *sc)
     *sc = kq[kq_h & 63];
     int r = (i32)(kq_mute - kq_h) > 0 ? 2 : 1;
     kq_h++;
+    return r;
+}
+
+int kbd_lost(void)
+{
+    u32 f = irq_save();
+    int r = kq_lost;
+    kq_lost = 0;
+    irq_restore(f);
     return r;
 }
 
@@ -133,6 +143,7 @@ int input_post(int mouse, u32 value)
         u32 t = kq_t;
         ok = t - kq_h < 64;
         if (ok) { kq[t & 63] = (u8)value; kq_t = t + 1; }
+        else kq_lost = 1;
     }
     irq_restore(f);
     return ok;
@@ -148,9 +159,9 @@ volatile u8 brk_req;
 volatile u32 brk_since;
 __attribute__((minsize)) static void drain_8042(void)
 {
-    for (;;) {
+    for (int n = 0; n < 256; n++) {
         u8 st = inb(0x64);
-        if (!(st & 0x01)) return;
+        if (!(st & 0x01) || st == 0xFF) return;
         u8 b = inb(0x60);
         if (st & 0x20) {
             u32 pk;
@@ -165,7 +176,7 @@ __attribute__((minsize)) static void drain_8042(void)
             if ((u32)(kq_t - kq_h) < 64) {
                 kq[kq_t & 63] = b;
                 kq_t++;
-            }
+            } else kq_lost = 1;
             if (k) { brk_req = (u8)k; brk_since = em_age; input_mute(); }
         }
     }
@@ -192,12 +203,22 @@ static void (*irq_fns[16])(void);
 
 static int irq_owner[16] = { -1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1 };
 
+volatile u8 irq_guard;
+
 /* Restores the page directory that was live, which can differ from kext_current() mid-load. */
 static void irq_call(int irq)
 {
     int resident = kext_current(), space = paging_space_current();
+    int ft = thr_self, nest = in_irq;
+    JmpBuf sav = fault_ctx[ft]; int asav = fault_armed[ft]; u8 gsav = irq_guard;
     kext_enter(irq_owner[irq]);
-    irq_fns[irq]();
+    if (fj_set(&fault_ctx[ft]) == 0) { fault_armed[ft] = 1; irq_guard = 1; irq_fns[irq](); }
+    else {
+        cli(); in_irq = nest;
+        irq_fns[irq] = 0; pic_mask(irq);
+        klog("IRQ handler faulted - line masked\n");
+    }
+    fault_ctx[ft] = sav; fault_armed[ft] = asav; irq_guard = gsav;
     kext_enter(resident);
     paging_space_switch(space);
 }
@@ -208,11 +229,17 @@ int irq_kext_busy(int owner)
     return 0;
 }
 
+void irq_drop_owner(int owner)
+{
+    for (int i = 0; i < 16; i++)
+        if (irq_fns[i] && irq_owner[i] == owner) irq_unregister(i);
+}
+
 int irq_register(int irq, void (*fn)(void))
 {
     if (irq < 0 || irq > 15 || !fn || irq_fns[irq]) return -1;
-    irq_fns[irq] = fn;
     irq_owner[irq] = kext_owner_now();
+    irq_fns[irq] = fn;
     pic_unmask(irq);
     if (irq >= 8) pic_unmask(2);
     return 0;
@@ -369,16 +396,21 @@ u32 bda_ebda_seg, bda_base_mem_kb;
 
 u32 pci_cfg_read(u8 bus, u8 dev, u8 fn, u8 off)
 {
+    u32 f = irq_save();
     outl(0xCF8, 0x80000000u | ((u32)bus << 16) | ((u32)dev << 11) |
                 ((u32)fn << 8) | (off & 0xFC));
-    return inl(0xCFC);
+    u32 v = inl(0xCFC);
+    irq_restore(f);
+    return v;
 }
 
 void pci_cfg_write(u8 bus, u8 dev, u8 fn, u8 off, u32 v)
 {
+    u32 f = irq_save();
     outl(0xCF8, 0x80000000u | ((u32)bus << 16) | ((u32)dev << 11) |
                 ((u32)fn << 8) | (off & 0xFC));
     outl(0xCFC, v);
+    irq_restore(f);
 }
 
 __attribute__((minsize)) int pci_find(u16 vendor, u16 device, int *bus, int *dev, int *fn)
@@ -402,25 +434,43 @@ __attribute__((minsize)) int pci_find(u16 vendor, u16 device, int *bus, int *dev
 
 static u8 cmos(u8 r)
 {
+    u32 f = irq_save();
     outb(0x70, r);
-    return inb(0x71);
+    u8 v = inb(0x71);
+    irq_restore(f);
+    return v;
 }
 
 static void cmos_w(u8 r, u8 v)
 {
+    u32 f = irq_save();
     outb(0x70, r);
     outb(0x71, v);
+    irq_restore(f);
 }
 
 static int frombcd(u8 v) { return (v >> 4) * 10 + (v & 0x0F); }
 static u8  tobcd(int v)  { return (u8)(((v / 10) << 4) | (v % 10)); }
 
+static void rtc_snapshot(u8 *r)
+{
+    static const u8 reg[7] = { 0, 2, 4, 7, 8, 9, 0x0B };
+    u8 prev[7];
+    for (int tries = 0; tries < 4; tries++) {
+        for (int i = 0; i < 100000 && (cmos(0x0A) & 0x80); i++) ;
+        for (int i = 0; i < 7; i++) r[i] = cmos(reg[i]);
+        if (tries && !memcmp(r, prev, 7)) return;
+        memcpy(prev, r, 7);
+    }
+}
+
 __attribute__((minsize)) void rtc_read(int *h, int *m, int *s, int *D, int *M, int *Y)
 {
-    for (int i = 0; i < 100000 && (cmos(0x0A) & 0x80); i++) ;
-    u8 ss = cmos(0), mm = cmos(2), hh = cmos(4);
-    u8 d = cmos(7), mo = cmos(8), yr = cmos(9);
-    u8 st = cmos(0x0B);
+    u8 r[7];
+    rtc_snapshot(r);
+    u8 ss = r[0], mm = r[1], hh = r[2];
+    u8 d = r[3], mo = r[4], yr = r[5];
+    u8 st = r[6];
     int pm = hh & 0x80;
     hh &= 0x7F;
     if (!(st & 4)) {
@@ -457,8 +507,11 @@ void dos_fmt(u32 dt, char *buf)
 
 __attribute__((minsize)) int rtc_write(int h, int m, int s, int D, int M, int Y)
 {
+    static const u8 mdays[12] = { 31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31 };
     if (h < 0 || h > 23 || m < 0 || m > 59 || s < 0 || s > 59 ||
         D < 1 || D > 31 || M < 1 || M > 12 || Y < 2000 || Y > 2099)
+        return -1;
+    if (D > mdays[M - 1] + (M == 2 && Y % 4 == 0))
         return -1;
     u8 st = cmos(0x0B);
     int hh = h, pm = 0;
@@ -487,5 +540,11 @@ void reboot(void)
     cli();
     kbc_wait_in();
     outb(0x64, 0xFE);
+    for (int i = 0; i < 100000; i++) io_wait();
+
+    outb(0xCF9, 0x06);
+    for (int i = 0; i < 100000; i++) io_wait();
+    static const struct __attribute__((packed)) { u16 limit; u32 base; } null_idt = { 0, 0 };
+    __asm__ volatile("lidt %0\n\tint3" :: "m"(null_idt));
     for (;;) hlt();
 }

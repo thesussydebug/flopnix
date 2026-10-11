@@ -31,7 +31,7 @@ static inline int mf_header(const u8 *p, u32 n, int *ntrk, u32 *first)
     if (!p || n < 14) return 0;
     if (p[0] != 'M' || p[1] != 'T' || p[2] != 'h' || p[3] != 'd') return 0;
     u32 len = ((u32)p[4] << 24) | ((u32)p[5] << 16) | ((u32)p[6] << 8) | p[7];
-    if (len < 6) return 0;
+    if (len < 6 || len > n - 8) return 0;
     int fmt = (p[8] << 8) | p[9];
     int tr  = (p[10] << 8) | p[11];
     int div = (p[12] << 8) | p[13];
@@ -84,7 +84,7 @@ static inline int mf_next(MfTrack *t, u8 *status, u8 *d1, u8 *d2)
         if (type == 0x2F) t->ended = 1;
         if (status) *status = MF_META;
         if (d1) *d1 = type;
-        if (d2) *d2 = 0;
+        if (d2) *d2 = len > 255 ? 255 : (u8)len;
 
         t->i += len;
         return 1;

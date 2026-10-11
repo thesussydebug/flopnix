@@ -497,22 +497,25 @@ void usb_poll(void)
         return;
     }
     if (verdict == USB_DB_NONE) return;
-    pend = -1;
     if (verdict == USB_DB_DROP) {
+        pend = -1;
         clear_port_changes();
         return;
     }
-    last_connected = connected;
 
     if (connected) {
 
         if (!usb_take()) return;
+        pend = -1;
+        last_connected = connected;
         ms_delay(150);
         dev_ok = enumerate();
         if (!dev_ok) { ms_delay(100); dev_ok = enumerate(); }
         usb_resync = 0;
         usb_give();
     } else {
+        pend = -1;
+        last_connected = connected;
         dev_ok = 0;
     }
     clear_port_changes();

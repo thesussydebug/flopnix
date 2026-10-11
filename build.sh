@@ -93,7 +93,7 @@ echo "== compiling kernel..."
 
 cc_kernel() {
     local f=$1 SZ=
-    case $f in fs|fdc|cpuacct|kernel|uhci|paging|apps|debug|emergency|cpu|mtrr|ring3|config|kupdate|fault|kext|uisvc|services) SZ=-Oz;; hw|heap|thread) SZ=-Os;; gui) SZ=-Oz;; esac
+    case $f in fs|fdc|cpuacct|kernel|uhci|paging|apps|debug|emergency|cpu|mtrr|ring3|config|kupdate|fault|kext|uisvc|services|hw|heap|thread) SZ=-Oz;; util|gfx) SZ=-Os;; gui) SZ=-Oz;; esac
     clang $CFLAGS $SZ -c src/$f.c -o out/$f.o || return 1
     echo "   $f.o: $(stat -c%s out/$f.o) bytes ${SZ:--O2}"
 }

@@ -41,6 +41,13 @@ int key_is_down(int k)
 
 void key_clear_held(void) { memset(keydown, 0, sizeof keydown); }
 
+static void kbd_resync(void)
+{
+    kb.e0 = kb.e1 = 0;
+    kb.shift_l = kb.shift_r = kb.ctrl = kb.alt_l = kb.alt_r = 0;
+    key_clear_held();
+}
+
 void handle_sc(u8 sc, int mute)
 {
 
@@ -56,6 +63,7 @@ int pump_keyboard(void)
     u32 f=irq_save();if(keyboard_owner>=0){irq_restore(f);return 0;}keyboard_owner=thr_self;irq_restore(f);
     u8 sc;int count=0,r;
     while(count<32&&(r=kbd_pop(&sc))){count++;handle_sc(sc,r>1);}
+    if(count<32&&kbd_lost())kbd_resync();
     keyboard_owner=-1;return count;
 }
 static volatile int mouse_owner=-1;

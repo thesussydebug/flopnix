@@ -434,7 +434,9 @@ void present(void)
 {
     gui_dirty = 1;
     if (!present_try()) return;
+    preempt_disable();
     gui_compose();
+    preempt_enable();
     flip();
     present_done();
 }
@@ -671,9 +673,11 @@ void worker_unwind(int preempt_snap)
 
 __attribute__((minsize)) int gui_pump(void)
 {
-    if (!gui_up || pump_inside) return 0;
+    u32 pf = irq_save();
+    if (!gui_up || pump_inside) { irq_restore(pf); return 0; }
     pump_inside = 1;
     pump_thr = thr_self;
+    irq_restore(pf);
     emergency_heartbeat();
     app_note_pump();
 

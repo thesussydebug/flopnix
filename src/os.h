@@ -9,7 +9,7 @@ typedef __builtin_va_list va_list;
 #define va_arg(v, t)   __builtin_va_arg(v, t)
 
 #define OS_NAME    "FLOPNIX"
-#define OS_VER     "0.8.10"
+#define OS_VER     "0.8.11"
 #ifndef OS_BUILD_DATE
 #define OS_BUILD_DATE "unknown"
 #endif
@@ -260,9 +260,9 @@ const FaultRec *fault_get(int i);
 #define FAULT_GUARD(body, recover) do {                               \
     int _ft = thr_self;                                               \
     JmpBuf _fsav = fault_ctx[_ft]; int _fasav = fault_armed[_ft];     \
-    int _msnap = mtx_held_count();                                    \
+    int _msnap = guard_snap();                                        \
     if (fj_set(&fault_ctx[_ft]) == 0) { fault_armed[_ft] = 1; body; } \
-    else { mtx_unwind(_msnap); surface_unlock(); clear_clip(); fault_notice(); recover; } \
+    else { guard_unwind(_msnap); surface_unlock(); clear_clip(); fault_notice(); recover; } \
     fault_ctx[_ft] = _fsav; fault_armed[_ft] = _fasav;                \
 } while (0)
 
@@ -309,6 +309,7 @@ int  mouse_init(void);
 int  mouse_has_wheel(void);
 int  kbd_pop(u8 *sc);
 int  kbd_cancel_pending(void);
+int  kbd_lost(void);
 int  mouse_pop(u32 *pk, u32 *when);
 int  input_post(int mouse, u32 value);
 extern int mouse_ax, mouse_ay;
@@ -321,6 +322,7 @@ void cpuid_raw(u32 leaf, u32 out[4]);
 void mmx_init(void);
 int  mmx_available(void);
 extern volatile int in_irq;
+extern volatile u8 irq_guard;
 
 int  key_is_down(int key);
 void key_clear_held(void);
@@ -384,6 +386,7 @@ void preempt_enable(void);
 int  preempt_depth(void);
 void preempt_restore(int d);
 void worker_unwind(int preempt_snap);
+void worker_dead(int t);
 void usb_unwind(void);
 int  usb_read_locked(u32 lba, u32 count, u8 *buf);
 int  usb_write_locked(u32 lba, u32 count, const u8 *buf);
@@ -394,6 +397,8 @@ void mtx_lock(Mutex *m);
 void mtx_unlock(Mutex *m);
 int  mtx_held_count(void);
 void mtx_unwind(int snap);
+int  guard_snap(void);
+void guard_unwind(int snap);
 void pci_cfg_write(u8 bus, u8 dev, u8 fn, u8 off, u32 v);
 int  pci_find(u16 vendor, u16 device, int *bus, int *dev, int *fn);
 int  rtc_write(int h, int m, int s, int D, int M, int Y);
@@ -530,6 +535,8 @@ void kext_trim_idle(void);
 void app_placeholder(int type,const AppDesc *desc);
 void paging_space_drop(int slot);
 void services_drop_owner(int owner);
+void services_mark(void);
+void services_rollback(int owner);
 void services_dialog_drop(void);
 int services_dialog_owner(void);
 
@@ -667,3 +674,4 @@ int kext_unload(int index);
 int thread_kext_busy(int owner);
 int services_kext_busy(int owner);
 int irq_kext_busy(int owner);
+void irq_drop_owner(int owner);

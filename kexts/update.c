@@ -13,6 +13,7 @@ static const Kapi *api;
 #include "appfield.h"
 typedef struct {u32 magic;char address[160],code[33];u8 pad[3];u32 floor,checksum;u8 reserved[28];u32 crc;} UpdatePrefs;
 static UpdatePrefs prefs;
+static int push_key_state;
 static char address[160],code[65],status[100];
 static AppField fields[2];
 static int focus,busy,closing,ready,installed;
@@ -54,7 +55,7 @@ static void save_report(void)
 }
 static int save_prefs(void)
 {
-    prefs.magic=0x32505546;prefs.crc=api->crc32(&prefs,sizeof prefs-4);
+    push_key_state=0;prefs.magic=0x32505546;prefs.crc=api->crc32(&prefs,sizeof prefs-4);
     if(api->fs_write("sys/update.cfg",(const u8 *)&prefs,sizeof prefs)){say("Could not save update settings to A:.");return 0;}return 1;
 }
 static int settings(void)

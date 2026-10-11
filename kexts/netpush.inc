@@ -25,7 +25,7 @@ static void push_status(u32 state,u32 progress,const char *detail)
 static void push_listen(u32 checksum)
 {
     if(push_enabled)return;
-    memcpy(push_hello.magic,"FXH1",4);push_hello.session=api->rand()^ticks^checksum^rtc_now_dos();
+    memcpy(push_hello.magic,"FXH2",4);push_hello.session=api->rand()^ticks^checksum^rtc_now_dos();
     if(!push_hello.session)push_hello.session=1;
     push_hello.checksum=checksum;push_hello.kernel=*(const u32 *)0x8004;
     push_hello.abi=api->version;memcpy(push_hello.mac,net_mac,6);

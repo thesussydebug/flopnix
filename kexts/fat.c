@@ -56,6 +56,7 @@ static u32 next_free = 2;
 static u32 freec_cache;
 static u8  freec_ok;
 static u8  fat32_nomirror;
+static u32 fsinfo_lba;
 
 static void fat_hint_reset(void)
 {
@@ -142,6 +143,12 @@ int fat_mount(void)
         }
     }
 
+    fsinfo_lba = 0;
+    if (fattype == 32) {
+        u32 fi = rd16(b + 48);
+        if (fi >= 1 && fi < reserved) fsinfo_lba = base + fi;
+    }
+
     strlcpy(vol_label, "USB", sizeof vol_label);
     fat_hint_reset();
 
@@ -190,14 +197,31 @@ static u32 run_len(u32 c, u32 bytes, u32 *next)
     *next = 0x0FFFFFFF;
     while (n * bytespc < bytes) {
         u32 nx = fat_next(c + n - 1);
-        if (nx != c + n) { *next = nx; break; }
+        if (nx != c + n || !valid_cluster(nx)) { *next = nx; break; }
         n++;
     }
     return n;
 }
 
+static int pre_write(void)
+{
+    if (usb_gen() != seen_gen) return -1;
+    if (fsinfo_lba) {
+        u32 l = fsinfo_lba;
+        u8 fi[512];
+        fsinfo_lba = 0;
+        if (usb_read(l, 1, fi) == 0 && rd32(fi) == 0x41615252u && rd32(fi + 484) == 0x61417272u) {
+            memset(fi + 488, 0xFF, 8);
+            usb_write(l, 1, fi);
+        }
+        cache_lba = 0xFFFFFFFF;
+    }
+    return 0;
+}
+
 static int io_write(u32 lba, u32 n, const u8 *data)
 {
+    if (pre_write() != 0) return -1;
     if (cache_lba - lba < n) cache_lba = 0xFFFFFFFF;
     if (usb_write(lba, n, data) == 0) return 0;
     cache_lba = 0xFFFFFFFF;
@@ -445,6 +469,7 @@ u32 fat_free_kb(void)
 
 static int wr(u32 lba, const u8 *data)
 {
+    if (pre_write() != 0) return -1;
     if (usb_write(lba, 1, data) != 0) { cache_lba = 0xFFFFFFFF; return -1; }
     memcpy(secbuf, data, 512);
     cache_lba = lba;
@@ -732,6 +757,15 @@ static char short_char(char c)
     return c;
 }
 
+static int name_chars_ok(const char *n)
+{
+    if (!n[0]) return 0;
+    for (const char *p = n; *p; p++)
+        if ((u8)*p < 32 || *p == '/' || *p == '\\' || *p == ':' || *p == '*' ||
+            *p == '?' || *p == '"' || *p == '<' || *p == '>' || *p == '|') return 0;
+    return 1;
+}
+
 static int lfn_slots(const char *f)
 {
     const char *dot=0;u32 n=strlen(f);int odd=0;
@@ -760,6 +794,37 @@ static int alias_for(u32 dclus, int r16, const char *f, u8 raw[11])
         if(r!=1)return r==2;
     }
     return 0;
+}
+
+static int dir_grow(u32 dclus, int r16)
+{
+    if (r16 || !valid_cluster(dclus)) return 0;
+    u32 tail = dclus, anchor = dclus, span = 1, walked = 0, n = 1;
+    for (;;) {
+        u32 next = fat_next(tail);
+        if (next == 0x0FFFFFFF) break;
+        if (!valid_cluster(next) || next == anchor) return 0;
+        tail = next;
+        n++;
+        if (++walked == span) { anchor = next; span *= 2; walked = 0; }
+    }
+    if ((n + 1) * spc * 16 > 65536) return 0;
+    u32 c = alloc_chain(1);
+    if (!c) return 0;
+    u8 z[512];
+    memset(z, 0, 512);
+    for (u32 s = 0; s < spc; s++)
+        if (wr(clus_lba(c) + s, z) != 0) { free_chain(c); return 0; }
+    if (fat_set(tail, c) != 0) { free_chain(c); return 0; }
+    return 1;
+}
+
+static int lfn_place(u32 dclus, int r16, const char *fname, int slots, u8 raw[11], DirRun *run)
+{
+    for (int grown = 0; ; grown++) {
+        if (alias_for(dclus, r16, fname, raw) && dir_run(dclus, r16, slots + 1, run)) return 1;
+        if (grown || !dir_grow(dclus, r16)) return 0;
+    }
 }
 
 static int put_run(const DirRun *r, int slots, const u8 *ent, const char *fname)
@@ -832,7 +897,7 @@ int fat_write(const char *path, const u8 *buf, u32 size)
     if (!fat_writable()) return -1;
     char dir[96]; const char *fname;
     split_path(path, dir, sizeof dir, &fname);
-    if (!fname[0]) return -1;
+    if (!name_chars_ok(fname)) return -1;
 
     u32 dclus; int r16;
     if (!resolve_dir(dir, &dclus, &r16)) return -1;
@@ -846,10 +911,12 @@ int fat_write(const char *path, const u8 *buf, u32 size)
     DirRun run; u32 oldc = 0; int wasdir = 0, found = 2;
     run.end_lba = 0;
     if (slots) {
-        if (!alias_for(dclus, r16, fname, raw) || !dir_run(dclus, r16, slots + 1, &run)) return -2;
+        if (!lfn_place(dclus, r16, fname, slots, raw, &run)) return -2;
     } else {
         if (!lookup) to_83(fname, raw);
         found = dir_slot(dclus, r16, raw, &run.lba[0], &run.off[0], &oldc, &wasdir);
+        if (found == 0 && dir_grow(dclus, r16))
+            found = dir_slot(dclus, r16, raw, &run.lba[0], &run.off[0], &oldc, &wasdir);
         if (found == 0) return -2;
         if (found == 1 && !lookup) return -1;
         if (found == 1 && wasdir) return -3;
@@ -1018,7 +1085,7 @@ int fat_mkdir(const char *path)
     if (!fat_writable()) return -1;
     char dir[96]; const char *fname;
     split_path(path, dir, sizeof dir, &fname);
-    if (!fname[0]) return -1;
+    if (!name_chars_ok(fname)) return -1;
 
     u32 dclus; int r16;
     if (!resolve_dir(dir, &dclus, &r16)) return -1;
@@ -1027,12 +1094,15 @@ int fat_mkdir(const char *path)
     if (slots < 0) return -1;
     if (slots) {
         if (dir_scan(dclus, r16, 1, fname, 0, 0, 0, 0, 0, raw)) return -1;
-        if (!alias_for(dclus, r16, fname, raw)) return -2;
+        DirRun probe;
+        if (!lfn_place(dclus, r16, fname, slots, raw, &probe)) return -2;
     } else to_83(fname, raw);
 
     DirRun run; u32 oldc = 0;
     run.end_lba = 0;
     int found = dir_slot(dclus, r16, raw, &run.lba[0], &run.off[0], &oldc, 0);
+    if (found == 0 && !slots && dir_grow(dclus, r16))
+        found = dir_slot(dclus, r16, raw, &run.lba[0], &run.off[0], &oldc, 0);
     if (found == 1) return -1;
     if (found == 0) return -2;
     if (slots && !dir_run(dclus, r16, slots + 1, &run)) return -2;
@@ -1085,8 +1155,10 @@ int fat_rename(const char *path, const char *newname)
     if (taken && strcasecmp(fname,newname)) return -1;
     int slots = lfn_slots(newname);
     if (slots < 0) return -1;
-    if (slots) { if (!alias_for(dclus, r16, newname, newraw)) return -1; }
-    else to_83(newname, newraw);
+    if (slots) {
+        DirRun probe;
+        if (!lfn_place(dclus, r16, newname, slots, newraw, &probe)) return -1;
+    } else to_83(newname, newraw);
 
     int same = 1;
     for (int i = 0; i < 11; i++) if (oldraw[i] != newraw[i]) { same = 0; break; }

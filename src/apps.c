@@ -332,6 +332,7 @@ static void app_recover(Win *w)
     }
     klog(msg);
     if (!fault_fallback[thr_self]) fault_show_banner(msg);
+    speaker_off();
     int idx = (int)(w - wins);
     if (idx >= 0 && idx < MAXWIN) win_close(idx);
 }
@@ -400,6 +401,7 @@ int app_stuck(u32 *elapsed)
     watched_thr=best;run_win=best<0?-1:jobs[best].win;app_io_tick=best<0?0:jobs[best].io;
     if(elapsed)*elapsed=age;return run_win;
 }
+void worker_dead(int t){jobs[t].active=jobs[t].kill=jobs[t].cancel=0;}
 void app_kill_request(int win)
 {
     for(int t=0;t<THR_MAX;t++)if(jobs[t].active&&jobs[t].win==win){jobs[t].cancel=1;jobs[t].kill=1;}

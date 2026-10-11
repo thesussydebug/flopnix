@@ -731,10 +731,11 @@ static void dk_backup(void)
 {
     char path[24], line[72];
     const FloppyOps *disk = api->service_get("disk.floppy");
-    u32 lost = 0, lba = 0, cyls = FH_CYLS, held = 0;
+    u32 lost = 0, lba = 0, cyls = FH_CYLS, held = 0, ugen;
     u8 *buf = 0;
     int rc = 0;
     if (!fat_mount() || !fat_writable()) { tprint("no writable USB drive\n"); return; }
+    ugen = api->usb_gen();
     if (fat_free_kb() < FH_TOTAL / 2) { tprint("not enough room on the USB drive\n"); return; }
     if (!bak_next(dk_bak_taken, 0, path, sizeof path)) { tprint("no free backup name\n"); return; }
     do {
@@ -756,7 +757,7 @@ static void dk_backup(void)
                 }
         }
         if (++held == cyls || lba + DK_CYL >= FH_TOTAL) {
-            rc = api->fat_append(path, buf, held * DK_CYL * 512);
+            rc = api->usb_gen() != ugen ? -9 : api->fat_append(path, buf, held * DK_CYL * 512);
             held = 0;
         }
         gui_pump();
@@ -768,8 +769,9 @@ static void dk_backup(void)
     }
     api->kfree(buf);
     if (rc) {
-        fat_delete(path);
-        tprint(rc == 1 ? "aborted\n" : rc == -2 ? "USB drive is full\n" : "USB write failed\n");
+        if (api->usb_gen() == ugen) fat_delete(path);
+        tprint(rc == 1 ? "aborted\n" : rc == -2 ? "USB drive is full\n" :
+               rc == -9 ? "USB drive changed - backup abandoned\n" : "USB write failed\n");
         return;
     }
     kfmt(line, sizeof line, "saved %s to USB\n", path + 1);

@@ -24,7 +24,7 @@ static int poly_scan(const GPt *p, int n, int y, int mode, i32 *spans, int cap)
 
     for (int i = 1; i < m; i++) {
         int vp = px[i], vd = pd[i], vs = pdir[i], j = i - 1;
-        while (j >= 0 && px[j] * vd > vp * pd[j]) {
+        while (j >= 0 && (long long)px[j] * vd > (long long)vp * pd[j]) {
             px[j + 1] = px[j]; pd[j + 1] = pd[j]; pdir[j + 1] = pdir[j]; j--;
         }
         px[j + 1] = vp; pd[j + 1] = vd; pdir[j + 1] = vs;

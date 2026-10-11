@@ -354,9 +354,9 @@ static int fs_rename_locked(const char *oldname, const char *newname)
 {
     if (!fs_name_ok(newname)) return -1;
     if (!fs_ensure()) return -1;
-    if (!strcmp(oldname, newname)) return 0;
     FsEnt *e = find(oldname);
     if (!e) return -1;
+    if (!strcmp(oldname, newname)) return 0;
     if (find(newname)) return -1;
     int l = 0;
     while (newname[l]) l++;

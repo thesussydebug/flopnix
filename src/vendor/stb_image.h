@@ -2973,7 +2973,7 @@ static int stbi__flopnix_band_rows(stbi__jpeg *z, int unit, int units);
 static int stbi__parse_entropy_coded_data(stbi__jpeg *z)
 {
    stbi__jpeg_reset(z);
-   if (STBI__BAND(z) && (z->progressive || z->scan_n != z->s->img_n)) return stbi__err("band","JPEG needs a whole-image decode");
+   if (STBI__BAND(z) && (z->progressive || z->scan_n != z->s->img_n || z->band > 1)) return stbi__err("band","JPEG needs a whole-image decode");
    if (!z->progressive) {
       if (z->scan_n == 1) {
          int i,j;
@@ -4041,6 +4041,7 @@ static int stbi__flopnix_band_rows(stbi__jpeg *z, int unit, int units)
    int k;
    unsigned int upto = (unsigned int) (unit + 1) * (z->s->img_n == 1 ? 8 : z->img_mcu_h);
    if (!stbi__band.ready && !stbi__flopnix_band_setup(z)) return 0;
+   z->band = 2;
    // the vertical filter reads one plane row ahead, so hold the last rows back
    if (unit + 1 >= units || upto > z->s->img_y) upto = z->s->img_y;
    else upto -= z->img_v_max;
